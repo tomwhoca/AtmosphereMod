@@ -120,7 +120,7 @@ std::mutex g_mutex;  // guards the fields below
 haze::Inputs g_inputs;
 bool g_have_ground = false;
 double g_last_lat = 0.0, g_last_lon = 0.0;
-bool g_loading = false;              // the sim reports 0, 0 (loading a flight)
+bool g_loading = false;              // the sim reports a placeholder position (loading a flight)
 haze::Metar g_held_metar;            // the aircraft's METAR, asked for where the aircraft isn't yet
 ULONGLONG g_held_since = 0;
 std::array<float, std::size(kDriven)> g_target = {};
@@ -269,11 +269,11 @@ void anchor_metar(HANDLE sim, const haze::Metar &metar, double request_lat, doub
     SimConnect_RequestFacilityData(sim, kDefAirport, kReqStation0 + n, metar.icao.c_str());
 }
 
-// While the sim loads a flight it reports the aircraft at 0, 0 (the EFB app
-// asks for that METAR too).
+// While the sim loads a flight it reports the aircraft at 0, 0, or at 0, 90
+// for the first flight after it starts (the EFB app asks for that METAR too).
 bool loading_position(double lat, double lon)
 {
-    return std::abs(lat) < 0.01 && std::abs(lon) < 0.01;
+    return std::abs(lat) < 0.01 && (std::abs(lon) < 0.01 || std::abs(lon - 90.0) < 0.01);
 }
 
 // Caller holds g_mutex. Farther from the aircraft's last position than one
@@ -453,7 +453,8 @@ bool dispatch(HANDLE sim, std::string &partial, std::string &last_metar, ULONGLO
                 if (loading_position(v.lat, v.lon))
                 {
                     if (!g_loading)
-                        log("the sim reports the aircraft at 0, 0 (loading a flight): ignored until it's placed");
+                        log("the sim reports the aircraft at %.0f, %.0f (loading a flight): ignored until it's placed",
+                            v.lat, v.lon);
                     g_loading = true;
                     break;
                 }
@@ -572,7 +573,8 @@ bool dispatch(HANDLE sim, std::string &partial, std::string &last_metar, ULONGLO
             const bool asked_at = std::isfinite(metar.request_lat) && std::isfinite(metar.request_lon);
             if (asked_at && loading_position(metar.request_lat, metar.request_lon))
             {
-                log("METAR %s asked for at 0, 0 (the sim loading a flight): ignored", metar.icao.c_str());
+                log("METAR %s asked for at %.0f, %.0f (the sim loading a flight): ignored", metar.icao.c_str(),
+                    metar.request_lat, metar.request_lon);
                 break;
             }
             if (surveyed(metar))  // only for the cloud anchoring
