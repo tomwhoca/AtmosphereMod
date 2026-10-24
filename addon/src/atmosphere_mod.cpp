@@ -58,7 +58,8 @@ namespace fs = std::filesystem;
 
 extern "C" __declspec(dllexport) const char *NAME = "AtmosphereMod";
 extern "C" __declspec(dllexport) const char *DESCRIPTION =
-    "Logs MSFS 2024 atmosphere passes and swaps their shaders for replacements.";
+    "Experimental atmosphere and clouds for MSFS 2024: layered haze, sky colours, cloud lighting and "
+    "METAR-driven clouds. Ctrl+Shift+F9 switches to stock.";
 
 namespace
 {

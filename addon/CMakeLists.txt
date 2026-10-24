@@ -1,7 +1,9 @@
 cmake_minimum_required(VERSION 3.20)
-project(AtmosphereMod LANGUAGES CXX)
+# The version ReShade shows, and the release's (tools/make_release.py).
+project(AtmosphereMod VERSION 0.1.0 LANGUAGES CXX RC)
 
-add_library(AtmosphereMod SHARED src/atmosphere_mod.cpp src/weather_feed.cpp)
+configure_file(src/version.rc.in ${CMAKE_CURRENT_BINARY_DIR}/version.rc @ONLY)
+add_library(AtmosphereMod SHARED src/atmosphere_mod.cpp src/weather_feed.cpp ${CMAKE_CURRENT_BINARY_DIR}/version.rc)
 
 # The weather feed is an in-process SimConnect client; the SDK's static library
 # keeps SimConnect.dll out of the sim's folder.
@@ -14,7 +16,7 @@ target_link_libraries(AtmosphereMod PRIVATE "${SIMCONNECT_DIR}/lib/static/SimCon
 target_include_directories(AtmosphereMod PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/reshade/include)
 target_compile_features(AtmosphereMod PRIVATE cxx_std_20)
 target_compile_definitions(AtmosphereMod PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
-target_compile_options(AtmosphereMod PRIVATE /W4 /permissive- /utf-8)
+target_compile_options(AtmosphereMod PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/W4 /permissive- /utf-8>)
 
 # ReShade loads add-ons by the .addon64 extension. DLL CRT: the static SimConnect
 # library is built against it, and the sim already loads it (its package

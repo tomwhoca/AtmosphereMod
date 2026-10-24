@@ -2,13 +2,15 @@
 
     python tools/make_release.py [--version 0.1.0] [--build] [--no-python]
 
+The version defaults to the add-on's (project VERSION in addon/CMakeLists.txt).
 --build first runs build_addon, build_efb and build_shaders. Python's
 embeddable package is bundled from build/python/ (download it from python.org
 into that folder; only versions whose SHA-256 is pinned below are accepted).
 The release:
 
-    Install AtmosphereMod.cmd, Uninstall AtmosphereMod.cmd, README.md,
-    THIRD-PARTY-NOTICES.txt (and LICENSE, once there is one)
+    Install AtmosphereMod.cmd, Uninstall AtmosphereMod.cmd, README.md (its
+    Screenshots section points to the GitHub page: the images aren't
+    shipped), THIRD-PARTY-NOTICES.txt, LICENSE
     installer/  install.py and the patcher (patch_dxil.py, disasm.py,
                 extract_pak.py, manifest.json, dxilasm.exe), VERSION, and
                 python/: the embeddable Python (with --no-python the system's
@@ -24,6 +26,7 @@ shaders on their PC. The checks at the end enforce that.
 import argparse
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -33,6 +36,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 BUILD = ROOT / "build"
 DIST = ROOT / "dist"
+REPO = "https://github.com/tomwhoca/AtmosphereMod"
 # python.org's embeddable packages we bundle, with the SHA-256 python.org
 # publishes on the release page (checked on every release build).
 PYTHON_EMBED = {
@@ -92,6 +96,22 @@ def run(*cmd):
     subprocess.run([sys.executable, *cmd], cwd=ROOT, check=True)
 
 
+def addon_version() -> str:
+    m = re.search(r"project\(AtmosphereMod VERSION (\d+\.\d+\.\d+)", (ROOT / "addon" / "CMakeLists.txt").read_text())
+    if not m:
+        sys.exit("no project(AtmosphereMod VERSION x.y.z) in addon/CMakeLists.txt")
+    return m[1]
+
+
+def release_readme() -> str:
+    """README.md with its Screenshots section replaced by a link (the images stay on GitHub)."""
+    text = (ROOT / "README.md").read_text(encoding="utf-8")
+    start = text.index("## Screenshots\n")
+    end = text.index("\n## ", start) + 1
+    return (text[:start] + "## Screenshots\n\nComparison screenshots, with the mod off and on, are on the GitHub page:\n"
+            f"{REPO}#screenshots\n\n" + text[end:])
+
+
 def ignored(path: Path) -> bool:
     """git's view: a private (git-ignored) file."""
     return subprocess.run(["git", "check-ignore", "-q", str(path.relative_to(ROOT))], cwd=ROOT).returncode == 0
@@ -99,10 +119,11 @@ def ignored(path: Path) -> bool:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--version", default="0.1.0-dev")
+    ap.add_argument("--version", help="default: the add-on's, from addon/CMakeLists.txt")
     ap.add_argument("--build", action="store_true", help="build the add-on, EFB app and shaders first")
     ap.add_argument("--no-python", action="store_true", help="don't bundle Python (the system's is used)")
     args = ap.parse_args()
+    args.version = args.version or addon_version()
     if args.build:
         run("tools/build_addon.py")
         run("tools/build_efb.py")
@@ -153,7 +174,7 @@ def main() -> None:
     # the front: wrappers, README, notices, licence
     (out / "Install AtmosphereMod.cmd").write_text(CMD.replace("{args}", ""), newline="\r\n")
     (out / "Uninstall AtmosphereMod.cmd").write_text(CMD.replace("{args}", "--uninstall "), newline="\r\n")
-    shutil.copy2(ROOT / "README.md", out / "README.md")
+    (out / "README.md").write_text(release_readme(), encoding="utf-8")
     reshade = (ROOT / "third_party" / "reshade" / "LICENSE.md").read_text(encoding="utf-8")
     notices = NOTICES.replace("{reshade}", reshade).replace("{python}", python.stem if python else "(not bundled)")
     (out / "THIRD-PARTY-NOTICES.txt").write_text(notices, encoding="utf-8")
