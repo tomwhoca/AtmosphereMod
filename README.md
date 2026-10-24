@@ -157,6 +157,20 @@ time of day was set to sunset.
     <td colspan="2"><b>Tenerife North</b>: scattered cloud, as reported, lit bright from inside. MSFS shows a dark overcast.<br><sub>METAR <code>GCXO 241030Z 11007KT 070V160 9999 SCT009 SCT015 20/18 Q1027 NOSIG</code></sub></td>
   </tr>
   <tr>
+    <td><img src="Screenshots/clouds-liverpool-showers-off.jpg" alt="Mod off: Liverpool, showers under three layers"></td>
+    <td><img src="Screenshots/clouds-liverpool-showers-on.jpg" alt="Mod on: Liverpool, showers under three layers"></td>
+  </tr>
+  <tr>
+    <td colspan="2"><b>Liverpool</b>, showers under three layers: the mod builds the decks the METAR reports, with a dark shower cloud ahead. With MSFS's own clouds the view is grey murk.<br><sub>METAR <code>EGGP 241120Z 17013G23KT 9999 7000NW -SHRA BKN016 BKN035 OVC040 09/07 Q0997</code></sub></td>
+  </tr>
+  <tr>
+    <td><img src="Screenshots/clouds-liverpool-runway-off.jpg" alt="Mod off: Liverpool, runway 09 in light showers"></td>
+    <td><img src="Screenshots/clouds-liverpool-runway-on.jpg" alt="Mod on: Liverpool, runway 09 in light showers"></td>
+  </tr>
+  <tr>
+    <td colspan="2"><b>Liverpool</b>, runway 09 in light showers: darker under the shower, brighter toward the sun on the right. MSFS's overcast is an even grey.<br><sub>METAR <code>EGGP 241120Z 17013G23KT 9999 7000NW -SHRA BKN016 BKN035 OVC040 09/07 Q0997</code></sub></td>
+  </tr>
+  <tr>
     <td><img src="Screenshots/clouds-bratislava-off.jpg" alt="Mod off: Bratislava"></td>
     <td><img src="Screenshots/clouds-bratislava-on.jpg" alt="Mod on: Bratislava"></td>
   </tr>
