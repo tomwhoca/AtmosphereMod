@@ -13,7 +13,7 @@ install.py pins). The release:
     Screenshots section points to the GitHub page: the images aren't
     shipped), THIRD-PARTY-NOTICES.txt, LICENSE
     installer/  install.py and the patcher (patch_dxil.py, disasm.py,
-                extract_pak.py, manifest.json, dxilasm.exe), VERSION,
+                dxil_assemble.py, extract_pak.py, manifest.json), VERSION,
                 python/: the embeddable Python (with --no-python the system's
                 3.10+ is used), and dxc/: the compiler's x64 binaries with
                 the package's licences and release notes, unchanged
@@ -149,10 +149,9 @@ def main() -> None:
     inst.mkdir()
 
     # the installer and the patcher
-    for name in ("install.py", "patch_dxil.py", "disasm.py", "extract_pak.py"):
+    for name in ("install.py", "patch_dxil.py", "dxil_assemble.py", "disasm.py", "extract_pak.py"):
         shutil.copy2(ROOT / "tools" / name, inst / name)
     shutil.copy2(ROOT / "shaders" / "manifest.json", inst / "manifest.json")
-    shutil.copy2(BUILD / "dxilasm" / "dxilasm.exe", inst / "dxilasm.exe")
     (inst / "VERSION").write_text(args.version + "\n")
     python = None
     if not args.no_python:

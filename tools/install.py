@@ -309,7 +309,7 @@ def patch(pak: Path, dxc: Path, work: Path, shaders: Path, log) -> tuple[int, in
     say("Patching them (about a minute) ...")
     import patch_dxil
     with contextlib.redirect_stdout(log):
-        failed = patch_dxil.patch_all(root=work, dxc=dxc, dxilasm=HERE / "dxilasm.exe", strict=False)
+        failed = patch_dxil.patch_all(root=work, dxc=dxc, strict=False)
     made = sorted((work / "build" / "shaders").glob("*.cso"))
     for f in made:
         shutil.move(str(f), shaders / f.name)

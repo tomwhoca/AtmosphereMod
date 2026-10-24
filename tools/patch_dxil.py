@@ -20,7 +20,8 @@ terrain, ch_sky's cubemap):
   3. add our ModParams cbuffer (b0 space50, the injected root constants) to the
      resource metadata and load the tunables at the entry point; for the
      clouds also CloudParams (b1 space50, compute only);
-  4. assemble with tools/dxilasm (validated and signed by the SDK's dxil.dll).
+  4. assemble with dxil_assemble.py (dxcompiler.dll in this process; validated
+     and signed by dxil.dll).
 Every match is asserted, so a sim update that changes the code fails loudly
 instead of producing a wrong shader.
 
@@ -43,8 +44,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 from disasm import find_dxc  # noqa: E402
-
-DXILASM = ROOT / "build" / "dxilasm" / "dxilasm.exe"
+from dxil_assemble import AssemblyError, Assembler  # noqa: E402
 
 # Our medium model's constants (the developer's HLSL replicas use the same).
 REFERENCE_RAYLEIGH = (5.802e-3, 13.558e-3, 33.1e-3)
@@ -3915,29 +3915,16 @@ def disassemble(blob: Path, dxc: Path) -> str:
     return out.stdout
 
 
-def build_dxilasm() -> None:
-    from build_addon import find_cmake
-    cmake = find_cmake()
-    build_dir = ROOT / "build" / "dxilasm-build"
-    subprocess.run([str(cmake), "-S", str(ROOT / "tools" / "dxilasm"), "-B", str(build_dir),
-                    "-G", "Visual Studio 17 2022", "-A", "x64"], check=True, capture_output=True)
-    subprocess.run([str(cmake), "--build", str(build_dir), "--config", "Release"], check=True,
-                   capture_output=True)
-
-
 def patch_all(keep_ir: bool = False, root: Path | None = None, dxc: Path | None = None,
-              dxilasm: Path | None = None, strict: bool = True) -> int:
+              strict: bool = True) -> int:
     """Patch every manifest target; returns the number of failures. root holds
     shaders/manifest.json and extracted/ and receives build/ (the project by
-    default; the installer passes its work folder, its dxc and dxilasm).
+    default; the installer passes its work folder and its dxc).
     strict = False: a target the patterns don't recognise (a sim update) is
     reported and skipped, whatever the error."""
     root = root or ROOT
-    if dxilasm is None:
-        dxilasm = DXILASM
-        if not dxilasm.exists():
-            build_dxilasm()
     dxc = dxc or find_dxc()
+    assembler = Assembler(dxc.parent)
     manifest = json.loads((root / "shaders" / "manifest.json").read_text())
     index = list(csv.DictReader(open(root / "extracted" / "index.csv")))
     failures = 0
@@ -3964,19 +3951,17 @@ def patch_all(keep_ir: bool = False, root: Path | None = None, dxc: Path | None 
                 print(f"{entry} {crc}: NOT PATCHED: {type(e).__name__}: {e}")
                 failures += 1
                 continue
-            ir_dir = root / "build" / "patched" / "ir"
-            ir_dir.mkdir(parents=True, exist_ok=True)
-            ir_path = ir_dir / f"{crc}.ll"
-            ir_path.write_text(patched)
+            if keep_ir:
+                ir_dir = root / "build" / "patched" / "ir"
+                ir_dir.mkdir(parents=True, exist_ok=True)
+                (ir_dir / f"{crc}.ll").write_text(patched)
             out = out_dir / f"{crc}.cso"
-            res = subprocess.run([str(dxilasm), str(dxc.parent), str(ir_path), str(out)],
-                                 capture_output=True, text=True)
-            if res.returncode != 0:
-                print(f"{entry} {crc}: assembly failed\n{res.stderr}")
+            try:
+                out.write_bytes(assembler.assemble(patched))
+            except AssemblyError as e:
+                print(f"{entry} {crc}: {e}")
                 failures += 1
                 continue
-            if not keep_ir:
-                ir_path.unlink()
             print(f"patched {out.relative_to(root)}  <- {entry}: {summary}")
     return failures
 
