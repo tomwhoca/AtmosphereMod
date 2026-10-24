@@ -47,14 +47,12 @@ rendering, and consists of several components:
 
 ## Screenshots
 
-<p>
-  <img src="Screenshots/FlightSimulator2024_wwyLobj1sj.jpg" alt="A glory around the aircraft's shadow on a sunlit cloud top, seen from a cabin window"><br>
-  <sub>A glory, the coloured halo around the aircraft's shadow on a sunlit cloud top</sub>
-</p>
+Taken on 24 October 2026 with live weather and the shipping settings. Each
+pair was taken a few seconds apart, switching with Ctrl+Shift+F9. Under each
+pair is the METAR the sim gave the mod at that moment. For San Francisco the
+time of day was set to sunset.
 
-Each pair was taken a few seconds apart, switching the mod with
-Ctrl+Shift+F9. They date from early in development, before the daylight white
-balance (`C22`) was added.
+### Haze
 
 <table>
   <tr>
@@ -62,32 +60,136 @@ balance (`C22`) was added.
     <th width="50%">Mod on</th>
   </tr>
   <tr>
-    <td><img src="Screenshots/FlightSimulator2024_nG6OJirD98.jpg" alt="Mod off: above an overcast"></td>
-    <td><img src="Screenshots/FlightSimulator2024_sp7QatPAWy.jpg" alt="Mod on: above an overcast"></td>
+    <td><img src="Screenshots/haze-niamey-off.jpg" alt="Mod off: Niamey, dust at 6 km"></td>
+    <td><img src="Screenshots/haze-niamey-on.jpg" alt="Mod on: Niamey, dust at 6 km"></td>
   </tr>
   <tr>
-    <td colspan="2"><sub>Above an overcast: the glory around the aircraft's shadow, and a haze line on the horizon (MSFS developer overlay on)</sub></td>
+    <td colspan="2"><b>Niamey</b>, dust at 6 km: the haze thickens to the reported visibility. MSFS shows its usual light, lavender-tinted haze.<br><sub>METAR <code>DRRN 240900Z 16005KT 120V200 6000 NSC 34/11 Q1014 TEMPO 4000 DU</code></sub></td>
   </tr>
   <tr>
-    <td><img src="Screenshots/FlightSimulator2024_Sonai6m2r5.jpg" alt="Mod off: cumulus over mountains"></td>
-    <td><img src="Screenshots/FlightSimulator2024_15k6W4bJk6.jpg" alt="Mod on: cumulus over mountains"></td>
+    <td><img src="Screenshots/haze-dakar-off.jpg" alt="Mod off: Dakar, dust at 1.6 km"></td>
+    <td><img src="Screenshots/haze-dakar-on.jpg" alt="Mod on: Dakar, dust at 1.6 km"></td>
   </tr>
   <tr>
-    <td colspan="2"><sub>Cumulus over mountains: a deeper blue sky, haze over the distant ground, and more shading in the clouds</sub></td>
+    <td colspan="2"><b>Dakar</b>, dust at 1.6 km: a dense, brownish dust haze over the city and the sea.<br><sub>METAR <code>GOBD 240930Z 05011KT 1600 DU NSC 30/18 Q1013 NOSIG</code></sub></td>
   </tr>
   <tr>
-    <td><img src="Screenshots/FlightSimulator2024_ZxNaRl9oht.jpg" alt="Mod off: between two cloud layers"></td>
-    <td><img src="Screenshots/FlightSimulator2024_npkOd2YSqu.jpg" alt="Mod on: between two cloud layers"></td>
+    <td><img src="Screenshots/haze-mumbai-off.jpg" alt="Mod off: Mumbai, humid haze at 1.8 km"></td>
+    <td><img src="Screenshots/haze-mumbai-on.jpg" alt="Mod on: Mumbai, humid haze at 1.8 km"></td>
   </tr>
   <tr>
-    <td colspan="2"><sub>Between two cloud layers: distant clouds turn creamy through the haze</sub></td>
+    <td colspan="2"><b>Mumbai</b>, humid haze at 1.8 km: a white haze that glows toward the sun.<br><sub>METAR <code>VABB 241000Z 29010KT 1800 HZ NSC 34/24 Q1007 NOSIG</code></sub></td>
   </tr>
   <tr>
-    <td><img src="Screenshots/FlightSimulator2024_VRK9U9iyRR.jpg" alt="Mod off: on the runway"></td>
-    <td><img src="Screenshots/FlightSimulator2024_ZOTtsIvg7d.jpg" alt="Mod on: on the runway"></td>
+    <td><img src="Screenshots/haze-delhi-off.jpg" alt="Mod off: Delhi, haze at 5 km"></td>
+    <td><img src="Screenshots/haze-delhi-on.jpg" alt="Mod on: Delhi, haze at 5 km"></td>
   </tr>
   <tr>
-    <td colspan="2"><sub>On the runway: a thick, brownish haze in place of the stock haze</sub></td>
+    <td colspan="2"><b>Delhi</b>, haze at 5 km: a grey haze in place of MSFS's lavender one.<br><sub>METAR <code>VIDP 241000Z 15005KT 5000 HZ FEW100 31/16 Q1010 NOSIG</code></sub></td>
+  </tr>
+  <tr>
+    <td><img src="Screenshots/haze-amman-off.jpg" alt="Mod off: Amman, dry haze at 5 km"></td>
+    <td><img src="Screenshots/haze-amman-on.jpg" alt="Mod on: Amman, dry haze at 5 km"></td>
+  </tr>
+  <tr>
+    <td colspan="2"><b>Amman</b>, dry haze at 5 km: a pale blue sky with a few cumulus, as reported.<br><sub>METAR <code>OJAI 241000Z 12005KT 5000 HZ FEW035 29/12 Q1017 NOSIG</code></sub></td>
+  </tr>
+</table>
+
+### Sky colours
+
+<table>
+  <tr>
+    <th width="50%">Mod off (MSFS 2024)</th>
+    <th width="50%">Mod on</th>
+  </tr>
+  <tr>
+    <td><img src="Screenshots/sky-san-francisco-sunset-off.jpg" alt="Mod off: San Francisco at sunset, the sun 2&deg; high"></td>
+    <td><img src="Screenshots/sky-san-francisco-sunset-on.jpg" alt="Mod on: San Francisco at sunset, the sun 2&deg; high"></td>
+  </tr>
+  <tr>
+    <td colspan="2"><b>San Francisco</b> at sunset, the sun 2&deg; high: the clouds glow orange and red under a purple sky.<br><sub>METAR <code>KSFO 240056Z 28016KT 10SM FEW035 18/11 A3002 RMK AO2 SLP165 T01780111</code></sub></td>
+  </tr>
+</table>
+
+### Cloud lighting: the glory
+
+<table>
+  <tr>
+    <th width="50%">Mod off (MSFS 2024)</th>
+    <th width="50%">Mod on</th>
+  </tr>
+  <tr>
+    <td><img src="Screenshots/glory-stockholm-1-off.jpg" alt="Mod off: Near Stockholm"></td>
+    <td><img src="Screenshots/glory-stockholm-1-on.jpg" alt="Mod on: Near Stockholm"></td>
+  </tr>
+  <tr>
+    <td colspan="2"><b>Near Stockholm</b>: the glory around the aircraft's shadow, on the deck the METARs report. MSFS shows scattered cumulus here.<br><sub>METAR <code>ESCM 241050Z AUTO 12009KT 9999 SCT010/// BKN015/// BKN076/// 11/09 Q1012</code></sub></td>
+  </tr>
+  <tr>
+    <td><img src="Screenshots/glory-stockholm-2-off.jpg" alt="Mod off: The same flight, two and a half minutes later."></td>
+    <td><img src="Screenshots/glory-stockholm-2-on.jpg" alt="Mod on: The same flight, two and a half minutes later."></td>
+  </tr>
+  <tr>
+    <td colspan="2">The same flight, two and a half minutes later.<br><sub>METAR <code>ESCM 241050Z AUTO 12009KT 9999 SCT010/// BKN015/// BKN076/// 11/09 Q1012</code></sub></td>
+  </tr>
+  <tr>
+    <td><img src="Screenshots/glory-stockholm-3-off.jpg" alt="Mod off: And half a minute after that."></td>
+    <td><img src="Screenshots/glory-stockholm-3-on.jpg" alt="Mod on: And half a minute after that."></td>
+  </tr>
+  <tr>
+    <td colspan="2">And half a minute after that.<br><sub>METAR <code>ESCM 241050Z AUTO 12009KT 9999 SCT010/// BKN015/// BKN076/// 11/09 Q1012</code></sub></td>
+  </tr>
+</table>
+
+### Cloud lighting and forming
+
+<table>
+  <tr>
+    <th width="50%">Mod off (MSFS 2024)</th>
+    <th width="50%">Mod on</th>
+  </tr>
+  <tr>
+    <td><img src="Screenshots/clouds-tenerife-off.jpg" alt="Mod off: Tenerife North"></td>
+    <td><img src="Screenshots/clouds-tenerife-on.jpg" alt="Mod on: Tenerife North"></td>
+  </tr>
+  <tr>
+    <td colspan="2"><b>Tenerife North</b>: scattered cloud, as reported, lit bright from inside. MSFS shows a dark overcast.<br><sub>METAR <code>GCXO 241030Z 11007KT 070V160 9999 SCT009 SCT015 20/18 Q1027 NOSIG</code></sub></td>
+  </tr>
+  <tr>
+    <td><img src="Screenshots/clouds-bratislava-off.jpg" alt="Mod off: Bratislava"></td>
+    <td><img src="Screenshots/clouds-bratislava-on.jpg" alt="Mod on: Bratislava"></td>
+  </tr>
+  <tr>
+    <td colspan="2"><b>Bratislava</b>: firm, sunlit cumulus with clear air between the layers. MSFS's clouds blur into grey.<br><sub>METAR <code>LZIB 241030Z 07003KT 050V110 9999 FEW008 SCT033 11/08 Q1019 NOSIG</code></sub></td>
+  </tr>
+  <tr>
+    <td><img src="Screenshots/clouds-cologne-off.jpg" alt="Mod off: Cologne, two broken layers"></td>
+    <td><img src="Screenshots/clouds-cologne-on.jpg" alt="Mod on: Cologne, two broken layers"></td>
+  </tr>
+  <tr>
+    <td colspan="2"><b>Cologne</b>, two broken layers: wide, flat-based clouds instead of separate puffs.<br><sub>METAR <code>EDDK 241120Z AUTO 24014KT 9999 BKN034 BKN042 11/04 Q1014 NOSIG</code></sub></td>
+  </tr>
+  <tr>
+    <td><img src="Screenshots/clouds-tbilisi-off.jpg" alt="Mod off: Tbilisi"></td>
+    <td><img src="Screenshots/clouds-tbilisi-on.jpg" alt="Mod on: Tbilisi"></td>
+  </tr>
+  <tr>
+    <td colspan="2"><b>Tbilisi</b>: firmer cumulus with deeper shading, and more blue sky between.<br><sub>METAR <code>UGTB 241100Z 22004KT 160V310 9999 FEW061 19/12 Q1022 NOSIG</code></sub></td>
+  </tr>
+  <tr>
+    <td><img src="Screenshots/clouds-stockholm-cockpit-off.jpg" alt="Mod off: Stockholm Arlanda, from the cockpit"></td>
+    <td><img src="Screenshots/clouds-stockholm-cockpit-on.jpg" alt="Mod on: Stockholm Arlanda, from the cockpit"></td>
+  </tr>
+  <tr>
+    <td colspan="2"><b>Stockholm Arlanda</b>, from the cockpit: scattered cloud with blue sky between, as reported. MSFS closes it to an overcast.<br><sub>METAR <code>ESSA 241050Z 11009KT 9999 SCT011 10/08 Q1012 TEMPO BKN012</code></sub></td>
+  </tr>
+  <tr>
+    <td><img src="Screenshots/clouds-cape-town-off.jpg" alt="Mod off: Cape Town"></td>
+    <td><img src="Screenshots/clouds-cape-town-on.jpg" alt="Mod on: Cape Town"></td>
+  </tr>
+  <tr>
+    <td colspan="2"><b>Cape Town</b>: broad, flat-based clouds over Table Bay instead of round puffs.<br><sub>METAR <code>FACT 241000Z 17011KT 140V200 9999 BKN016 20/14 Q1020 NOSIG</code></sub></td>
   </tr>
 </table>
 
