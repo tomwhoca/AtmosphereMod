@@ -43,8 +43,7 @@ rendering, and consists of several components:
 > errors, may crash the sim or may cost performance. See the
 > [disclaimer](#disclaimer).
 
-> **Draft.** Not released yet. Still to do before a first release:
-> - testing on more PCs and GPUs.
+> **Draft.** Not released yet.
 
 ## Screenshots
 
@@ -274,6 +273,24 @@ with them is logged in `%LOCALAPPDATA%\AtmosphereMod\logs\weather.log`.
 - For the METAR features: the included EFB app (installed into your Community
   folder). It runs in the background in any aircraft and passes the sim's own
   METARs to the add-on.
+
+### Tested systems
+
+So far the mod has been tested on one PC only:
+
+| | |
+|---|---|
+| Graphics card | NVIDIA GeForce RTX 5080, driver 617.14 |
+| CPU | AMD Ryzen 9 7900X3D |
+| Windows | Windows 11 Home |
+| Sim | MSFS 2024 1.9.18.0, MS Store version, DirectX 12 |
+| ReShade | 6.8.0 with full add-on support |
+
+Nothing is known yet about other systems. If you try it, please report how it
+went, whether it works or not, on the
+[issues page](https://github.com/tomwhoca/AtmosphereMod/issues). Include your
+graphics card and driver version, Windows version, and whether you run the MS
+Store or Steam version. Systems that have been reported will be added here.
 
 ## Installation
 
