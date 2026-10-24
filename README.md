@@ -311,6 +311,16 @@ Store or Steam version. Systems that have been reported will be added here.
      a backup, `ReShade.ini.atmospheremod.bak`).
 3. Start the sim.
 
+Windows may warn you before running the `.cmd` files, because they were
+downloaded from the internet and aren't signed:
+- "Windows protected your PC": click **More info**, then **Run anyway**;
+- "The publisher could not be verified": click **Run**.
+
+To avoid the warnings, right-click the zip before unzipping it, choose
+**Properties**, tick **Unblock** and click **OK**. Only do this with a release
+downloaded from the
+[AtmosphereMod GitHub page](https://github.com/tomwhoca/AtmosphereMod/releases).
+
 The game's own files stay untouched: the add-on swaps shaders in memory as the
 sim creates them. The installer's log is in
 `%LOCALAPPDATA%\AtmosphereMod\logs\install.log`.
