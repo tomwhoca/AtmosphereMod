@@ -46,6 +46,31 @@ rendering, and consists of several components:
 > **Draft.** Not released yet. Still to do before a first release:
 > - testing on more PCs and GPUs.
 
+## Screenshots
+
+<table>
+  <tr>
+    <td width="50%"><img src="Screenshots/FlightSimulator2024_wwyLobj1sj.jpg" alt="Glory and the aircraft's shadow on a sunlit cloud top, seen from a cabin window"><br><sub>A glory around the aircraft's shadow on a sunlit cloud top</sub></td>
+    <td width="50%"><img src="Screenshots/FlightSimulator2024_sp7QatPAWy.jpg" alt="Boeing 737 above a cloud deck, with a glory on the deck below"><br><sub>The glory on the deck below (MSFS developer overlay on)</sub></td>
+  </tr>
+  <tr>
+    <td><img src="Screenshots/FlightSimulator2024_npkOd2YSqu.jpg" alt="Wingtip over a cloud top, with a cumulus layer above"><br><sub>Skimming a cloud top, with a cumulus layer above</sub></td>
+    <td><img src="Screenshots/FlightSimulator2024_ZxNaRl9oht.jpg" alt="Wingtip above an overcast"><br><sub>Above an overcast</sub></td>
+  </tr>
+  <tr>
+    <td><img src="Screenshots/FlightSimulator2024_15k6W4bJk6.jpg" alt="Broken cumulus layer over mountains"><br><sub>Level with a broken cumulus layer over mountains</sub></td>
+    <td><img src="Screenshots/FlightSimulator2024_Sonai6m2r5.jpg" alt="Cumulus over mountainous terrain"><br><sub>Cumulus over mountainous terrain</sub></td>
+  </tr>
+  <tr>
+    <td><img src="Screenshots/FlightSimulator2024_VRK9U9iyRR.jpg" alt="Lined up on a runway in clear air, mountains ahead"><br><sub>Lined up in clear air</sub></td>
+    <td><img src="Screenshots/FlightSimulator2024_ZOTtsIvg7d.jpg" alt="The same runway in thick haze"><br><sub>The same runway in thick haze</sub></td>
+  </tr>
+  <tr>
+    <td><img src="Screenshots/FlightSimulator2024_nG6OJirD98.jpg" alt="Boeing 737 over an overcast"><br><sub>Over an overcast (MSFS developer overlay on)</sub></td>
+    <td></td>
+  </tr>
+</table>
+
 ## What it does
 
 Ctrl+Shift+F9 switches between the mod and stock at any time, for comparison.
