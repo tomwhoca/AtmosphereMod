@@ -101,6 +101,12 @@ static_assert(sizeof(AircraftVars) == std::size(kAircraftVars) * sizeof(double))
 constexpr size_t kDriven[] = { 1, 2, 3, 4, 5, 6, 9, 10 };
 constexpr float kSmoothingSeconds = 30.0f;
 constexpr double kGroundSmoothingSeconds = 300.0;  // terrain under a cruising aircraft changes fast
+// A position update farther than this from the last (they come every 10 s)
+// is a jump: a new flight, slew or teleport.
+constexpr double kJumpDeg = 0.3;
+// How long a METAR asked for where the aircraft isn't yet waits for the
+// position updates to get there (a jump they haven't shown yet).
+constexpr ULONGLONG kHoldMetarMs = 30000;
 // Freezing level for the radar model: the METAR temperature lapsed at the
 // standard 6.5 C/km from the station's elevation (SimConnect facility data).
 constexpr double kLapseRatePerKm = 6.5;
@@ -114,6 +120,9 @@ std::mutex g_mutex;  // guards the fields below
 haze::Inputs g_inputs;
 bool g_have_ground = false;
 double g_last_lat = 0.0, g_last_lon = 0.0;
+bool g_loading = false;              // the sim reports 0, 0 (loading a flight)
+haze::Metar g_held_metar;            // the aircraft's METAR, asked for where the aircraft isn't yet
+ULONGLONG g_held_since = 0;
 std::array<float, std::size(kDriven)> g_target = {};
 bool g_have_target = false;
 std::string g_station;                   // METAR station whose elevation was requested
@@ -260,6 +269,20 @@ void anchor_metar(HANDLE sim, const haze::Metar &metar, double request_lat, doub
     SimConnect_RequestFacilityData(sim, kDefAirport, kReqStation0 + n, metar.icao.c_str());
 }
 
+// While the sim loads a flight it reports the aircraft at 0, 0 (the EFB app
+// asks for that METAR too).
+bool loading_position(double lat, double lon)
+{
+    return std::abs(lat) < 0.01 && std::abs(lon) < 0.01;
+}
+
+// Caller holds g_mutex. Farther from the aircraft's last position than one
+// position update can explain.
+bool away_from_aircraft(double lat, double lon)
+{
+    return g_have_ground && (std::abs(lat - g_last_lat) > kJumpDeg || std::abs(lon - g_last_lon) > kJumpDeg);
+}
+
 // Caller holds g_mutex. A METAR the survey asked for (not the aircraft's).
 bool surveyed(const haze::Metar &metar)
 {
@@ -355,6 +378,31 @@ void request_metar(HANDLE sim)
     SimConnect_CallCommBusEvent(sim, kRequestEvent, SIMCONNECT_COMM_BUS_BROADCAST_TO_JS, sizeof(body), body);
 }
 
+// Caller holds g_mutex. The METAR nearest the aircraft: the haze, the
+// freezing level and the first anchor station.
+void use_metar(HANDLE sim, const haze::Metar &metar, std::string &last_metar, ULONGLONG &last_logged)
+{
+    g_inputs.metar = metar;
+    // where the METAR was requested (the app's message says; else the aircraft now)
+    g_metar_lat = std::isfinite(metar.request_lat) ? metar.request_lat : g_last_lat;
+    g_metar_lon = std::isfinite(metar.request_lon) ? metar.request_lon : g_last_lon;
+    if (metar.icao != g_station)  // new station: ask for its position and elevation
+    {
+        g_station = metar.icao;
+        g_station_elevation_m = g_station_lat = g_station_lon = NAN;
+        SimConnect_RequestFacilityData(sim, kDefAirport, kReqAirport, metar.icao.c_str());
+    }
+    log_freezing_level();
+    anchor_metar(sim, metar, g_metar_lat, g_metar_lon, true);
+    const std::string line = recompute();
+    if (metar.raw != last_metar)
+    {
+        last_metar = metar.raw;
+        last_logged = GetTickCount64();
+        log("%s | %s", line.c_str(), metar.raw.c_str());
+    }
+}
+
 // Returns false when the sim quit.
 bool dispatch(HANDLE sim, std::string &partial, std::string &last_metar, ULONGLONG &last_logged)
 {
@@ -402,12 +450,20 @@ bool dispatch(HANDLE sim, std::string &partial, std::string &last_metar, ULONGLO
             std::string line;
             {
                 const std::lock_guard lock(g_mutex);
+                if (loading_position(v.lat, v.lon))
+                {
+                    if (!g_loading)
+                        log("the sim reports the aircraft at 0, 0 (loading a flight): ignored until it's placed");
+                    g_loading = true;
+                    break;
+                }
+                g_loading = false;
                 // Terrain under the aircraft, smoothed at cruise so valleys and peaks
                 // don't move the layer, but taken as is near the ground and after a
                 // jump (new flight, slew, teleport): the menu sits at sea level, and
                 // easing from there put Esfahan's layer 1 km underground.
                 const double ground_km = v.ground_m * 0.001;
-                const bool jumped = g_have_ground && (std::abs(v.lat - g_last_lat) > 0.3 || std::abs(v.lon - g_last_lon) > 0.3);
+                const bool jumped = away_from_aircraft(v.lat, v.lon);
                 const bool near_ground = v.agl_m < 300.0;
                 if (jumped)
                 {
@@ -424,6 +480,18 @@ bool dispatch(HANDLE sim, std::string &partial, std::string &last_metar, ULONGLO
                 g_last_lat = v.lat;
                 g_last_lon = v.lon;
                 g_inputs.local_hour = v.local_time_s / 3600.0;
+                if (g_held_metar.valid && !away_from_aircraft(g_held_metar.request_lat, g_held_metar.request_lon))
+                {
+                    const haze::Metar held = g_held_metar;
+                    g_held_metar.valid = false;
+                    use_metar(sim, held, last_metar, last_logged);
+                }
+                else if (g_held_metar.valid && GetTickCount64() - g_held_since > kHoldMetarMs)
+                {
+                    log("METAR %s dropped: the aircraft didn't get to %.2f, %.2f", g_held_metar.icao.c_str(),
+                        g_held_metar.request_lat, g_held_metar.request_lon);
+                    g_held_metar.valid = false;
+                }
                 if (g_inputs.metar.valid)
                 {
                     line = recompute();
@@ -501,30 +569,27 @@ bool dispatch(HANDLE sim, std::string &partial, std::string &last_metar, ULONGLO
             if (!metar.valid)
                 break;
             const std::lock_guard lock(g_mutex);
+            const bool asked_at = std::isfinite(metar.request_lat) && std::isfinite(metar.request_lon);
+            if (asked_at && loading_position(metar.request_lat, metar.request_lon))
+            {
+                log("METAR %s asked for at 0, 0 (the sim loading a flight): ignored", metar.icao.c_str());
+                break;
+            }
             if (surveyed(metar))  // only for the cloud anchoring
             {
                 anchor_metar(sim, metar, metar.request_lat, metar.request_lon, false);
                 break;
             }
-            g_inputs.metar = metar;
-            // where the METAR was requested (the app's message says; else the aircraft now)
-            g_metar_lat = std::isfinite(metar.request_lat) ? metar.request_lat : g_last_lat;
-            g_metar_lon = std::isfinite(metar.request_lon) ? metar.request_lon : g_last_lon;
-            if (metar.icao != g_station)  // new station: ask for its position and elevation
+            if (asked_at && away_from_aircraft(metar.request_lat, metar.request_lon))
             {
-                g_station = metar.icao;
-                g_station_elevation_m = g_station_lat = g_station_lon = NAN;
-                SimConnect_RequestFacilityData(sim, kDefAirport, kReqAirport, metar.icao.c_str());
+                // After a jump the app can answer before the next position update shows it.
+                g_held_metar = metar;
+                g_held_since = GetTickCount64();
+                log("METAR %s asked for at %.2f, %.2f, away from the aircraft: held until the aircraft's position "
+                    "gets there", metar.icao.c_str(), metar.request_lat, metar.request_lon);
+                break;
             }
-            log_freezing_level();
-            anchor_metar(sim, metar, g_metar_lat, g_metar_lon, true);
-            const std::string line = recompute();
-            if (metar.raw != last_metar)
-            {
-                last_metar = metar.raw;
-                last_logged = GetTickCount64();
-                log("%s | %s", line.c_str(), metar.raw.c_str());
-            }
+            use_metar(sim, metar, last_metar, last_logged);
             break;
         }
         case SIMCONNECT_RECV_ID_EXCEPTION:
@@ -612,6 +677,8 @@ void run_loop()
             const std::lock_guard lock(g_mutex);
             g_shadow.valid = false;
             g_logged_camera = -1.0;
+            g_held_metar.valid = false;
+            g_loading = false;
         }
 
         std::string partial, last_metar;
