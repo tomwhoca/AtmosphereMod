@@ -48,26 +48,47 @@ rendering, and consists of several components:
 
 ## Screenshots
 
+<p>
+  <img src="Screenshots/FlightSimulator2024_wwyLobj1sj.jpg" alt="A glory around the aircraft's shadow on a sunlit cloud top, seen from a cabin window"><br>
+  <sub>A glory, the coloured halo around the aircraft's shadow on a sunlit cloud top</sub>
+</p>
+
+Each pair was taken a few seconds apart, switching the mod with
+Ctrl+Shift+F9. They date from early in development, before the daylight white
+balance (`C22`) was added.
+
 <table>
   <tr>
-    <td width="50%"><img src="Screenshots/FlightSimulator2024_wwyLobj1sj.jpg" alt="Glory and the aircraft's shadow on a sunlit cloud top, seen from a cabin window"><br><sub>A glory around the aircraft's shadow on a sunlit cloud top</sub></td>
-    <td width="50%"><img src="Screenshots/FlightSimulator2024_sp7QatPAWy.jpg" alt="Boeing 737 above a cloud deck, with a glory on the deck below"><br><sub>The glory on the deck below (MSFS developer overlay on)</sub></td>
+    <th width="50%">Mod off (MSFS 2024)</th>
+    <th width="50%">Mod on</th>
   </tr>
   <tr>
-    <td><img src="Screenshots/FlightSimulator2024_npkOd2YSqu.jpg" alt="Wingtip over a cloud top, with a cumulus layer above"><br><sub>Skimming a cloud top, with a cumulus layer above</sub></td>
-    <td><img src="Screenshots/FlightSimulator2024_ZxNaRl9oht.jpg" alt="Wingtip above an overcast"><br><sub>Above an overcast</sub></td>
+    <td><img src="Screenshots/FlightSimulator2024_nG6OJirD98.jpg" alt="Mod off: above an overcast"></td>
+    <td><img src="Screenshots/FlightSimulator2024_sp7QatPAWy.jpg" alt="Mod on: above an overcast"></td>
   </tr>
   <tr>
-    <td><img src="Screenshots/FlightSimulator2024_15k6W4bJk6.jpg" alt="Broken cumulus layer over mountains"><br><sub>Level with a broken cumulus layer over mountains</sub></td>
-    <td><img src="Screenshots/FlightSimulator2024_Sonai6m2r5.jpg" alt="Cumulus over mountainous terrain"><br><sub>Cumulus over mountainous terrain</sub></td>
+    <td colspan="2"><sub>Above an overcast: the glory around the aircraft's shadow, and a haze line on the horizon (MSFS developer overlay on)</sub></td>
   </tr>
   <tr>
-    <td><img src="Screenshots/FlightSimulator2024_VRK9U9iyRR.jpg" alt="Lined up on a runway in clear air, mountains ahead"><br><sub>Lined up in clear air</sub></td>
-    <td><img src="Screenshots/FlightSimulator2024_ZOTtsIvg7d.jpg" alt="The same runway in thick haze"><br><sub>The same runway in thick haze</sub></td>
+    <td><img src="Screenshots/FlightSimulator2024_Sonai6m2r5.jpg" alt="Mod off: cumulus over mountains"></td>
+    <td><img src="Screenshots/FlightSimulator2024_15k6W4bJk6.jpg" alt="Mod on: cumulus over mountains"></td>
   </tr>
   <tr>
-    <td><img src="Screenshots/FlightSimulator2024_nG6OJirD98.jpg" alt="Boeing 737 over an overcast"><br><sub>Over an overcast (MSFS developer overlay on)</sub></td>
-    <td></td>
+    <td colspan="2"><sub>Cumulus over mountains: a deeper blue sky, haze over the distant ground, and more shading in the clouds</sub></td>
+  </tr>
+  <tr>
+    <td><img src="Screenshots/FlightSimulator2024_ZxNaRl9oht.jpg" alt="Mod off: between two cloud layers"></td>
+    <td><img src="Screenshots/FlightSimulator2024_npkOd2YSqu.jpg" alt="Mod on: between two cloud layers"></td>
+  </tr>
+  <tr>
+    <td colspan="2"><sub>Between two cloud layers: distant clouds turn creamy through the haze</sub></td>
+  </tr>
+  <tr>
+    <td><img src="Screenshots/FlightSimulator2024_VRK9U9iyRR.jpg" alt="Mod off: on the runway"></td>
+    <td><img src="Screenshots/FlightSimulator2024_ZOTtsIvg7d.jpg" alt="Mod on: on the runway"></td>
+  </tr>
+  <tr>
+    <td colspan="2"><sub>On the runway: a thick, brownish haze in place of the stock haze</sub></td>
   </tr>
 </table>
 
