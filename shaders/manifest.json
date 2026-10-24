@@ -1,0 +1,105 @@
+{
+  "pak": "d5d2118d",
+  "shaders": [
+    {
+      "source": "ph_rain_radar_horz.hlsl",
+      "entry": "ph_rain_radar_horz",
+      "profile": "ps_6_7",
+      "options": [
+        "-pack-optimized"
+      ],
+      "note": "weather radar plan view (optional: skipped where the source isn't present); -pack-optimized lets it link with the game's vertex shader",
+      "targets": [
+        {
+          "crc32": "0x0bf34fdb",
+          "defines": []
+        }
+      ]
+    }
+  ],
+  "patches": [
+    {
+      "entry": "ch_transmittance_lut",
+      "crcs": "all",
+      "args": {
+        "no_phase": true,
+        "white_balance": true,
+        "dump": "sky_atmosphere"
+      },
+      "note": "the transmittance LUT: our medium, the daylight white balance (C22) on its output; on capture: dumps the SkyAtmosphere constants (region A)"
+    },
+    {
+      "entry": "ch_multi_scatt",
+      "crcs": "all",
+      "args": {
+        "no_phase": true
+      },
+      "note": "the multiple-scattering LUT: our medium"
+    },
+    {
+      "entry": "ch_sky_view",
+      "crcs": "all",
+      "note": "the sky-view LUT: our medium and aerosol phase"
+    },
+    {
+      "entry": "ch_camera_volume",
+      "crcs": "all",
+      "args": {
+        "far_slice": true,
+        "dump": "camera"
+      },
+      "note": "the aerial-perspective volume: our medium and aerosol phase, the far-slice stretch (T12); on capture: dumps its constants (region B)"
+    },
+    {
+      "entry": "ph_globalCloudAtmospherics",
+      "crcs": "all",
+      "note": "the far cloud layer's atmosphere map: our medium and aerosol phase"
+    },
+    {
+      "entry": "ps_deferredRendering",
+      "crcs": "all",
+      "note": "per-pixel aerial perspective on deferred surfaces (terrain, buildings)"
+    },
+    {
+      "entry": "ch_volumetric_clouds_render",
+      "kind": "clouds",
+      "crcs": "all",
+      "note": "per-channel aerial-perspective transmittance on volumetric clouds (T11), a forward lobe in their sun/moon phase, multiple scattering, build-up of bounced light, crisper edges, a glory and the aircraft's shadow from ch_deferred_shadows' window, else a drawn silhouette (C0-C15)"
+    },
+    {
+      "entry": "ch_deferred_shadows",
+      "kind": "shadow_capture",
+      "crcs": "all",
+      "note": "every frame (DebugCapture bit 4): copies a window of the sun's shadow map around the camera (the aircraft, when Raytraced Shadows are off) into the debug buffer for the clouds' aircraft shadow; on capture: dumps the shadow-map constants, the cascades and its output; output unchanged"
+    },
+    {
+      "entry": "ch_raymarched_shadows",
+      "kind": "output_capture",
+      "args": {
+        "region": 2097152
+      },
+      "crcs": "all",
+      "note": "on capture only: dumps its screen-space shadow mask (every 8th pixel) and pass parameters (aircraft-shadow analysis); output unchanged"
+    },
+    {
+      "entry": "ch_raymarched_shadows_accumulate",
+      "kind": "output_capture",
+      "args": {
+        "region": 2883584
+      },
+      "crcs": "all",
+      "note": "on capture only: dumps its output (every 8th pixel); output unchanged"
+    },
+    {
+      "entry": "ch_cloudDensity",
+      "kind": "cloud_gen_capture",
+      "crcs": "all",
+      "note": "the weather volume generator; on capture only (16 MB debug buffer): dumps its constants, weather maps, shape noise, coverage curve, precipitation maps and output; output unchanged"
+    },
+    {
+      "entry": "ch_sky",
+      "crcs": "all",
+      "note": "environment cubemap: inline aerial perspective on its terrain and clouds, which feeds the sky-light SH (cloud and scene ambient) and reflections"
+    }
+  ]
+}

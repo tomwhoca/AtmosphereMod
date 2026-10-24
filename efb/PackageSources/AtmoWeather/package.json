@@ -1,0 +1,20 @@
+{
+  "name": "@atmospheremod/atmo-weather",
+  "version": "0.1.0",
+  "private": true,
+  "description": "EFB app that sends the sim's METARs to AtmosphereMod over CommBus",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p .",
+    "build": "npm run typecheck && node ./build.js"
+  },
+  "dependencies": {
+    "@efb/efb-api": "file:../../../third_party/msfs_efb_sample/PackageSources/efb_api/dist/",
+    "@microsoft/msfs-sdk": "file:../../../third_party/msfs_efb_sample/PackageSources/vendor/microsoft-msfs-sdk-2.1.1.tgz",
+    "@microsoft/msfs-types": "^1.14.6"
+  },
+  "devDependencies": {
+    "@fal-works/esbuild-plugin-global-externals": "^2.1.2",
+    "esbuild": "^0.21.3",
+    "typescript": "~5.6.2"
+  }
+}

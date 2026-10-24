@@ -1,0 +1,36 @@
+extracted/
+build/
+__pycache__/
+tools/node/
+node_modules/
+efb/PackageSources/*/dist/
+third_party/msfs_efb_sample/
+# Never publish game-derived data: extracted or patched shaders, disassembly,
+# captures and logs (they hold Asobo's shaders and constants), wherever they end up.
+*.cso
+*.asm
+*.dxil
+*.pfm
+*.f32
+*_clouds.bin
+captures/
+logs/
+# IDE and build leftovers
+.vs/
+*.user
+# Private: kept locally, never published (notes/publishing-audit.md). The notes
+# (design notes, decoding, the developer guide) and what was written by reading
+# Asobo's decompiled shaders; the developer's build and tests still use them.
+notes/
+# all of our HLSL: the sky passes' replicas (the published mod patches them
+# instead), the radar replica and the model's HLSL
+shaders/src/
+shaders/replicas.json
+tools/lab/cloud_density/
+tools/plot_cloud_phase.py
+tools/lab/radarlab.cpp
+tools/lab/radarlab_vs.hlsl
+# the developer's own settings; the public file is shaders/tunables.defaults.ini
+shaders/tunables.ini
+# release builds (tools/make_release.py)
+dist/
