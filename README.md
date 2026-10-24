@@ -127,18 +127,11 @@ time of day was set to sunset.
     <td colspan="2"><b>Near Stockholm</b>: the glory around the aircraft's shadow, on the deck the METARs report. MSFS shows scattered cumulus here.<br><sub>METAR <code>ESCM 241050Z AUTO 12009KT 9999 SCT010/// BKN015/// BKN076/// 11/09 Q1012</code></sub></td>
   </tr>
   <tr>
-    <td><img src="Screenshots/glory-stockholm-2-off.jpg" alt="Mod off: The same flight, two and a half minutes later."></td>
-    <td><img src="Screenshots/glory-stockholm-2-on.jpg" alt="Mod on: The same flight, two and a half minutes later."></td>
+    <td><img src="Screenshots/glory-stockholm-2-off.jpg" alt="Mod off: the glory near Stockholm, two and a half minutes later"></td>
+    <td><img src="Screenshots/glory-stockholm-2-on.jpg" alt="Mod on: the glory near Stockholm, two and a half minutes later"></td>
   </tr>
   <tr>
     <td colspan="2">The same flight, two and a half minutes later.<br><sub>METAR <code>ESCM 241050Z AUTO 12009KT 9999 SCT010/// BKN015/// BKN076/// 11/09 Q1012</code></sub></td>
-  </tr>
-  <tr>
-    <td><img src="Screenshots/glory-stockholm-3-off.jpg" alt="Mod off: And half a minute after that."></td>
-    <td><img src="Screenshots/glory-stockholm-3-on.jpg" alt="Mod on: And half a minute after that."></td>
-  </tr>
-  <tr>
-    <td colspan="2">And half a minute after that.<br><sub>METAR <code>ESCM 241050Z AUTO 12009KT 9999 SCT010/// BKN015/// BKN076/// 11/09 Q1012</code></sub></td>
   </tr>
 </table>
 
