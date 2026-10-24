@@ -47,10 +47,8 @@ rendering, and consists of several components:
 
 ## Screenshots
 
-Taken on 24 October 2026 with live weather and the shipping settings. Each
-pair was taken a few seconds apart, switching with Ctrl+Shift+F9. Under each
-pair is the METAR the sim gave the mod at that moment. For San Francisco the
-time of day was set to sunset.
+Taken with live weather and the shipping settings. Each
+pair was taken a few seconds apart.
 
 ### Haze
 
@@ -71,14 +69,14 @@ time of day was set to sunset.
     <td><img src="Screenshots/haze-dakar-on.jpg" alt="Mod on: Dakar, dust at 1.6 km"></td>
   </tr>
   <tr>
-    <td colspan="2"><b>Dakar</b>, dust at 1.6 km: a dense, brownish dust haze over the city and the sea.<br><sub>METAR <code>GOBD 240930Z 05011KT 1600 DU NSC 30/18 Q1013 NOSIG</code></sub></td>
+    <td colspan="2"><b>Dakar</b>, dust at 1.6 km: a dense, brownish dust haze.<br><sub>METAR <code>GOBD 240930Z 05011KT 1600 DU NSC 30/18 Q1013 NOSIG</code></sub></td>
   </tr>
   <tr>
     <td><img src="Screenshots/haze-mumbai-off.jpg" alt="Mod off: Mumbai, humid haze at 1.8 km"></td>
     <td><img src="Screenshots/haze-mumbai-on.jpg" alt="Mod on: Mumbai, humid haze at 1.8 km"></td>
   </tr>
   <tr>
-    <td colspan="2"><b>Mumbai</b>, humid haze at 1.8 km: a white haze that glows toward the sun.<br><sub>METAR <code>VABB 241000Z 29010KT 1800 HZ NSC 34/24 Q1007 NOSIG</code></sub></td>
+    <td colspan="2"><b>Mumbai</b>, white humid haze at 1.8 km.<br><sub>METAR <code>VABB 241000Z 29010KT 1800 HZ NSC 34/24 Q1007 NOSIG</code></sub></td>
   </tr>
   <tr>
     <td><img src="Screenshots/haze-delhi-off.jpg" alt="Mod off: Delhi, haze at 5 km"></td>
@@ -161,7 +159,7 @@ time of day was set to sunset.
     <td><img src="Screenshots/clouds-liverpool-runway-on.jpg" alt="Mod on: Liverpool, runway 09 in light showers"></td>
   </tr>
   <tr>
-    <td colspan="2"><b>Liverpool</b>, runway 09 in light showers: darker under the shower, brighter toward the sun on the right. MSFS's overcast is an even grey.<br><sub>METAR <code>EGGP 241120Z 17013G23KT 9999 7000NW -SHRA BKN016 BKN035 OVC040 09/07 Q0997</code></sub></td>
+    <td colspan="2"><b>Liverpool</b>, runway 09 in light showers: darker under the shower, brighter towards the sun. MSFS's overcast is an even grey.<br><sub>METAR <code>EGGP 241120Z 17013G23KT 9999 7000NW -SHRA BKN016 BKN035 OVC040 09/07 Q0997</code></sub></td>
   </tr>
   <tr>
     <td><img src="Screenshots/clouds-bratislava-off.jpg" alt="Mod off: Bratislava"></td>
@@ -189,7 +187,7 @@ time of day was set to sunset.
     <td><img src="Screenshots/clouds-stockholm-cockpit-on.jpg" alt="Mod on: Stockholm Arlanda, from the cockpit"></td>
   </tr>
   <tr>
-    <td colspan="2"><b>Stockholm Arlanda</b>, from the cockpit: scattered cloud with blue sky between, as reported. MSFS closes it to an overcast.<br><sub>METAR <code>ESSA 241050Z 11009KT 9999 SCT011 10/08 Q1012 TEMPO BKN012</code></sub></td>
+    <td colspan="2"><b>Stockholm Arlanda</b>: scattered cloud with blue sky between, as reported. MSFS closes it to an overcast.<br><sub>METAR <code>ESSA 241050Z 11009KT 9999 SCT011 10/08 Q1012 TEMPO BKN012</code></sub></td>
   </tr>
   <tr>
     <td><img src="Screenshots/clouds-cape-town-off.jpg" alt="Mod off: Cape Town"></td>
