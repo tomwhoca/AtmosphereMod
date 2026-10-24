@@ -43,8 +43,6 @@ rendering, and consists of several components:
 > errors, may crash the sim or may cost performance. See the
 > [disclaimer](#disclaimer).
 
-> **Draft.** Not released yet.
-
 ## Screenshots
 
 Taken with live weather and the shipping settings. Each
@@ -400,8 +398,10 @@ Store or Steam version. Systems that have been reported will be added here.
 
 1. Install ReShade with full add-on support for MSFS 2024, and start the sim
    once with it.
-2. Close the sim, unzip the AtmosphereMod release anywhere, and double-click
-   **`Install AtmosphereMod.cmd`**. The installer:
+2. Download the latest `AtmosphereMod-<version>.zip` from the
+   [Releases page](https://github.com/tomwhoca/AtmosphereMod/releases).
+   Close the sim, unzip it anywhere (not into the Community folder), and
+   double-click **`Install AtmosphereMod.cmd`**. The installer:
    - finds your MSFS 2024 installation, ReShade next to it, and your
      Community folder (it shows what it found and asks before changing
      anything);
@@ -423,7 +423,8 @@ downloaded from the internet and aren't signed:
 To avoid the warnings, right-click the zip before unzipping it, choose
 **Properties**, tick **Unblock** and click **OK**. Only do this with a release
 downloaded from the
-[AtmosphereMod GitHub page](https://github.com/tomwhoca/AtmosphereMod/releases).
+[AtmosphereMod GitHub page](https://github.com/tomwhoca/AtmosphereMod/releases)
+or its flightsim.to page.
 
 The game's own files stay untouched: the add-on swaps shaders in memory as the
 sim creates them. The installer's log is in
