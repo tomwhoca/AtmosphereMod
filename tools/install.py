@@ -9,8 +9,9 @@ the bundled or the system Python), or:
 What it does, with the sim closed:
 1. finds MSFS 2024 (MS Store / Xbox app or Steam), ReShade next to it, and the
    Community folder;
-2. finds Microsoft's DirectX Shader Compiler (the Windows SDK's, or a copy it
-   downloads once from Microsoft's GitHub release, after asking);
+2. finds Microsoft's DirectX Shader Compiler (the release's own copy in its
+   dxc folder, else the Windows SDK's, else a copy it downloads once from Microsoft's
+   GitHub release, after asking);
 3. extracts the sim's shaders from its own shader pack into a work folder and
    patches them there (patch_dxil.py); targets the patcher doesn't recognise
    (after a sim update) are skipped and stay stock;
@@ -191,9 +192,10 @@ def find_dxc(data: Path, given: Path | None, yes: bool) -> Path:
     candidates = []
     if given:
         candidates.append(given / "dxc.exe" if given.is_dir() else given)
-    downloaded = data / "dxc" / "bin" / "x64"
-    if (downloaded / "dxc.exe").exists() and signed_by_microsoft(downloaded):  # (an earlier download)
-        candidates.append(downloaded / "dxc.exe")
+    for folder in (HERE / "dxc" / "bin" / "x64",   # the release's own copy
+                   data / "dxc" / "bin" / "x64"):  # an earlier download
+        if (folder / "dxc.exe").exists() and signed_by_microsoft(folder):
+            candidates.append(folder / "dxc.exe")
     kits = Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "Windows Kits" / "10" / "bin"
     candidates += sorted(kits.glob("10.*/x64/dxc.exe"), reverse=True)
     others = []

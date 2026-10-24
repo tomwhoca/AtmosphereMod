@@ -5,16 +5,18 @@
 The version defaults to the add-on's (project VERSION in addon/CMakeLists.txt).
 --build first runs build_addon, build_efb and build_shaders. Python's
 embeddable package is bundled from build/python/ (download it from python.org
-into that folder; only versions whose SHA-256 is pinned below are accepted).
-The release:
+into that folder; only versions whose SHA-256 is pinned below are accepted),
+and Microsoft's DirectX Shader Compiler from build/dxc/ (the release zip
+install.py pins). The release:
 
     Install AtmosphereMod.cmd, Uninstall AtmosphereMod.cmd, README.md (its
     Screenshots section points to the GitHub page: the images aren't
     shipped), THIRD-PARTY-NOTICES.txt, LICENSE
     installer/  install.py and the patcher (patch_dxil.py, disasm.py,
-                extract_pak.py, manifest.json, dxilasm.exe), VERSION, and
+                extract_pak.py, manifest.json, dxilasm.exe), VERSION,
                 python/: the embeddable Python (with --no-python the system's
-                3.10+ is used)
+                3.10+ is used), and dxc/: the compiler's x64 binaries with
+                the package's licences and release notes, unchanged
     payload/    AtmosphereMod.addon64, shaders/<crc>.cso (our own HLSL
                 replacements, from public sources only), tunables.ini (the
                 shipping defaults, shaders/tunables.defaults.ini), efb/
@@ -33,6 +35,8 @@ import sys
 import zipfile
 from pathlib import Path
 
+import install  # (the compiler release it pins)
+
 ROOT = Path(__file__).resolve().parent.parent
 BUILD = ROOT / "build"
 DIST = ROOT / "dist"
@@ -42,6 +46,11 @@ REPO = "https://github.com/tomwhoca/AtmosphereMod"
 PYTHON_EMBED = {
     "python-3.14.9-embed-amd64.zip": "3c01d7cfc666f746a6f064f60fb2156ab0ec464d3d738ab796371a46a9bb24a2",
 }
+# What we ship from the compiler's release zip. Its ReleaseNotes.md says
+# LICENSE-LLVM.txt applies to every file but d3d12shader.h (MIT, not shipped);
+# from 1.8.2502 on, that includes dxil.dll.
+DXC_SHIPPED = ("bin/x64/dxc.exe", "bin/x64/dxcompiler.dll", "bin/x64/dxil.dll",
+               "LICENSE-LLVM.txt", "LICENSE-MIT.txt", "LICENSE-MS.txt", "ReleaseNotes.md")
 
 CMD = r"""@echo off
 setlocal
@@ -81,10 +90,13 @@ Python (bundled in installer/python, unchanged: python.org's Windows
 embeddable package {python})
 Python Software Foundation License; see installer/python/LICENSE.txt.
 
-Microsoft DirectX Shader Compiler
-- Not included. The installer uses the Windows SDK's copy, or downloads the
-  official release from https://github.com/microsoft/DirectXShaderCompiler
-  onto the user's PC, under its own licences.
+Microsoft DirectX Shader Compiler {dxc_version} (bundled in installer/dxc,
+unchanged: the x64 dxc.exe, dxcompiler.dll and dxil.dll from Microsoft's
+release {dxc_zip}, https://github.com/microsoft/DirectXShaderCompiler)
+Per the package's release notes (installer/dxc/ReleaseNotes.md, "Licenses"),
+LICENSE-LLVM.txt applies to these files:
+
+{llvm}
 
 Microsoft Flight Simulator 2024
 - None of the game's files are included. The installer extracts and patches
@@ -152,6 +164,15 @@ def main() -> None:
             sys.exit(f"{python.name}: SHA-256 doesn't match python.org's")
         with zipfile.ZipFile(python) as z:
             z.extractall(inst / "python")
+    dxc_zip = BUILD / "dxc" / install.DXC_URL.rsplit("/", 1)[1]
+    if not dxc_zip.exists():
+        sys.exit(f"{dxc_zip} missing: download it from {install.DXC_URL}")
+    if hashlib.sha256(dxc_zip.read_bytes()).hexdigest() != install.DXC_SHA256:
+        sys.exit(f"{dxc_zip.name}: SHA-256 doesn't match install.py's DXC_SHA256")
+    with zipfile.ZipFile(dxc_zip) as z:
+        for name in DXC_SHIPPED:
+            (inst / "dxc" / name).parent.mkdir(parents=True, exist_ok=True)
+            (inst / "dxc" / name).write_bytes(z.read(name))
 
     # the payload: the add-on, our own shaders (public sources only), settings, the EFB app
     shutil.copy2(BUILD / "AtmosphereMod.addon64", payload / "AtmosphereMod.addon64")
@@ -176,7 +197,9 @@ def main() -> None:
     (out / "Uninstall AtmosphereMod.cmd").write_text(CMD.replace("{args}", "--uninstall "), newline="\r\n")
     (out / "README.md").write_text(release_readme(), encoding="utf-8")
     reshade = (ROOT / "third_party" / "reshade" / "LICENSE.md").read_text(encoding="utf-8")
-    notices = NOTICES.replace("{reshade}", reshade).replace("{python}", python.stem if python else "(not bundled)")
+    notices = (NOTICES.replace("{reshade}", reshade).replace("{python}", python.stem if python else "(not bundled)")
+               .replace("{dxc_version}", install.DXC_VERSION).replace("{dxc_zip}", dxc_zip.name)
+               .replace("{llvm}", (inst / "dxc" / "LICENSE-LLVM.txt").read_text(encoding="utf-8")))
     (out / "THIRD-PARTY-NOTICES.txt").write_text(notices, encoding="utf-8")
     if (ROOT / "LICENSE").exists():
         shutil.copy2(ROOT / "LICENSE", out / "LICENSE")

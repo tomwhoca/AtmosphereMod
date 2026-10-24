@@ -372,11 +372,8 @@ with them is logged in `%LOCALAPPDATA%\AtmosphereMod\logs\weather.log`.
   support"**, installed for `FlightSimulator2024.exe`. The standard ReShade
   build only loads approved add-ons.
 - Windows 10 or 11 and a DirectX 12 graphics card.
-- [Python](https://www.python.org/downloads/) 3.10 or newer, for the
-  installer (unless the release bundles its own).
-- Microsoft's DirectX Shader Compiler, for the installer. It uses the Windows
-  SDK's copy if you have one; otherwise it offers to download Microsoft's
-  official release (about 26 MB, once).
+- Nothing else to download: the installer brings its own Python and
+  Microsoft's DirectX Shader Compiler.
 - For the METAR features: the included EFB app (installed into your Community
   folder). It runs in the background in any aircraft and passes the sim's own
   METARs to the add-on.
@@ -533,3 +530,6 @@ Third-party components keep their own licences (`THIRD-PARTY-NOTICES.txt`).
   Atmospheric Scattering" (2008), and Sébastien Hillaire, "A Scalable and
   Production Ready Sky and Atmosphere Rendering Technique" (2020).
 - The Microsoft Flight Simulator 2024 SDK: SimConnect and the EFB framework.
+- Bundled with the installer, unchanged and under their own licences: Python
+  (Python Software Foundation) and Microsoft's DirectX Shader Compiler (LLVM
+  licence).
