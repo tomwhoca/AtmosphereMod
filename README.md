@@ -485,6 +485,12 @@ and your `tunables.ini`). ReShade itself stays installed.
 - DirectX 12 only. The performance cost hasn't been measured on other systems
   yet.
 
+## Support the mod
+
+AtmosphereMod is free. If you like it and would like to support its
+development, you can [buy me a coffee](https://buymeacoffee.com/tomwhoca).
+Thank you!
+
 ## Disclaimer
 
 - AtmosphereMod is unofficial and experimental. It is provided "as is",
