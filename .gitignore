@@ -34,3 +34,6 @@ tools/lab/radarlab_vs.hlsl
 shaders/tunables.ini
 # release builds (tools/make_release.py)
 dist/
+
+# flightsim.to release page drafts and artwork (not part of the repo)
+flightsim.to/
