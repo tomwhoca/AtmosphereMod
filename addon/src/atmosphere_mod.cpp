@@ -262,8 +262,12 @@ constexpr uint64_t kCaptureLatencyFrames = 4;   // frames between a copy and rea
 constexpr uint64_t kCaptureTimeoutFrames = 1800;
 constexpr uint64_t kDispatchRateFrames = 900;   // window for dispatch_rates.log
 
-// Retired replacement pipelines may still be in flight on the GPU.
-constexpr uint64_t kGraveyardFrames = 8;
+// Retired replacement pipelines (F10) may still be in flight on the GPU, in
+// command lists the game recorded before the swap and the GPU has yet to run:
+// kept for both this many presents and seconds (with frame generation each
+// rendered frame is presented twice, so presents alone are a short margin).
+constexpr uint64_t kGraveyardFrames = 600;
+constexpr auto kGraveyardTime = std::chrono::seconds(10);
 
 // A compute pipeline (all are tracked, for logging) or a graphics pipeline
 // whose pixel shader has a replacement or is watched (only those are tracked).
@@ -279,6 +283,7 @@ struct TrackedPipeline
     uint32_t cloud_param = UINT32_MAX;  // injected cloud constants (compute only)
     uint32_t tlas_param = UINT32_MAX;   // injected root SRV for MSFS's TLAS (compute only)
     pipeline replacement = {};
+    device *dev = nullptr;  // the game's pipeline and its replacement belong to it
 };
 
 struct LayoutParam
@@ -310,7 +315,14 @@ std::unordered_map<uint64_t, uint32_t> g_tlas_injected;             // layout ->
 std::atomic<uint64_t> g_tlas_va{0};
 std::atomic<uint64_t> g_tlas_frame{0};
 constexpr uint64_t kTlasFreshFrames = 2;
-std::vector<std::pair<pipeline, uint64_t>> g_graveyard;             // pipeline, frame retired
+struct Retired
+{
+    device *dev;
+    pipeline pipe;
+    uint64_t frame;
+    std::chrono::steady_clock::time_point time;
+};
+std::vector<Retired> g_graveyard;
 std::array<float, kTunableCount> g_tunables = {};            // tunables.ini
 std::array<float, kTunableCount> g_effective_tunables = {};  // with the weather feed blended in (T13)
 std::array<float, kTunableCount> g_radar_tunables = {};      // tunables.ini R0..R13
@@ -338,6 +350,7 @@ resource g_debug_buffer = {};
 resource_view g_debug_view = {};
 resource g_readback = {};
 resource g_anchor_upload = {};  // kAnchorUploadSlots station tables, upload heap
+device *g_debug_device = nullptr;  // the debug resources belong to it (the game's device)
 std::array<uint8_t, weather::kAnchorTableBytes> g_anchor_uploaded = {};
 uint64_t g_anchor_uploaded_at = 0;
 uint32_t g_anchor_uploads = 0;
@@ -642,10 +655,10 @@ void log_dispatch(const TrackedPipeline &info, const std::string &size)
     write_line(g_dispatch_log, line);
 }
 
-void retire(pipeline pipe)
+void retire(device *dev, pipeline pipe)
 {
     if (pipe.handle != 0)
-        g_graveyard.emplace_back(pipe, g_frame.load());  // caller holds g_mutex
+        g_graveyard.push_back({ dev, pipe, g_frame.load(), std::chrono::steady_clock::now() });  // caller holds g_mutex
 }
 
 void reload(device *dev)
@@ -659,6 +672,7 @@ void reload(device *dev)
         uint64_t handle;
         uint32_t crc;
         pipeline_layout layout;
+        device *dev;
     };
     std::vector<Job> jobs;
     size_t graphics = 0;
@@ -673,7 +687,7 @@ void reload(device *dev)
             if (info.graphics)
                 graphics += info.replacement.handle != 0;  // rebuilt only at creation
             else if (info.replacement.handle != 0 || fresh.contains(info.crc))
-                jobs.push_back({ handle, info.crc, info.layout });
+                jobs.push_back({ handle, info.crc, info.layout, info.dev != nullptr ? info.dev : dev });
         }
     }
 
@@ -689,7 +703,7 @@ void reload(device *dev)
                 layout_alive = g_layouts.contains(job.layout.handle);
             }
             if (layout_alive)
-                replacement = create_replacement(dev, job.layout, it->second, job.crc);
+                replacement = create_replacement(job.dev, job.layout, it->second, job.crc);
             else
                 ++skipped;
         }
@@ -698,10 +712,10 @@ void reload(device *dev)
         const auto info = g_pipelines.find(job.handle);
         if (info == g_pipelines.end())
         {
-            retire(replacement);
+            retire(job.dev, replacement);
             continue;
         }
-        retire(info->second.replacement);
+        retire(job.dev, info->second.replacement);
         info->second.replacement = replacement;
         replaced += replacement.handle != 0;
     }
@@ -713,19 +727,20 @@ void reload(device *dev)
                     : ""));
 }
 
-void collect_garbage(device *dev, uint64_t frame)
+void collect_garbage(uint64_t frame)
 {
-    std::vector<pipeline> dead;
+    std::vector<Retired> dead;
     {
         const std::unique_lock lock(g_mutex);
-        const auto split = std::partition(g_graveyard.begin(), g_graveyard.end(),
-            [frame](const auto &item) { return frame - item.second < kGraveyardFrames; });
-        for (auto it = split; it != g_graveyard.end(); ++it)
-            dead.push_back(it->first);
+        const auto now = std::chrono::steady_clock::now();
+        const auto split = std::partition(g_graveyard.begin(), g_graveyard.end(), [&](const Retired &r) {
+            return frame - r.frame < kGraveyardFrames || now - r.time < kGraveyardTime;
+        });
+        dead.assign(split, g_graveyard.end());
         g_graveyard.erase(split, g_graveyard.end());
     }
-    for (const pipeline pipe : dead)
-        dev->destroy_pipeline(pipe);
+    for (const Retired &r : dead)
+        r.dev->destroy_pipeline(r.pipe);
 }
 
 // ---------------------------------------------------------------- root signature injection
@@ -1603,6 +1618,7 @@ void create_debug_resources(device *dev)
 
     if (failed == nullptr)
     {
+        g_debug_device = dev;
         event(reshade::log::level::info, "debug resources created");
         return;
     }
@@ -1613,21 +1629,44 @@ void create_debug_resources(device *dev)
         dev->destroy_resource(std::exchange(g_debug_buffer, resource{}));
 }
 
+// Only what belongs to the device being destroyed: other software in the sim's
+// process may create and destroy a D3D12 device of its own (a 640 x 480 one
+// at the start of a flight did, 2026-10-25), and tearing down the game's
+// replacements and debug buffer then turned the mod off in that flight, and an
+// F10 afterwards hung the GPU (the replacements' debug UAV was gone).
 void on_destroy_device(device *dev)
 {
     std::vector<pipeline> pipes;
     {
         const std::unique_lock lock(g_mutex);
-        for (const auto &[pipe, frame] : g_graveyard)
-            pipes.push_back(pipe);
-        g_graveyard.clear();
-        for (auto &[handle, info] : g_pipelines)
-            if (info.replacement.handle != 0)
-                pipes.push_back(std::exchange(info.replacement, pipeline{}));
+        const auto split = std::partition(g_graveyard.begin(), g_graveyard.end(),
+                                          [dev](const Retired &r) { return r.dev != dev; });
+        for (auto it = split; it != g_graveyard.end(); ++it)
+            pipes.push_back(it->pipe);
+        g_graveyard.erase(split, g_graveyard.end());
+        for (auto it = g_pipelines.begin(); it != g_pipelines.end();)
+        {
+            if (it->second.dev != dev)
+            {
+                ++it;
+                continue;
+            }
+            if (it->second.replacement.handle != 0)
+                pipes.push_back(it->second.replacement);
+            it = g_pipelines.erase(it);  // (the game's pipeline goes with its device)
+        }
     }
     for (const pipeline pipe : pipes)
         dev->destroy_pipeline(pipe);
 
+    if (dev != g_debug_device)
+    {
+        if (!pipes.empty() || dev->get_api() == device_api::d3d12)
+            event(reshade::log::level::info, "a D3D12 device other than the game's was destroyed: " +
+                  std::to_string(pipes.size()) + " replacement(s) of its own released, the game's kept");
+        return;
+    }
+    g_debug_device = nullptr;
     if (g_debug_view.handle != 0)
         dev->destroy_resource_view(std::exchange(g_debug_view, resource_view{}));
     if (g_debug_buffer.handle != 0)
@@ -1745,6 +1784,7 @@ void on_init_pipeline(device *dev, pipeline_layout layout, uint32_t count, const
     info.crc = is_compute ? compute_crc : pixel_crc;
     info.layout = layout;
     info.graphics = !is_compute;
+    info.dev = dev;
     std::vector<uint8_t> code;
     {
         const std::shared_lock lock(g_mutex);
@@ -1781,7 +1821,7 @@ void on_init_pipeline(device *dev, pipeline_layout layout, uint32_t count, const
         const std::unique_lock lock(g_mutex);
         if (!g_pipelines.try_emplace(pipe.handle, std::move(info)).second)
         {
-            retire(replacement);  // another thread registered this pipeline first
+            retire(dev, replacement);  // another thread registered this pipeline first
             return;
         }
     }
@@ -2093,8 +2133,13 @@ void update_effective_tunables()
 void on_present(effect_runtime *runtime)
 {
     const uint64_t frame = ++g_frame;
-    if (frame == 1)
-        create_debug_resources(runtime->get_device());
+    // (once per game device: again if the game ever recreates its device)
+    static device *debug_tried = nullptr;
+    if (g_debug_device == nullptr && runtime->get_device() != debug_tried)
+    {
+        debug_tried = runtime->get_device();
+        create_debug_resources(debug_tried);
+    }
     const bool modifiers = runtime->is_key_down(VK_CONTROL) && runtime->is_key_down(VK_SHIFT);
     if (modifiers && runtime->is_key_pressed(VK_F9))
     {
@@ -2108,7 +2153,7 @@ void on_present(effect_runtime *runtime)
     advance_capture(runtime, frame);
     if (frame % kDispatchRateFrames == 0)
         log_dispatch_rates(frame);
-    collect_garbage(runtime->get_device(), frame);
+    collect_garbage(frame);
     update_effective_tunables();
     upload_anchor_table(runtime, frame);
 }
