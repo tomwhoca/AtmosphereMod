@@ -39,7 +39,7 @@ def main() -> None:
         dst = args.extracted / "disasm" / r["entry"] / (src.stem + ".asm")
         dst.parent.mkdir(parents=True, exist_ok=True)
         res = subprocess.run([str(dxc), "-dumpbin", str(src), "-Fc", str(dst)],
-                             capture_output=True, text=True)
+                             capture_output=True, encoding="utf-8", errors="replace")
         if res.returncode:
             print(f"FAILED {src.name}: {res.stderr.strip()[:200]}")
     print(f"{len(rows)} shaders disassembled with {dxc}")

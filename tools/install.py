@@ -102,8 +102,18 @@ def version() -> str:
 
 
 def sim_running() -> bool:
-    out = subprocess.run(["tasklist", "/FI", f"IMAGENAME eq {EXE}", "/NH"], capture_output=True, text=True).stdout
-    return EXE in out
+    # (tasklist answers in the system's language and console code page: compare bytes, the exe name is ASCII)
+    out = subprocess.run(["tasklist", "/FI", f"IMAGENAME eq {EXE}", "/NH"], capture_output=True).stdout
+    return EXE.lower().encode() in out.lower()
+
+
+def read_config(path: Path) -> str:
+    """A text file the sim, Steam or ReShade wrote: UTF-8, else the system's code page."""
+    raw = path.read_bytes()
+    try:
+        return raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return raw.decode("mbcs", errors="replace")
 
 
 # ---------------------------------------------------------------- finding things
@@ -118,7 +128,7 @@ def steam_libraries() -> list[Path]:
     libs = [steam]
     vdf = steam / "steamapps" / "libraryfolders.vdf"
     if vdf.exists():
-        for m in re.finditer(r'"path"\s+"([^"]+)"', vdf.read_text(errors="ignore")):
+        for m in re.finditer(r'"path"\s+"([^"]+)"', read_config(vdf)):
             libs.append(Path(m[1].replace("\\\\", "\\")))
     return libs
 
@@ -209,7 +219,7 @@ def reshade_version(sim: Path) -> str | None:
     """ReShade's version from its log (written on every start), if it has run."""
     log = sim / "ReShade.log"
     if log.exists():
-        m = re.search(r"ReShade version '([\d.]+)'", log.read_text(errors="ignore"))
+        m = re.search(r"ReShade version '([\d.]+)'", read_config(log))
         if m:
             return m[1]
     return None
@@ -220,8 +230,8 @@ def community_folder() -> Path | None:
     for cfg in (Path(os.environ["LOCALAPPDATA"]) / "Packages/Microsoft.Limitless_8wekyb3d8bbwe/LocalCache/UserCfg.opt",
                 Path(os.environ["APPDATA"]) / "Microsoft Flight Simulator 2024/UserCfg.opt"):
         if cfg.exists():
-            m = re.search(r'^InstalledPackagesPath\s+"([^"]+)"', cfg.read_text(errors="ignore"), re.M)
-            if m:
+            m = re.search(r'^InstalledPackagesPath\s+"([^"]+)"', read_config(cfg), re.M)
+            if m and Path(m[1]).is_dir():
                 return Path(m[1]) / "Community"
     return None
 
@@ -263,7 +273,7 @@ def ask_community_folder(yes: bool, skip: str) -> Path | None:
 
 
 def dxc_version(dxc: Path) -> str:
-    out = subprocess.run([str(dxc), "--version"], capture_output=True, text=True).stdout
+    out = subprocess.run([str(dxc), "--version"], capture_output=True, encoding="utf-8", errors="replace").stdout
     m = re.search(r"dxcompiler\.dll: [\d.]+ - (\d+\.\d+\.\d+)", out)
     return m[1] if m else "?"
 
@@ -276,7 +286,7 @@ def signed_by_microsoft(folder: Path) -> bool:
               "if ($s.Status -ne 'Valid' -or $s.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') "
               "{ $ok = $false } }; if ($ok) { 'valid' }")
     out = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
-                         capture_output=True, text=True).stdout
+                         capture_output=True, encoding="utf-8", errors="replace").stdout
     return out.strip() == "valid"
 
 
@@ -394,8 +404,9 @@ def patch(pak: Path, dxc: Path, work: Path, shaders: Path, log) -> tuple[int, in
     (work / "shaders").mkdir(parents=True)
     shutil.copy2(HERE / "manifest.json", work / "shaders" / "manifest.json")
     say(f"Extracting the sim's shaders from {pak.name} ...")
-    res = subprocess.run([sys.executable, str(HERE / "extract_pak.py"), "--pak", str(pak), "--out",
-                          str(work / "extracted")], capture_output=True, text=True)
+    # (-X utf8: the bundled Python is isolated, it ignores PYTHONIOENCODING)
+    res = subprocess.run([sys.executable, "-X", "utf8", str(HERE / "extract_pak.py"), "--pak", str(pak), "--out",
+                          str(work / "extracted")], capture_output=True, encoding="utf-8", errors="replace")
     log.write(res.stdout + res.stderr)
     if res.returncode != 0:
         raise InstallError(f"extracting the shaders failed:\n{res.stderr.strip()}")

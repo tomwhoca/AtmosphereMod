@@ -3909,7 +3909,7 @@ PATCHES = {"medium": patch_medium, "cloud_ap": patch_cloud_ap, "clouds": patch_c
 
 
 def disassemble(blob: Path, dxc: Path) -> str:
-    out = subprocess.run([str(dxc), "-dumpbin", str(blob)], capture_output=True, text=True)
+    out = subprocess.run([str(dxc), "-dumpbin", str(blob)], capture_output=True, encoding="utf-8", errors="replace")
     if out.returncode != 0:
         raise PatchError(f"dxc -dumpbin failed: {out.stderr.strip()}")
     return out.stdout
