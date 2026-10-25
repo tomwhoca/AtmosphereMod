@@ -2,6 +2,7 @@
 
 #include "cloud_stations.h"
 #include "haze_mapping.h"
+#include "settings_bridge.h"
 
 #include <windows.h>
 #pragma warning(push, 0)  // the SDK header trips /W4
@@ -22,6 +23,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 
 namespace weather
 {
@@ -31,6 +33,7 @@ enum : DWORD
 {
     kDefAircraft = 1, kReqAircraft = 1, kDefAirport = 2, kReqAirport = 2, kDefRadar = 3, kReqRadar = 3,
     kReqAircraftPath = 4, kDefShadow = 5, kReqShadow = 5, kEvtMetar = 10, kEvtAircraftLoaded = 11,
+    kEvtSettings = 12,   // the EFB app's settings (settings_bridge.h)
     kReqStation0 = 100,  // ... + kStationRequests: the anchoring stations' facility data
 };
 constexpr DWORD kStationRequests = 16;
@@ -125,6 +128,7 @@ haze::Metar g_held_metar;            // the aircraft's METAR, asked for where th
 ULONGLONG g_held_since = 0;
 std::array<float, std::size(kDriven)> g_target = {};
 bool g_have_target = false;
+std::string g_summary;                   // the METAR's haze in a line, for the EFB app's settings
 std::string g_station;                   // METAR station whose elevation was requested
 double g_station_elevation_m = NAN;      // NAN until the facility data arrives
 double g_station_lat = NAN, g_station_lon = NAN;  // ... its position (facility data)
@@ -242,6 +246,12 @@ std::string recompute()
     const haze::Tunables t = haze::derive(g_inputs);
     g_target = to_array(t);
     g_have_target = true;
+    // (haze::AirMass order)
+    static const char *const kinds[] = { "continental haze", "haze (HZ)", "smoke (FU)", "dust", "volcanic ash" };
+    char summary[160];
+    snprintf(summary, sizeof(summary), "%s: %s, visibility ~%.0f km, humidity %.0f%%", g_inputs.metar.icao.c_str(),
+             kinds[static_cast<int>(t.air)], 3.0 / (t.sigma + haze::kRayleigh550), 100.0 * t.rh);
+    g_summary = summary;
     return haze::describe(g_inputs, t);
 }
 
@@ -552,6 +562,14 @@ bool dispatch(HANDLE sim, std::string &partial, std::string &last_metar, ULONGLO
         case SIMCONNECT_RECV_ID_COMM_BUS:
         {
             const auto *bus = static_cast<SIMCONNECT_RECV_COMM_BUS *>(msg);
+            if (bus->uEventID == kEvtSettings)
+            {
+                static std::string settings_partial;  // (this thread only)
+                settings_partial += bus->rgData;
+                if (bus->dwEntryNumber + 1 >= bus->dwOutOf)
+                    settings::on_message(std::exchange(settings_partial, {}));
+                break;
+            }
             if (bus->uEventID != kEvtMetar)
                 break;
             partial += bus->rgData;  // large messages arrive in chunks
@@ -652,6 +670,7 @@ void run_loop()
         SimConnect_RequestDataOnSimObject(sim, kReqAircraft, kDefAircraft, SIMCONNECT_OBJECT_ID_USER,
                                           SIMCONNECT_PERIOD_SECOND, SIMCONNECT_DATA_REQUEST_FLAG_DEFAULT, 0, 9);
         SimConnect_SubscribeToCommBusEvent(sim, kEvtMetar, kMetarEvent);
+        SimConnect_SubscribeToCommBusEvent(sim, kEvtSettings, settings::kSettingsEvent);
         SimConnect_AddToFacilityDefinition(sim, kDefAirport, "OPEN AIRPORT");
         SimConnect_AddToFacilityDefinition(sim, kDefAirport, "LATITUDE");
         SimConnect_AddToFacilityDefinition(sim, kDefAirport, "LONGITUDE");
@@ -701,7 +720,10 @@ void run_loop()
                 survey(sim);
                 next_survey = GetTickCount64() + kSurveyIntervalMs;
             }
-            Sleep(200);
+            if (const auto state = settings::to_send())
+                SimConnect_CallCommBusEvent(sim, settings::kStateEvent, SIMCONNECT_COMM_BUS_BROADCAST_TO_JS,
+                                            static_cast<DWORD>(state->size() + 1), state->c_str());
+            Sleep(50);  // (settings from the EFB app's sliders apply within a frame or two of arriving)
         }
         SimConnect_Close(sim);
         {
@@ -772,6 +794,12 @@ float freezing_level_m()
 {
     const std::lock_guard lock(g_mutex);
     return static_cast<float>(freezing_level_locked());
+}
+
+std::string summary()
+{
+    const std::lock_guard lock(g_mutex);
+    return g_summary;
 }
 
 std::array<float, kTunableCount> apply(const std::array<float, kTunableCount> &ini, float dt_seconds)

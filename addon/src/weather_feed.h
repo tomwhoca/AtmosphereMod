@@ -11,6 +11,7 @@
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include <string>
 
 namespace weather
 {
@@ -53,6 +54,11 @@ AircraftShadow aircraft_shadow();
 // temperature lapsed at 6.5 C/km from the station's elevation. NAN until a
 // METAR with a temperature arrives. Any thread.
 float freezing_level_m();
+
+// The latest METAR's haze in a line, for the EFB app's settings ("KIND:
+// continental haze, visibility ~68 km, humidity 46%"); empty until a METAR
+// arrives. Any thread.
+std::string summary();
 
 // METAR anchoring of the clouds (cloud_stations.h): the station table the
 // patched ch_cloudDensity reads from the debug buffer (tools/patch_dxil.py

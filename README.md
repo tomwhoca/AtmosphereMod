@@ -339,8 +339,9 @@ add-on outside the sim can't read them directly.
 - The app is called "AtmosphereMod" and is installed into your Community
   folder.
 - It runs in the background on every aircraft's tablet (EFB) from the start
-  of the flight. You don't need to open it; opening it shows its status and
-  the last METAR it passed on.
+  of the flight. You don't need to open it for the METARs; opening it shows the
+  mod's settings (see [Settings](#settings)), its status and the last METAR it
+  passed on.
 - When the add-on asks, it fetches a METAR from the sim and sends it to the
   add-on over the sim's CommBus, through SimConnect.
 
@@ -372,9 +373,9 @@ with them is logged in `%LOCALAPPDATA%\AtmosphereMod\logs\weather.log`.
 - Windows 10 or 11 and a DirectX 12 graphics card.
 - Nothing else to download: the installer brings its own Python and
   Microsoft's DirectX Shader Compiler.
-- For the METAR features: the included EFB app (installed into your Community
-  folder). It runs in the background in any aircraft and passes the sim's own
-  METARs to the add-on.
+- For the METAR features and the settings on the EFB tablet: the included EFB
+  app (installed into your Community folder). It runs in the background in any
+  aircraft and passes the sim's own METARs to the add-on.
 
 ### Tested systems
 
@@ -453,8 +454,15 @@ All hotkeys use **Ctrl+Shift**:
 
 ### Settings
 
-Everything is set in `tunables.ini` and takes effect with Ctrl+Shift+F10.
-Each setting is explained in the file. The ones you're most likely to touch:
+The main settings are in the **AtmosphereMod app on your EFB tablet**, as
+switches and sliders in four tabs: Haze, Sky & light, Cloud lighting and Clouds.
+Changes apply at once and are saved to `tunables.ini`. While the haze comes
+from the METAR, the manual haze sliders are greyed out and show what the METAR
+set. The app's "Reload tunables.ini" button does what Ctrl+Shift+F10 does.
+
+Every setting, including the ones the app doesn't show, is in `tunables.ini`,
+where each one is explained; edits there take effect with Ctrl+Shift+F10. The
+ones you're most likely to touch:
 
 | Setting | What it does |
 |---|---|

@@ -34,6 +34,7 @@
 #include <d3d12.h>
 
 #include "cloud_stations.h"
+#include "settings_bridge.h"
 #include "weather_feed.h"
 
 #include <algorithm>
@@ -2130,6 +2131,90 @@ void update_effective_tunables()
     g_effective_cloud_tunables = cloud;
 }
 
+// The state the EFB app's settings show (settings_bridge.h): tunables.ini's T
+// and C values, the atmosphere tunables the shaders get (TE, rounded: they
+// drift while the METAR's haze is smoothed in), the Ctrl+Shift+F9 switch and
+// the METAR's haze in a line.
+std::string settings_state()
+{
+    std::array<float, kTunableCount> ini, effective;
+    std::array<float, kCloudTunableCount> cloud;
+    {
+        const std::shared_lock lock(g_mutex);
+        ini = g_tunables;
+        effective = g_effective_tunables;
+        cloud = g_cloud_tunables;
+    }
+    const auto list = [](const auto &values, bool rounded) {
+        std::string s = "[";
+        for (const float v : values)
+        {
+            char buf[32];
+            if (rounded)
+                snprintf(buf, sizeof(buf), "%.3g", v);
+            s += (s.size() > 1 ? "," : "") + (rounded ? std::string(buf) : settings::format(v));
+        }
+        return s + "]";
+    };
+    std::string weather;
+    for (const char c : weather::summary())
+        weather += c == '"' || c == '\\' ? std::string("\\") + c : std::string(1, c);
+    return std::string("{\"enabled\":") + (g_enabled ? "true" : "false") + ",\"T\":" + list(ini, false) +
+           ",\"C\":" + list(cloud, false) + ",\"TE\":" + list(effective, true) + ",\"weather\":\"" + weather + "\"}";
+}
+
+// The EFB app's settings: applies what it asked for, saves the changes into
+// tunables.ini once they have rested for a second (at once before a reload),
+// and publishes the state it shows, twice a second. Returns whether to reload
+// (Ctrl+Shift+F10 pressed, or the app's Reload button).
+bool sync_settings(bool reload_key)
+{
+    using namespace std::chrono_literals;
+    static std::vector<settings::Change> unsaved;
+    static auto last_change = std::chrono::steady_clock::now(), last_publish = last_change;
+    const auto now = std::chrono::steady_clock::now();
+    const settings::Requests requests = settings::take();
+    if (requests.reload)
+        event(reshade::log::level::info, "reload asked for by the EFB app");
+    const bool flush = reload_key || requests.reload;
+    if (requests.enabled && *requests.enabled != g_enabled)
+    {
+        g_enabled = *requests.enabled;
+        event(reshade::log::level::info, g_enabled ? "replacements ON (EFB app)" : "replacements OFF (EFB app)");
+    }
+    if (!requests.set.empty())
+    {
+        const std::unique_lock lock(g_mutex);
+        for (const settings::Change &c : requests.set)
+        {
+            if (c.prefix == 'T' && c.index < kTunableCount)
+                g_tunables[c.index] = c.value;
+            else if (c.prefix == 'C' && c.index < kCloudTunableCount && (c.index < 13 || c.index > 15))  // (C13-C15: ours)
+                g_cloud_tunables[c.index] = c.value;
+            else
+                continue;
+            unsaved.push_back(c);
+        }
+        last_change = now;
+    }
+    if (!unsaved.empty() && (flush || now - last_change >= 1s))
+    {
+        const fs::path path = tunables_path();
+        if (settings::save(path, unsaved))
+            event(reshade::log::level::info, "saved " + std::to_string(unsaved.size()) +
+                  " setting change(s) from the EFB app to " + path.string());
+        else
+            event(reshade::log::level::warning, "couldn't save the EFB app's settings to " + path.string());
+        unsaved.clear();
+    }
+    if (!requests.set.empty() || requests.enabled || now - last_publish >= 500ms)
+    {
+        last_publish = now;
+        settings::publish(settings_state());
+    }
+    return flush;
+}
+
 void on_present(effect_runtime *runtime)
 {
     const uint64_t frame = ++g_frame;
@@ -2146,7 +2231,8 @@ void on_present(effect_runtime *runtime)
         g_enabled = !g_enabled;
         event(reshade::log::level::info, g_enabled ? "replacements ON" : "replacements OFF (stock shaders)");
     }
-    if (modifiers && runtime->is_key_pressed(VK_F10))
+    // (the EFB app's unsaved changes go to tunables.ini before the reload reads it)
+    if (sync_settings(modifiers && runtime->is_key_pressed(VK_F10)))
         reload(runtime->get_device());
     if ((modifiers && runtime->is_key_pressed(VK_F11)) || g_auto_capture_due.exchange(false))
         request_capture(frame);

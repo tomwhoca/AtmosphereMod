@@ -2,7 +2,7 @@
   "name": "@atmospheremod/atmo-weather",
   "version": "0.1.0",
   "private": true,
-  "description": "EFB app that sends the sim's METARs to AtmosphereMod over CommBus",
+  "description": "EFB app that sends the sim's METARs to AtmosphereMod over CommBus and shows its settings",
   "scripts": {
     "typecheck": "tsc --noEmit -p .",
     "build": "npm run typecheck && node ./build.js"

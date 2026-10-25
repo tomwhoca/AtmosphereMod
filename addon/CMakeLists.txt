@@ -3,7 +3,8 @@ cmake_minimum_required(VERSION 3.20)
 project(AtmosphereMod VERSION 0.1.1 LANGUAGES CXX RC)
 
 configure_file(src/version.rc.in ${CMAKE_CURRENT_BINARY_DIR}/version.rc @ONLY)
-add_library(AtmosphereMod SHARED src/atmosphere_mod.cpp src/weather_feed.cpp ${CMAKE_CURRENT_BINARY_DIR}/version.rc)
+add_library(AtmosphereMod SHARED src/atmosphere_mod.cpp src/weather_feed.cpp src/settings_bridge.cpp
+            ${CMAKE_CURRENT_BINARY_DIR}/version.rc)
 
 # The weather feed is an in-process SimConnect client; the SDK's static library
 # keeps SimConnect.dll out of the sim's folder.
