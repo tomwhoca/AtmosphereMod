@@ -196,6 +196,30 @@ pair was taken a few seconds apart.
   </tr>
 </table>
 
+### Settings on the EFB tablet
+
+The AtmosphereMod app's four tabs (see [Settings](#settings)), here with a few
+settings changed from the defaults.
+
+<table>
+  <tr>
+    <td width="50%"><a href="Screenshots/efb-haze.png"><img src="Screenshots/efb-haze.png" alt="EFB app: the Haze tab"></a></td>
+    <td width="50%"><a href="Screenshots/efb-sky-light.png"><img src="Screenshots/efb-sky-light.png" alt="EFB app: the Sky &amp; light tab"></a></td>
+  </tr>
+  <tr>
+    <td><b>Haze</b>: the atmosphere and the METAR's haze; the manual haze is folded away.</td>
+    <td><b>Sky &amp; light</b>: real-world sky colours and the daylight white balance.</td>
+  </tr>
+  <tr>
+    <td><a href="Screenshots/efb-cloud-lighting.png"><img src="Screenshots/efb-cloud-lighting.png" alt="EFB app: the Cloud lighting tab"></a></td>
+    <td><a href="Screenshots/efb-clouds.png"><img src="Screenshots/efb-clouds.png" alt="EFB app: the Clouds tab"></a></td>
+  </tr>
+  <tr>
+    <td><b>Cloud lighting</b>, with its "More" section open: silver lining, glory, your aircraft's shadow.</td>
+    <td><b>Clouds</b>, with "More" open: the METAR anchoring, solid clouds and smooth bases.</td>
+  </tr>
+</table>
+
 ## What it does
 
 Ctrl+Shift+F9 switches between the mod and stock at any time, for comparison.
