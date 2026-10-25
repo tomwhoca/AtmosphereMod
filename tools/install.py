@@ -8,7 +8,8 @@ the bundled or the system Python), or:
 
 What it does, with the sim closed:
 1. finds MSFS 2024 (MS Store / Xbox app or Steam), ReShade next to it, and the
-   Community folder;
+   Community folder; it asks for the sim's or the Community folder if it
+   can't find them;
 2. finds Microsoft's DirectX Shader Compiler (the release's own copy in its
    dxc folder, else the Windows SDK's, else a copy it downloads once from Microsoft's
    GitHub release, after asking);
@@ -48,7 +49,8 @@ sys.path.insert(0, str(HERE))
 
 VERSION_FILE = HERE / "VERSION"
 EXE = "FlightSimulator2024.exe"
-MS_STORE_FOLDER = Path("XboxGames") / "Microsoft Flight Simulator 2024" / "Content"
+MS_STORE_LIBRARY = "XboxGames"  # the Xbox app's default game folder on each drive
+MS_STORE_FOLDER = Path("Microsoft Flight Simulator 2024") / "Content"  # in it
 STEAM_FOLDER = Path("steamapps") / "common" / "Microsoft Flight Simulator 2024"
 ADDON = "AtmosphereMod.addon64"
 EFB = "atmospheremod-weather"
@@ -121,20 +123,75 @@ def steam_libraries() -> list[Path]:
     return libs
 
 
-def find_sims() -> list[Path]:
-    """Folders holding FlightSimulator2024.exe: the MS Store / Xbox app's
-    <drive>:\\XboxGames\\...\\Content and Steam's libraries."""
-    found = []
+def xbox_libraries() -> list[Path]:
+    """The MS Store / Xbox app's game folders: <drive>:\\XboxGames, or the
+    folder chosen in the Xbox app, which each drive's .GamingRoot names (an
+    "RGBX" header, a count, then null-terminated UTF-16 paths relative to the
+    drive)."""
+    libs = []
     for d in string.ascii_uppercase:
-        if os.path.exists(f"{d}:\\"):
-            p = Path(f"{d}:\\") / MS_STORE_FOLDER
-            if (p / EXE).exists():
-                found.append(p)
+        root = Path(f"{d}:\\")
+        if not os.path.exists(root):
+            continue
+        libs.append(root / MS_STORE_LIBRARY)
+        try:
+            raw = (root / ".GamingRoot").read_bytes()
+        except OSError:
+            continue
+        if raw[:4] == b"RGBX":
+            for name in raw[8:].decode("utf-16-le", errors="ignore").split("\0"):
+                if name.strip(" \\"):
+                    libs.append(root / name.strip(" \\"))
+    return list(dict.fromkeys(libs))
+
+
+def find_sims() -> list[Path]:
+    """Folders holding FlightSimulator2024.exe: in the MS Store / Xbox app's
+    game folders (...\\Microsoft Flight Simulator 2024\\Content) and Steam's
+    libraries (steamapps\\common\\Microsoft Flight Simulator 2024), also under
+    another game folder name."""
+    found = []
+    for lib in xbox_libraries():
+        found += [p for p in (lib / MS_STORE_FOLDER, *lib.glob("*/Content")) if (p / EXE).exists()]
     for lib in steam_libraries():
-        p = lib / STEAM_FOLDER
-        if (p / EXE).exists():
-            found.append(p)
+        found += [p for p in (lib / STEAM_FOLDER, *(lib / "steamapps" / "common").glob("*")) if (p / EXE).exists()]
     return list(dict.fromkeys(found))
+
+
+def sim_folder(path: Path) -> Path | None:
+    """The folder with FlightSimulator2024.exe for a path a user gives: that
+    folder, the exe itself, or the game folder above Content."""
+    if path.name.lower() == EXE.lower() and path.is_file():
+        return path.parent
+    for p in (path, path / "Content"):
+        if (p / EXE).is_file():
+            return p
+    return None
+
+
+def ask_sim_folder(yes: bool) -> Path | None:
+    """Ask for the sim's folder until it holds FlightSimulator2024.exe; None
+    when cancelled (empty answer) or not interactive."""
+    if yes:
+        return None
+    say("MSFS 2024 wasn't found automatically. Enter the folder with FlightSimulator2024.exe")
+    say("(where you installed ReShade), for example:")
+    say(r"  D:\XboxGames\Microsoft Flight Simulator 2024\Content           (MS Store / Xbox app)")
+    say(r"  C:\Program Files (x86)\Steam\steamapps\common\Microsoft Flight Simulator 2024   (Steam)")
+    say("You can also drag FlightSimulator2024.exe into this window. Press Enter alone to cancel.")
+    while True:
+        try:
+            answer = input("Folder: ").strip().strip('"').strip()
+        except EOFError:
+            return None
+        if not answer:
+            return None
+        path = Path(os.path.expandvars(answer))
+        found = sim_folder(path)
+        if found:
+            say()
+            return found
+        say(f"No {EXE} in {path}. Try again, or press Enter to cancel.")
 
 
 def find_pak(where: Path) -> Path:
@@ -167,6 +224,42 @@ def community_folder() -> Path | None:
             if m:
                 return Path(m[1]) / "Community"
     return None
+
+
+def community_from(path: Path) -> Path | None:
+    """The Community folder for a path a user gives: that folder, or the
+    packages folder holding it."""
+    for p in (path, path / "Community"):
+        if p.is_dir() and p.name.lower() == "community":
+            return p
+    return None
+
+
+def ask_community_folder(yes: bool, skip: str) -> Path | None:
+    """Ask for the Community folder until it is one; None when skipped (empty
+    answer) or not interactive. skip: what skipping means."""
+    if yes:
+        return None
+    say("Your Community folder wasn't found automatically. Enter it: the folder named Community")
+    say("where your add-ons are, usually")
+    say(r"  %LOCALAPPDATA%\Packages\Microsoft.Limitless_8wekyb3d8bbwe\LocalCache\Packages\Community   (MS Store)")
+    say(r"  %APPDATA%\Microsoft Flight Simulator 2024\Packages\Community                            (Steam)")
+    say("unless you chose another place for your packages.")
+    say(f"Press Enter alone to skip: {skip}.")
+    while True:
+        try:
+            answer = input("Community folder: ").strip().strip('"').strip()
+        except EOFError:
+            return None
+        if not answer:
+            say()
+            return None
+        path = Path(os.path.expandvars(answer))
+        found = community_from(path)
+        if found:
+            say()
+            return found
+        say(f"No Community folder at {path}. Try again, or press Enter to skip.")
 
 
 def dxc_version(dxc: Path) -> str:
@@ -326,7 +419,15 @@ def install(args) -> None:
     if sim_running():
         raise InstallError("Microsoft Flight Simulator 2024 is running: close it first")
 
-    sims = [args.sim] if args.sim else find_sims()
+    if args.sim:
+        sims = [sim_folder(args.sim)]
+        if sims[0] is None:
+            raise InstallError(f"no {EXE} in {args.sim}")
+    else:
+        sims = find_sims()
+        if not sims:
+            manual = ask_sim_folder(args.yes)
+            sims = [manual] if manual else []
     if not sims:
         raise InstallError("MSFS 2024 not found; pass its folder (with FlightSimulator2024.exe) with --sim")
     if len(sims) > 1:
@@ -338,6 +439,8 @@ def install(args) -> None:
                            f"support* for {EXE} first (https://reshade.me)")
     rv = reshade_version(sim)
     community = args.community or community_folder()
+    if community is None:
+        community = ask_community_folder(args.yes, "the EFB app, and with it the METAR features, is left out")
     data = args.data
     say(f"AtmosphereMod {version()}")
     say(f"  sim:        {sim}")
@@ -429,9 +532,14 @@ def uninstall(args) -> None:
     record = json.loads((data / "install.json").read_text()) if (data / "install.json").exists() else {}
     if sim_running():
         raise InstallError("Microsoft Flight Simulator 2024 is running: close it first")
-    sim = args.sim or (Path(record["sim"]) if record.get("sim") else None)
+    sim = (sim_folder(args.sim) or args.sim) if args.sim else (Path(record["sim"]) if record.get("sim") else None)
     sims = [sim] if sim else find_sims()
+    if not sims:
+        manual = ask_sim_folder(args.yes)
+        sims = [manual] if manual else []
     community = args.community or (Path(record["community"]) if record.get("community") else community_folder())
+    if community is None and not record:
+        community = ask_community_folder(args.yes, "the EFB app, if installed, stays")
     if not ask("Uninstall AtmosphereMod?", args.yes):
         raise InstallError("cancelled")
     for s in sims:

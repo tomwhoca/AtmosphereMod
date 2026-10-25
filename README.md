@@ -404,7 +404,10 @@ Store or Steam version. Systems that have been reported will be added here.
    double-click **`Install AtmosphereMod.cmd`**. The installer:
    - finds your MSFS 2024 installation, ReShade next to it, and your
      Community folder (it shows what it found and asks before changing
-     anything);
+     anything). If it can't find the sim, it asks for its folder: the one
+     with `FlightSimulator2024.exe`, where you installed ReShade (you can
+     also drag `FlightSimulator2024.exe` into the installer's window). If it
+     can't find your Community folder, it asks for that too;
    - extracts the sim's shaders from **your own copy of the game** and patches
      them on your PC, in a work folder it deletes afterwards (the mod contains
      none of the game's files);
