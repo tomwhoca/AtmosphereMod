@@ -43,3 +43,11 @@ target_compile_definitions(cloud_stations_test PRIVATE NOMINMAX)
 target_compile_options(cloud_stations_test PRIVATE /W4 /permissive- /utf-8)
 target_include_directories(cloud_stations_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../addon/src)
 set_target_properties(cloud_stations_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/../../build/lab)
+
+# The METAR parser and anchoring, layers without a base (tools/test_metar_parse.py).
+add_executable(metar_parse_test metar_parse_test.cpp)
+target_compile_features(metar_parse_test PRIVATE cxx_std_20)
+target_compile_definitions(metar_parse_test PRIVATE NOMINMAX)
+target_compile_options(metar_parse_test PRIVATE /W4 /permissive- /utf-8)
+target_include_directories(metar_parse_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../addon/src)
+set_target_properties(metar_parse_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/../../build/lab)

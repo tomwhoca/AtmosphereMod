@@ -165,6 +165,7 @@ inline Anchor from_metar(const haze::Metar &m, double lat_deg, double lon_deg, d
         if (cl.cover < 3 || cl.cover > 6)
             continue;
         const double base_agl = cl.base_ft * kFt;
+        const char *const note = cl.base_estimated ? " (base estimated)" : "";
         double depth;
         Layer l;
         l.value = static_cast<float>(cover_value(cl.cover));
@@ -174,7 +175,7 @@ inline Anchor from_metar(const haze::Metar &m, double lat_deg, double lon_deg, d
             depth = cl.type == 1 ? std::max(4000.0, 10000.0 - base_agl) : (cl.type == 0 ? 3500.0 : 800.0);
             l.kind = kConvective;
             l.name = std::string(kCover[cl.cover]) +
-                     (cl.type == 1 ? "CB cumulonimbus" : cl.type == 0 ? "TCU towering cumulus" : "ACC altocumulus");
+                     (cl.type == 1 ? "CB cumulonimbus" : cl.type == 0 ? "TCU towering cumulus" : "ACC altocumulus") + note;
             const double base_part = std::min(depth, kConvectiveBaseM);
             l.base_m = static_cast<float>(elevation_m + base_agl);
             l.top_m = static_cast<float>(elevation_m + base_agl + base_part);
@@ -222,6 +223,7 @@ inline Anchor from_metar(const haze::Metar &m, double lat_deg, double lon_deg, d
             l.kind = kStratiform;
             l.name = std::string(kCover[cl.cover]) + " cirrus";
         }
+        l.name += note;
         l.base_m = static_cast<float>(elevation_m + base_agl);
         l.top_m = static_cast<float>(elevation_m + base_agl + depth);
         ceiling_ft = std::max(ceiling_ft, (base_agl + depth) / kFt);

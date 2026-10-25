@@ -24,8 +24,10 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
+#include <iterator>
 #include <regex>
 #include <string>
 #include <vector>
@@ -50,7 +52,14 @@ struct CloudLayer
     double base_ft = 0.0;
     int cover = 0;
     int type = -1;
+    bool base_estimated = false;  // reported without a base (FEW///CB): from the dew-point spread
 };
+
+// A cumulus base from the temperature/dew-point spread (Espy): the lifted
+// condensation level, ~125 m (410 ft) per degree C, for layers an automatic
+// station reports without a base.
+constexpr double kBaseFtPerSpreadC = 410.0;
+constexpr double kEstimatedBaseMinFt = 500.0, kEstimatedBaseMaxFt = 8000.0;
 
 struct Metar
 {
@@ -129,6 +138,11 @@ inline Metar parse_metar_json(const std::string &json)
     m.raw = match(json, "\"metarString\":\"([^\"]*)\"");
     m.temp_c = number(json, "\"temp\":(-?[0-9.]+)");
     m.dew_c = number(json, "\"dew\":(-?[0-9.]+)");
+    // (the sim marks a value not reported with INT_MIN, -2147483648)
+    if (m.temp_c < -150.0)
+        m.temp_c = NAN;
+    if (m.dew_c < -150.0)
+        m.dew_c = NAN;
     const bool cavok = json.find("\"cavok\":true") != std::string::npos;
     m.cavok = cavok;
     double vis = number(json, "\"vis\":([0-9.]+)");
@@ -169,17 +183,41 @@ inline Metar parse_metar_json(const std::string &json)
         }
     }
 
+    // Layers without a base: an automatic station's FEW///CB arrives as alt 0,
+    // like a real FEW000, so the raw report decides; per cover, its "///" bases.
+    std::array<int, 7> unknown_bases = {};
+    {
+        static const char *const covers[] = { "FEW", "SCT", "BKN", "OVC" };
+        const std::string padded = " " + m.raw + " ";
+        for (int c = 3; c <= 6; ++c)
+        {
+            const std::regex unknown(std::string(" ") + covers[c - 3] + "///(CB|TCU|///)? ");
+            unknown_bases[c] = static_cast<int>(
+                std::distance(std::sregex_iterator(padded.begin(), padded.end(), unknown), std::sregex_iterator()));
+        }
+    }
+    const double spread = m.temp_c - m.dew_c;
     // Lowest FEW (3), SCT (4) or BKN (5) layer: {"alt":15,"cover":3,...}, alt in hundreds of feet.
     const std::regex layer("\\{\"__Type\":\"Clouds\"[^}]*\\}");
     for (auto it = std::sregex_iterator(json.begin(), json.end(), layer); it != std::sregex_iterator(); ++it)
     {
-        const double alt = number(it->str(), "\"alt\":([0-9.]+)") * 100.0;
+        double alt = number(it->str(), "\"alt\":([0-9.]+)") * 100.0;
         const double cover = number(it->str(), "\"cover\":([0-9]+)");
         const double type = number(it->str(), "\"type\":(-?[0-9]+)");
+        bool estimated = false;
+        if (alt == 0.0 && cover >= 3 && cover <= 6 && unknown_bases[static_cast<int>(cover)] > 0)
+        {
+            --unknown_bases[static_cast<int>(cover)];
+            if (!std::isfinite(spread))
+                continue;  // no way to place it: the sim's own clouds stay
+            alt = std::clamp(spread * kBaseFtPerSpreadC, kEstimatedBaseMinFt, kEstimatedBaseMaxFt);
+            estimated = true;
+        }
         if (cover >= 3 && cover <= 5 && alt < 10000.0 && !(alt >= m.low_layer_ft))
             m.low_layer_ft = alt;
         if (cover >= 3 && cover <= 6 && std::isfinite(alt))
-            m.layers.push_back({ alt, static_cast<int>(cover), std::isfinite(type) ? static_cast<int>(type) : -1 });
+            m.layers.push_back({ alt, static_cast<int>(cover), std::isfinite(type) ? static_cast<int>(type) : -1,
+                                 estimated });
     }
     // the sky condition, from the raw report where the JSON has no layer for it
     const std::string raw = " " + m.raw + " ";
