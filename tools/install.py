@@ -33,12 +33,16 @@ import contextlib
 import csv
 import hashlib
 import json
+import locale
 import os
+import platform
 import re
 import shutil
 import string
 import subprocess
 import sys
+import tempfile
+import traceback
 import urllib.request
 import zipfile
 from datetime import datetime
@@ -55,6 +59,7 @@ STEAM_FOLDER = Path("steamapps") / "common" / "Microsoft Flight Simulator 2024"
 ADDON = "AtmosphereMod.addon64"
 EFB = "atmospheremod-weather"
 SECTION = "ATMOSPHEREMOD"
+ISSUES = "https://github.com/tomwhoca/AtmosphereMod/issues"
 BACKUP = "ReShade.ini.atmospheremod.bak"
 # Microsoft's DirectX Shader Compiler release the patcher was written against
 # (the Windows SDK 10.0.26100's dxc is the same version). The disassembly's
@@ -570,6 +575,26 @@ def uninstall(args) -> None:
     say("Uninstalled.")
 
 
+def error_report(args) -> Path | None:
+    """Write an unexpected error's details, for an issue report, into the
+    data folder's logs (else the release folder, else the temp folder);
+    the file, or None if none could be written."""
+    text = (f"AtmosphereMod {version()} {'uninstaller' if args.uninstall else 'installer'}, "
+            f"{datetime.now():%Y-%m-%d %H:%M}\n"
+            f"Python {sys.version.split()[0]}, {platform.platform()}, encoding {locale.getpreferredencoding(False)}, "
+            f"console {sys.stdout.encoding}\n"
+            f"arguments: {' '.join(sys.argv[1:]) or '(none)'}\n\n{traceback.format_exc()}")
+    for folder in (args.data / "logs", HERE.parent, Path(tempfile.gettempdir())):
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            path = folder / "installer-error.txt"
+            path.write_text(text, encoding="utf-8")
+            return path
+        except OSError:
+            continue
+    return None
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--sim", type=Path, help="the folder with FlightSimulator2024.exe (found automatically)")
@@ -589,6 +614,18 @@ def main() -> int:
         (uninstall if args.uninstall else install)(args)
     except InstallError as e:
         say(f"\nNot installed: {e}" if not args.uninstall else f"\nStopped: {e}")
+        return 1
+    except KeyboardInterrupt:
+        say("\nStopped.")
+        return 1
+    except Exception as e:  # anything we didn't foresee: a short message and a file to report
+        path = error_report(args)
+        say(f"\nStopped by an unexpected error: {type(e).__name__}: {e}")
+        if path is None:
+            say(traceback.format_exc())
+        say(f"Please report it at {ISSUES}" + (f" and attach {path}" if path else "") + ".")
+        if path:
+            say("(It shows your folder paths, with your Windows user name.)")
         return 1
     return 0
 
