@@ -87,6 +87,19 @@ SETS = [
 ]
 
 
+def type_set(c0=1.0, c8=2.0, c16=4.0, c17=0.33, c18=0.0, strength=1.0, thick=(0.6, 0.5, 0.4, 0.3)):
+    c = [0.0] * 32
+    c[0], c[1], c[8], c[16], c[17], c[18], c[19] = c0, 0.9, c8, c16, c17, c18, 1.5
+    c[23], c[24:28] = strength, list(thick)
+    return tuple(c)
+
+
+# C23-C27: cloud types (strength, the thicknesses of Sc, St, Ac, As), with the grid
+TYPE_SETS = [type_set(), type_set(strength=0.5), type_set(c8=0.0), type_set(c16=0.0), type_set(c0=0.5),
+             type_set(thick=(1.5, -1.0, 0.0, 1.0)), type_set(c17=0.0, c8=8.0), type_set(c18=3000.0, strength=2.0)]
+TYPE_OFFSET = 64.0 / 512  # the header's 64 / N
+
+
 def fine_sampler(u, v, w=None):
     """A smooth mock of the detail noise for the finer octave's lookup."""
     u, v = np.asarray(u, np.float64), np.asarray(v, np.float64)
@@ -405,6 +418,48 @@ def check_light_volume(stock, patched, failures):
     return err
 
 
+def types_buffer(rng, magic=P.TYPES_MAGIC):
+    """The debug buffer (float32 words) with the generator's header and a
+    random grid of type weights (sum <= 1; some cells all cumulus), and the
+    grid as bytes [slice, y, x, type]."""
+    n, k = P.TYPES_N, P.TYPES_SLICES
+    raw = rng.dirichlet(np.ones(5), size=(k, n, n))[..., :4]
+    raw[rng.uniform(size=(k, n, n)) < 0.2] = 0.0
+    grid = np.floor(raw * 255).astype(np.uint8)
+    words = np.zeros((P.TYPES_REGION + 16) // 4 + k * n * n, np.uint32)
+    words[P.TYPES_REGION // 4:P.TYPES_REGION // 4 + 4] = (magic, 7, 512, np.float32(TYPE_OFFSET).view(np.uint32))
+    words[(P.TYPES_REGION + 16) // 4:] = grid.reshape(-1, 4).copy().view(np.uint32).ravel()
+    return words.view(np.float32), grid
+
+
+def types_ref(c, grid, u, v, w):
+    """Per lane, float64: the thickness factor T, the base mix m and the view
+    ramp's sharpening (cloud types)."""
+    n = P.TYPES_N
+    cell = []
+    for coord in (u, v):
+        f = np.clip(coord.astype(F) * F(n) + F(-TYPE_OFFSET), 0, n - 1).astype(np.float64)
+        f0 = np.minimum(np.floor(f), n - 2)
+        cell.append((f0.astype(int), f - f0))
+    (x0, ax), (y0, ay) = cell
+    k = np.minimum(w.astype(F) * F(P.TYPES_SLICES), P.TYPES_SLICES - 1).astype(int)
+    g = grid.astype(np.float64) / 255
+
+    def at(dx, dy):
+        return g[k, y0 + dy, x0 + dx]
+    wts = ((1 - ax) * (1 - ay))[:, None] * at(0, 0) + (ax * (1 - ay))[:, None] * at(1, 0) \
+        + ((1 - ax) * ay)[:, None] * at(0, 1) + (ax * ay)[:, None] * at(1, 1)
+    c0 = clamp(c[0], 0.0, 1.0)
+    s = c0 * clamp(c[23], 0.0, 1.0)
+    thick = np.array([clamp(x, 0.0, 1.0) for x in c[24:28]])
+    T = 1 - s * (wts * (1 - thick)).sum(1)
+    m = s * (wts * np.array(P.TYPES_BASE_MIX)).sum(1)
+    cu = np.maximum(1 - wts.sum(1), 0)
+    ce = c0 * clamp(c[8], 0.0, 8.0)
+    sharp = ce * (1 - s) + s * cu * max(ce, c0 * P.TYPES_CU_EDGE_MIN)
+    return T, m, sharp
+
+
 def soft_output(ir, quarter):
     """The soft transmittance's result: the end of the single-use chain that
     starts at the quarter value."""
@@ -478,6 +533,11 @@ def check(crc: str, stock: str) -> list[str]:
     for site in detail:  # the view march's altitude is the optical patch's too
         if site["h"] == opt["height"]:
             dseeds[site["h"]] = height
+    # the view march's volume lookup, where the cloud types are read
+    _, vu, vv, vw = P.find_volume_sample(ir, opt["height"], ir.defs[opt["prod"]])
+    tu, tv = rng.uniform(-0.05, 1.05, N).astype(F), rng.uniform(-0.05, 1.05, N).astype(F)
+    tw = np.concatenate([[0.0, 0.5, 31.5 / 32, 1.0, 1.2], rng.uniform(0, 1, N - 5)]).astype(F)
+    dseeds.update({vu: tu, vv: tv, vw: tw})
     failures, worst = [], 0.0
     for c in SETS:
         c = tuple(c) + (0.0,) * (P.CLOUD_PARAMS_SIZE // 4 - len(c))
@@ -636,6 +696,72 @@ def check(crc: str, stock: str) -> list[str]:
                 err = float(np.abs(s2_val - ref).max())
                 if err > 2e-5:
                     failures.append(f"{tag} {site['s2']}: finer octave abs. error max {err:.1e}")
+    # cloud types: the view ramp and the optical thickness by the grid's weights
+    words, grid = types_buffer(rng)
+    bad_magic, _ = types_buffer(np.random.default_rng(3), magic=P.TYPES_MAGIC ^ 1)
+    ramp0 = edges["ramps"][0][1]
+    x64 = ramp_x.astype(np.float64)
+    stock_ramp = np.clip(1.5 - np.exp2(x64 * P.literal_value(P.EDGE_SLOPE)), 0, 1)
+    for c in TYPE_SETS:
+        cloud = np.zeros((P.CLOUD_PARAMS_SIZE // 16, 4))
+        cloud.flat[:len(c)] = c
+        mod = np.zeros((4, 4))
+        mod[0, 0] = np.uint32(P.DEBUG_BUFFER_TYPES).view(np.float32)
+        untyped = list(c)
+        untyped[23] = 0.0
+        plain = np.zeros((P.CLOUD_PARAMS_SIZE // 16, 4))
+        plain.flat[:len(c)] = untyped
+        seeds = {ms["s"]: s, **rain, opt["sigma"]: sigma, opt["height"]: height, **dseeds, LV: np.ones(N, F),
+                 edges["depth"]: depth, t_name: dist.astype(F)}
+        for _, cosname, *_ in blends:
+            seeds[cosname] = cos
+        for x, _ in softs:
+            seeds[x] = d
+        for k3 in range(3):
+            seeds[dir_names[k3]] = view[:, k3].astype(F)
+            seeds[light_names[k3]] = np.full(N, sun[k3], dtype=F)
+        for x, _ in edges["ramps"]:
+            seeds[x] = ramp_x
+        tag = f"types C={c}"
+        base = Evaluator(patched, {"b1 space50": plain, "b0 space50": mod}, seeds, sampler=fine_sampler, buffer=words)
+        want_prod, want_ramp = base(opt["prod"]), base(ramp0)
+        # off: without bit 7, with a wrong magic, with C23 = 0: exactly as without types
+        for what, flags, buf in (("no bit 7", 0, words), ("wrong magic", P.DEBUG_BUFFER_TYPES, bad_magic)):
+            m2 = np.zeros((4, 4))
+            m2[0, 0] = np.uint32(flags).view(np.float32)
+            off = Evaluator(patched, {"b1 space50": cloud, "b0 space50": m2}, seeds, sampler=fine_sampler, buffer=buf)
+            if not (np.array_equal(off(opt["prod"]), want_prod) and np.array_equal(off(ramp0), want_ramp)):
+                failures.append(f"{tag}: types off ({what}) but not as without them")
+        got = Evaluator(patched, {"b1 space50": cloud, "b0 space50": mod}, seeds, sampler=fine_sampler, buffer=words)
+        T, m, sharp = types_ref(c, grid, tu, tv, tw)
+        ref_ramp = np.where(sharp <= 0, stock_ramp, np.clip((stock_ramp - 0.5) * (1 + sharp) + 0.5, 0, 1))
+        err = float(np.nan_to_num(np.abs(got(ramp0).astype(np.float64) - ref_ramp), nan=np.inf).max())
+        if err > 2e-5:
+            failures.append(f"{tag} {ramp0}: typed view ramp abs. error max {err:.1e}")
+        c0 = clamp(c[0], 0.0, 1.0)
+        s64, h64 = sigma.astype(np.float64), height.astype(np.float64)
+        if c[16] <= 0 or c0 <= 0:
+            liquid = s64
+            ice_w = np.zeros(N)
+            ice = s64
+        else:
+            gam = clamp(c[17], 0.2, 1.0) if c[17] > 0 else 1.0
+            k16 = clamp(c[16], 0.0, 20.0) * P.OPTICAL_REF
+            plain_l = k16 * (s64 / P.OPTICAL_REF) ** gam
+            typed = k16 * T * (s64 / P.OPTICAL_REF) ** (gam + m * (1 - gam))
+            liquid = np.maximum(typed, np.minimum(plain_l, s64))
+            ice = (clamp(c[19], 0.0, 20.0) if c[19] > 0 else 1.0) * s64
+            h_ice = c[18] if c[18] > 0 else P.OPTICAL_ICE_DEFAULT_M
+            ice_w = np.clip((h64 - h_ice + P.OPTICAL_ICE_BLEND_M) / P.OPTICAL_ICE_BLEND_M, 0, 1)
+        # (against the shader's ramp, checked above: sharpening by up to 9 amplifies its rounding)
+        ramp_got = got(ramp0).astype(np.float64)
+        ref = ramp_got * (liquid + ice_w * (ice - liquid))
+        floor = np.maximum(1e-5, 1e-3 * np.abs(ramp_got * liquid))
+        err = np.abs(got(opt["prod"]).astype(np.float64) - ref) / np.maximum(np.abs(ref), floor)
+        e = float(np.nan_to_num(err, nan=np.inf).max())
+        worst = max(worst, float(np.percentile(err, 99.9)))
+        if e > 1e-4:
+            failures.append(f"{tag} {opt['prod']}: typed optical thickness rel. error max {e:.1e}")
     worst_shadow = check_shadow(patched, dir_names, light_names, t_name, ms["s"], failures)
     worst_shadow = max(worst_shadow, check_shadow_map(patched, dir_names, light_names, t_name, ms["s"], failures))
     check_light_volume(stock, patched, failures)

@@ -317,6 +317,20 @@ What it can do:
     are see-through and the sun glows through an overcast.
   - The mod makes low clouds and cumulus solid from the base up, without
     making them darker.
+- **Cloud types** (`C23`–`C27`, live weather). Real clouds aren't all equally
+  solid: cumulus are dense with crisp edges, while stratiform clouds hold less
+  water, spread more evenly, and have softer edges.
+  - MSFS's weather has no cloud types, so the mod infers them from each
+    layer's height, depth and cover. Thin broken or overcast decks become
+    stratocumulus, stratus, altocumulus or altostratus. Scattered low clouds
+    and deep clouds stay cumulus, and cirrus keeps its own look.
+  - Each stratiform type gets its own share of the solid-cloud thickness
+    (`C24`–`C27`: 60, 50, 40 and 30 % by default) and the sim's soft edges.
+    Stratus and stratocumulus decks stay grey and solid from below, as real
+    ones are. Altocumulus, and altostratus even more, also get a softer base,
+    so a thin altostratus is a veil the sun can shine through. Cumulus keeps
+    the full thickness and gets crisp edges.
+  - `C23 = 0` draws every cloud like cumulus again.
 - **Translucent high clouds** (`C18`, `C19`). Cirrus and thin mid-level
   sheets keep a translucent, soft look; `C19` makes cirrus more visible.
 - **Flat cloud bases** (`C28`–`C31`):
@@ -502,6 +516,8 @@ ones you're most likely to touch:
 | `C16`, `C17` | cloud thickness (0 = the sim's) and how solid the bases are |
 | `C19` | thickness of high, icy clouds (cirrus) |
 | `C20`, `C21` | METAR anchoring: strength (0 = off) and each station's radius (km) |
+| `C23` | cloud types: 0 = every cloud like cumulus, 1 = softer stratiform decks |
+| `C24`–`C27` | thickness of stratocumulus, stratus, altocumulus and altostratus (share of `C16`) |
 | `C28` | smooth, flat cloud bases (0 = the sim's puffs) |
 
 ## Uninstalling
@@ -513,8 +529,9 @@ and your `tunables.ini`). ReShade itself stays installed.
 
 ## Known limitations
 
-- METAR anchoring works with live weather only. Weather presets and
-  third-party weather engines keep their own cloud layers.
+- METAR anchoring and cloud types work with live weather only. Weather presets
+  and third-party weather engines keep their own cloud layers, drawn like
+  cumulus.
 - After a sim update, parts of the mod fall back to stock until it is
   re-patched.
 - DirectX 12 only. The performance cost hasn't been measured on other systems

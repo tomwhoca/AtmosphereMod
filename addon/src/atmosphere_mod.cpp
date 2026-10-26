@@ -103,7 +103,7 @@ static_assert(sizeof(ModParams) == 64);
 // (tools/patch_dxil.py, cloud_prologue_lines).
 constexpr uint32_t kCloudTunableCount = 32;
 constexpr uint32_t kDebugMagic = 0x4F4D5441;  // 'ATMO'
-constexpr uint32_t kDebugBufferSize = 16 * 1024 * 1024;  // bit 6 below: the weather volume capture
+constexpr uint32_t kDebugBufferSize = 20 * 1024 * 1024;  // bits 6 and 7 below: the weather volume, cloud types
 // Regions: uint4(stamp, register count, 0, 0) then float4 registers.
 constexpr uint32_t kDebugRegionSkyAtmosphere = 16;  // ch_transmittance_lut, 13 registers
 constexpr uint32_t kDebugRegionCamera = 256;        // ch_camera_volume, 16 registers
@@ -189,6 +189,16 @@ constexpr uint32_t kCloudShStride = 144;
 static_assert(kDebugRegionGlobal + 16 + 16 * kGlobalRegisters <= kCloudUserRegion);
 static_assert(kCloudShRegion + 2 * kCloudShStride <= kCloudGenRegion);
 static_assert(kCloudGenRegion + kCloudGenBytes <= kDebugBufferSize);
+// Cloud types (patch_dxil.py TYPES_REGION): the generator writes per-slice type
+// weights on a 128 x 128 grid over the weather volume (header uint4(magic,
+// frame, threads per axis, f32 64 / N), then 128 x 128 x 32 RGBA8) with
+// DebugCapture bit 7, and the cloud renderer reads them. Captures write it to
+// <id>_types.bin.
+constexpr uint32_t kCloudTypesRegion = 0x1000000;
+constexpr uint32_t kCloudTypesMagic = 0x45505954;  // 'TYPE'
+constexpr uint32_t kCloudTypesBytes = 16 + 4 * 128 * 128 * 32;
+static_assert(kCloudGenRegion + kCloudGenBytes <= kCloudTypesRegion);
+static_assert(kCloudTypesRegion + kCloudTypesBytes <= kDebugBufferSize);
 
 // Registers the radar replacement dumps into region C, if it is installed.
 // Rows 16-19 are uint4 texture sizes.
@@ -956,9 +966,13 @@ void push_mod_args(command_list *cmd_list, const TrackedPipeline &info, const st
     // Only with the buffer bound below: bit 4 makes ch_deferred_shadows write
     // every frame, not just while a capture is armed.
     // Bit 6: at least 16 MB, for the weather volume capture (patch_cloud_gen_capture).
+    // Bit 7: at least 20 MB, for the cloud types (written by the generator each
+    // time it runs, read by the cloud renderer).
     static_assert(kCloudGenRegion + kCloudGenBytes <= kDebugBufferSize);
+    static_assert(kCloudTypesRegion + kCloudTypesBytes <= kDebugBufferSize);
     if (g_debug_view.handle != 0)
-        p.debug_capture |= 4 | 8 | 16 | 64 | ((uint32_t(g_frame.load(std::memory_order_relaxed)) & 0xFFFF) << 16);
+        p.debug_capture |=
+            4 | 8 | 16 | 64 | 128 | ((uint32_t(g_frame.load(std::memory_order_relaxed)) & 0xFFFF) << 16);
     // bit 5: MSFS's TLAS is bound (t0 space50): ch_deferred_shadows traces the
     // aircraft into the shadow window, for Raytraced Shadows
     const uint64_t tlas = g_tlas_va.load(std::memory_order_relaxed);
@@ -1197,6 +1211,22 @@ void write_cloud_capture(std::ofstream &file, const uint8_t *data, const fs::pat
             file << line;
         }
     }
+    // the cloud types grid as the renderer reads it
+    const auto *types = reinterpret_cast<const uint32_t *>(data + kCloudTypesRegion);
+    if (types[0] == kCloudTypesMagic)
+    {
+        const fs::path path = dir / (std::to_string(g_capture_id) + "_types.bin");
+        std::ofstream bin(path, std::ios::binary);
+        bin.write(reinterpret_cast<const char *>(data + kCloudTypesRegion), kCloudTypesBytes);
+        snprintf(line, sizeof(line), "\nCloud types: %s (%u x %u threads, frame %u)\n",
+                 path.filename().string().c_str(), types[2], types[2], types[1]);
+    }
+    else
+    {
+        snprintf(line, sizeof(line), "\nCloud types: none (%s)\n",
+                 types[0] == 0 ? "the layer generator, or not written yet" : "no grid");
+    }
+    file << line;
     file << "\nCloud renderer User cbuffer (ch_volumetric_clouds_render)";
     if (!region_present(data, kCloudUserRegion))
     {

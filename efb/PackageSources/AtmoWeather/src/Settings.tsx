@@ -163,6 +163,7 @@ export const TABS: TabSpec[] = [
       percent("C20", "Clouds follow the METARs", 1),
       plain("C21", "Station radius", 10, 100, 5, 0, { format: (d) => `${Math.round(d)} km` }),
       plain("C16", "Solid clouds", 0, 4, 0.25, 2, { format: (d) => (d <= 0 ? "the sim's" : d.toFixed(2)) }),
+      percent("C23", "Cloud types", 1),
       percent("C28", "Smooth cloud bases", 1),
       {
         kind: "slider", key: "C17", label: "Cloud bases: soft to solid", min: 0, max: 1, step: 0.05, more: true,
@@ -171,6 +172,10 @@ export const TABS: TabSpec[] = [
         format: (d) => (d <= 0.01 ? "the sim's" : d >= 0.99 ? "real" : `${Math.round(d * 100)} %`),
       },
       plain("C19", "High-cloud thickness", 0.5, 3, 0.1, 1, { format: (d) => `×${d.toFixed(1)}`, needs: "C16", more: true }),
+      { ...percent("C24", "Stratocumulus thickness", 1, true), needs: "C23" },
+      { ...percent("C25", "Stratus thickness", 1, true), needs: "C23" },
+      { ...percent("C26", "Altocumulus thickness", 1, true), needs: "C23" },
+      { ...percent("C27", "Altostratus thickness", 1, true), needs: "C23" },
     ],
   },
 ];

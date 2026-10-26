@@ -1873,6 +1873,174 @@ def apply_cloud_shape(ir: Ir) -> str:
             f"distance {t}), {len(edges['ramps'])} edge ramp(s)")
 
 
+# Cloud types: per type (stratocumulus, stratus, altocumulus, altostratus) how
+# far its base goes back toward MSFS's profile (0 = solid as C17, 1 = MSFS's);
+# cumulus (the rest) keeps C17 and gets crisp edges, at least this C8.
+# Stratus and stratocumulus keep a solid base: in a deck 300-500 m deep almost
+# all of it is base, and 0.7 / 0.5 there left it nearly transparent (captures
+# 132, 134: optical depth 9.3 -> 1.9 and 1.9 -> 0.14; real decks 5-20).
+TYPES_BASE_MIX = (0.0, 0.0, 0.5, 1.0)
+TYPES_CU_EDGE_MIN = 1.0
+
+
+def find_volume_sample(ir: Ir, h: str, before: int) -> tuple:
+    """The weather-volume lookup at altitude h, the last one before line
+    `before`: (its line, u, v, w)."""
+    found = []
+    for name, (kind, a, b) in ir.binops.items():
+        if kind != "fmul" or VOLUME_HEIGHT_SCALE not in (a, b):
+            continue
+        m = a if b == VOLUME_HEIGHT_SCALE else b
+        mm = re.match(rf"\s+{re.escape(m)} = call float @dx\.op\.binary\.f32\(i32 35, float (\S+), float (\S+)\)",
+                      ir.lines[ir.defs[m]] if m in ir.defs else "")
+        if not mm or sorted((mm[1], mm[2])) != sorted((h, "0.000000e+00")):
+            continue
+        for r in (n for n, (op, arg) in ir.unary.items() if op == OP_SQRT and arg == name):
+            for i in ir.users(r):
+                sm = re.match(rf"\s+{V} = call %dx\.types\.ResRet\.f32 @dx\.op\.sampleLevel\.f32\(i32 62, "
+                              rf"%dx\.types\.Handle \S+, %dx\.types\.Handle \S+, float ({V}), float ({V}), "
+                              rf"float {re.escape(r)},", ir.lines[i])
+                if sm and i < before:
+                    found.append((i, sm[1], sm[2], r))
+    need(found, f"no weather-volume lookup at {h}")
+    return max(found)
+
+
+def apply_cloud_types(ir: Ir) -> str:
+    """ch_volumetric_clouds_render: the cloud types (C23-C27), in the view
+    march; exactly as without them while C23 <= 0, without DebugCapture bit 7
+    or without the generator's grid (TYPES_REGION).
+
+    Per view sample, the weights w of stratocumulus, stratus, altocumulus and
+    altostratus come bilinearly from the grid cell around the volume lookup
+    (cumulus is the rest, w_cu). With S = C0 * C23 (0..1) and the types'
+    thicknesses T_x (C24-C27, 0..1, a share of C16):
+      - thickness: C16 times 1 - S sum w_x (1 - T_x);
+      - base: the profile exponent moves toward 1 (MSFS's) by S sum w_x b_x
+        (TYPES_BASE_MIX);
+    never thinner than MSFS's own extinction (or the untyped value, if lower);
+      - edges: the view ramp's C0 * C8 becomes
+        C0 C8 (1 - S) + S w_cu max(C0 C8, C0 TYPES_CU_EDGE_MIN): soft (MSFS's)
+        for the stratiform types, crisp for cumulus.
+    Runs after apply_cloud_optical and apply_cloud_shape, whose view-march
+    lines it rewrites."""
+    j = next((i for i, l in enumerate(ir.lines) if l.startswith("  %mod.op.ih0 = fsub fast float ")), None)
+    need(j is not None, "no optical-thickness patch")
+    h = re.match(r"  %mod\.op\.ih0 = fsub fast float (\S+), %mod\.coh$", ir.lines[j])[1]
+    sigma = next(re.match(r"  %mod\.op\.r = fmul fast float (\S+), ", l)[1] for l in ir.lines
+                 if l.startswith("  %mod.op.r = fmul fast float "))
+    at, u, v, w = find_volume_sample(ir, h, j)
+    t = "%dx.types.Handle"
+    rr = "%dx.types.ResRet.f32"
+    scale = [1.0 / 255.0, 1.0 / (255.0 * 256.0), 1.0 / (255.0 * 65536.0), 1.0 / 255.0]  # of each channel as read
+    # ---- once per thread, at the entry: the grid's header and the coefficients
+    entry = [
+        "  %mod.ty.r0 = call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %mod.ah, "
+        "i32 0)",
+        "  %mod.ty.f0 = extractvalue %dx.types.CBufRet.f32 %mod.ty.r0, 0",
+        "  %mod.ty.flags = bitcast float %mod.ty.f0 to i32",
+        f"  %mod.ty.fb = and i32 %mod.ty.flags, {DEBUG_BUFFER_TYPES}",
+        "  %mod.ty.fon = icmp ne i32 %mod.ty.fb, 0",
+        f"  %mod.ty.uh = call {t} @dx.op.createHandleFromBinding(i32 217, %dx.types.ResBind "
+        f"{{ i32 0, i32 0, i32 {MOD_SPACE}, i8 1 }}, i32 0, i1 false)",
+        f"  %mod.ty.u = call {t} @dx.op.annotateHandle(i32 216, {t} %mod.ty.uh, "
+        "%dx.types.ResourceProperties { i32 4107, i32 0 })",
+        f"  %mod.ty.hb = select i1 %mod.ty.fon, i32 {TYPES_REGION}, i32 0",
+        f"  %mod.ty.hdr = call {rr} @dx.op.rawBufferLoad.f32(i32 139, {t} %mod.ty.u, i32 %mod.ty.hb, i32 undef, "
+        "i8 15, i32 4)",
+        f"  %mod.ty.h0 = extractvalue {rr} %mod.ty.hdr, 0",
+        f"  %mod.ty.h3 = extractvalue {rr} %mod.ty.hdr, 3",
+        "  %mod.ty.hm = bitcast float %mod.ty.h0 to i32",
+        f"  %mod.ty.ok = icmp eq i32 %mod.ty.hm, {TYPES_MAGIC}",
+        "  %mod.ty.nc = fsub fast float -0.000000e+00, %mod.ty.h3",
+        "  %mod.ty.s0 = call float @dx.op.unary.f32(i32 7, float %mod.C23)",
+        "  %mod.ty.S = fmul fast float %mod.cmix, %mod.ty.s0",
+        "  %mod.ty.son = fcmp fast ogt float %mod.ty.S, 0.000000e+00",
+        "  %mod.ty.on0 = and i1 %mod.ty.fon, %mod.ty.ok",
+        "  %mod.ty.on = and i1 %mod.ty.on0, %mod.ty.son",
+        "  %mod.ty.nS = fsub fast float 1.000000e+00, %mod.ty.S",
+        "  %mod.ty.ce0 = fmul fast float %mod.ce, %mod.ty.nS",
+        f"  %mod.ty.cm0 = fmul fast float %mod.cmix, {f32(TYPES_CU_EDGE_MIN)}",
+        "  %mod.ty.cm = call float @dx.op.binary.f32(i32 35, float %mod.ce, float %mod.ty.cm0)",
+        "  %mod.ty.ce1 = fmul fast float %mod.ty.S, %mod.ty.cm",
+        "  %mod.ty.gk = fsub fast float 1.000000e+00, %mod.cog",
+    ]
+    for c in range(4):
+        p = f"%mod.ty.k{c}"
+        entry += [
+            f"  {p}t = call float @dx.op.unary.f32(i32 7, float %mod.C{24 + c})",
+            f"  {p}n = fsub fast float 1.000000e+00, {p}t",
+            f"  {p}a = fmul fast float %mod.ty.S, {p}n",
+            f"  {p}na = fmul fast float {p}a, {f32(-scale[c])}",  # thickness
+            f"  {p}b = fmul fast float %mod.ty.S, {f32(TYPES_BASE_MIX[c] * scale[c])}",  # base
+        ]
+    # ---- per view sample, after the volume lookup: the grid cell around it, bilinearly
+    em = Emitter("tys")
+    corner = []
+    for coord in (u, v):
+        f = em.min(em.max(em.mad(coord, float(TYPES_N), "%mod.ty.nc"), 0.0), float(TYPES_N - 1))
+        f0 = em.min(em.unary(27, f), float(TYPES_N - 2))
+        corner.append((em.new(f"fptosi float {f0} to i32"), em.sub(f, f0)))
+    (xi, ax), (yi, ay) = corner
+    k = em.new(f"fptosi float {em.min(em.mul(w, float(TYPES_SLICES)), float(TYPES_SLICES - 1))} to i32")
+    row = em.new(f"add i32 {em.new(f'mul i32 {k}, {TYPES_N}')}, {yi}")
+    cell = em.new(f"add i32 {em.new(f'mul i32 {row}, {TYPES_N}')}, {xi}")
+    a0 = em.new(f"add i32 {em.new(f'shl i32 {cell}, 2')}, {TYPES_REGION + 16}")
+    words = []
+    for dy in (0, 4 * TYPES_N):
+        addr = em.new(f"select i1 %mod.ty.on, i32 {em.new(f'add i32 {a0}, {dy}')}, i32 0")
+        ld = em.new(f"call {rr} @dx.op.rawBufferLoad.f32(i32 139, {t} %mod.ty.u, i32 {addr}, i32 undef, i8 3, i32 4)")
+        words += [em.new(f"bitcast float {em.new(f'extractvalue {rr} {ld}, {q}')} to i32") for q in (0, 1)]
+    bx, by = em.sub(1.0, ax), em.sub(1.0, ay)
+    bil = [em.mul(bx, by), em.mul(ax, by), em.mul(bx, ay), em.mul(ax, ay)]
+    thick, base, total = 1.0, None, None
+    for c in range(4):
+        raw = [em.new(f"uitofp i32 {em.new(f'and i32 {x}, {255 << 8 * c}') if c < 3 else em.new(f'lshr i32 {x}, 24')}"
+                      " to float") for x in words]
+        val = em.mul(bil[0], raw[0])
+        for q in (1, 2, 3):
+            val = em.mad(bil[q], raw[q], val)
+        thick = em.mad(f"%mod.ty.k{c}na", val, thick)
+        base = em.mul(f"%mod.ty.k{c}b", val) if base is None else em.mad(f"%mod.ty.k{c}b", val, base)
+        total = em.mad(val, -scale[c], 1.0 if total is None else total)
+    cu = em.max(total, 0.0)
+    em.lines += [
+        f"  %mod.ty.T = fadd fast float {thick}, 0.000000e+00",
+        f"  %mod.ty.m = fadd fast float {base}, 0.000000e+00",
+        f"  %mod.ty.ct = call float @dx.op.tertiary.f32(i32 46, float {cu}, float %mod.ty.ce1, float %mod.ty.ce0)",
+        "  %mod.ty.ce = select i1 %mod.ty.on, float %mod.ty.ct, float %mod.ce",
+        "  %mod.ty.cek = fadd fast float %mod.ty.ce, 1.000000e+00",
+        "  %mod.ty.ceoff = fcmp fast ole float %mod.ty.ce, 0.000000e+00",
+    ]
+    edits = [(at, [ir.lines[at], *em.lines])]
+    # ---- the optical thickness: thinner and with a softer base by type
+    i = next(i for i, l in enumerate(ir.lines) if l == "  %mod.op.w = fmul fast float %mod.op.p, %mod.cok")
+    edits.append((i, [
+        "  %mod.op.w0 = fmul fast float %mod.op.p, %mod.cok",
+        "  %mod.op.tg = call float @dx.op.tertiary.f32(i32 46, float %mod.ty.m, float %mod.ty.gk, float %mod.cog)",
+        "  %mod.op.te = fmul fast float %mod.op.l, %mod.op.tg",
+        "  %mod.op.tp = call float @dx.op.unary.f32(i32 21, float %mod.op.te)",
+        "  %mod.op.tk = fmul fast float %mod.cok, %mod.ty.T",
+        "  %mod.op.tw = fmul fast float %mod.op.tp, %mod.op.tk",
+        f"  %mod.op.tf = call float @dx.op.binary.f32(i32 36, float %mod.op.w0, float {sigma})",
+        "  %mod.op.tm = call float @dx.op.binary.f32(i32 35, float %mod.op.tw, float %mod.op.tf)",
+        "  %mod.op.w = select i1 %mod.ty.on, float %mod.op.tm, float %mod.op.w0",
+    ]))
+    # ---- the view ramp's sharpening by type
+    for prefix, old, new in (("  %mod.es0.k = ", "%mod.cek", "%mod.ty.cek"),
+                             (None, "select i1 %mod.ceoff, float %mod.es0.r,",
+                              "select i1 %mod.ty.ceoff, float %mod.es0.r,")):
+        q = [n for n, l in enumerate(ir.lines) if (l.startswith(prefix) if prefix else old in l)]
+        need(len(q) == 1 and old in ir.lines[q[0]], f"the view ramp's sharpening: {len(q)} lines for {old}")
+        edits.append((q[0], [ir.lines[q[0]].replace(old, new)]))
+    need(all(n > at for n, _ in edits[1:]), "the view-march lines come before the volume lookup")
+    for n, new_lines in sorted(edits, key=lambda e: -e[0]):
+        ir.lines[n:n + 1] = new_lines
+    define = next(n for n, l in enumerate(ir.lines) if l.startswith("define void @"))
+    ir.lines[define + 1:define + 1] = entry
+    return f"cloud types: grid at {TYPES_REGION:#x}, read at the volume lookup ({u}, {v}, {w})"
+
+
 def find_ap_depth(ir: Ir) -> str:
     """The sample's distance (m) the cloud renderer looks the camera volume up
     at: the numerator of depth / Global[10].y (the AP range)."""
@@ -2230,11 +2398,14 @@ def patch_clouds(text: str) -> tuple[str, str]:
     ir.reindex()
     shape = apply_cloud_shape(ir)
     ir.reindex()
+    types = apply_cloud_types(ir)
+    ir.reindex()
     ms = apply_cloud_ms(ir)
     ir.reindex()
     phase = apply_cloud_phase(ir)
     user = append_user_dump(ir)
-    return finish(ir, cloud=True, debug_uav=True), f"{colour}; {optical}; {detail}; {shape}; {ms}; {phase}; {user}"
+    return finish(ir, cloud=True, debug_uav=True), (f"{colour}; {optical}; {detail}; {shape}; {types}; {ms}; {phase}; "
+                                                    f"{user}")
 
 
 DEBUG_REGION_SHADOW = 2048       # ch_deferred_shadows: its 720-byte shadow cbuffer, 43 registers
@@ -3130,6 +3301,43 @@ CLOUD_SH_ELEMENTS, CLOUD_SH_STRIDE = 2, 144
 assert CLOUD_SH_REGION + CLOUD_SH_ELEMENTS * CLOUD_SH_STRIDE <= CLOUD_GEN_REGION
 assert CLOUD_GEN_REGION + CG_END <= 16 << 20
 
+# ---- Cloud types (live-weather family). With DebugCapture bit 7 (the 20 MB
+# buffer) the generator classifies the slices of one column per cell of a
+# TYPES_N x TYPES_N grid over the volume (the first thread of each cell) and
+# writes their type weights from TYPES_REGION (bytes):
+#   +0    uint4 (TYPES_MAGIC, frame, N (threads per axis), f32 64 / N), from the
+#         centre thread; the layer family writes 0 over the magic
+#   +16   per slice k, row y, column x (x innermost: 4 (TYPES_N (TYPES_N k + y)
+#         + x)) RGBA8: the weights of stratocumulus, stratus, altocumulus and
+#         altostratus. The rest is cumulus (with towering cumulus, CB, and
+#         cirrus, which stays as it is).
+# The classification is by layer: a run of slices with a weather-map value
+# above TYPES_IN_LAYER_C, its base (above the column's terrain), depth and
+# cover (the run's largest value), each test a smoothstep (the TYPES_ pairs):
+#   low = 1 - S(base, LOW_BASE), mid = (1 - low) (1 - S(base MSL, C18 - ICE_BLEND, C18)),
+#   broken = S(cover, BROKEN), deep = S(depth, DEEP);
+#   St = low broken (1 - S(base, ST_BASE)) (1 - S(depth, ST_DEPTH)),
+#   Sc = low broken (1 - S(depth, SC_DEPTH)) - St,
+#   As = mid (1 - deep) broken S(depth, AS_DEPTH), Ac = mid (1 - deep) - As.
+# Scattered low cloud is cumulus. A slice just outside a layer takes its
+# neighbour's weights (below first), as the renderer's filtering reaches it.
+# The renderer reads the grid in its view march (apply_cloud_types).
+TYPES_REGION = 0x1000000
+TYPES_N, TYPES_SLICES = 128, 32
+TYPES_MAGIC = 0x45505954  # 'TYPE'
+DEBUG_BUFFER_TYPES = 128  # DebugCapture bit 7: the debug buffer is 20 MB
+TYPES_IN_LAYER_C = 0.1    # ~1 okta (notes/cloud-shapes.md 4d)
+TYPES_BROKEN = (0.40, 0.52)
+TYPES_LOW_BASE = (2000.0, 3000.0)
+TYPES_ST_BASE = (450.0, 750.0)
+TYPES_ST_DEPTH = (500.0, 800.0)
+TYPES_SC_DEPTH = (900.0, 1400.0)
+TYPES_AS_DEPTH = (400.0, 800.0)
+TYPES_DEEP = (2500.0, 3500.0)
+TYPES_ICE_BLEND_M = 1500.0
+assert TYPES_REGION >= CLOUD_GEN_REGION + CG_END
+assert TYPES_REGION + 16 + 4 * TYPES_N * TYPES_N * TYPES_SLICES <= 20 << 20
+
 RES_CLASS = {"t": 0, "u": 1, "cb": 2, "s": 3}
 
 
@@ -3583,6 +3791,138 @@ def column_terrain(ir: Ir, text: str) -> tuple:
     return tuple(out)
 
 
+def smoothstep(em: Emitter, x, lo: float, hi: float) -> str:
+    t = em.sat(em.mad(x, 1.0 / (hi - lo), -lo / (hi - lo)))
+    return em.mul(em.mul(t, t), em.mad(t, -2.0, 3.0))
+
+
+def slice_bottom(k: int) -> float:
+    return 15.625 * k * k
+
+
+def cloud_types_lines(values: dict | None, tx: str, ty: str, terrain: str) -> list[str]:
+    """ch_cloudDensity, after the column's stores (in the block they end in;
+    ends in a new block): the cloud types (layout above). Without values (the
+    layer family), the centre thread only writes 0 over the magic."""
+    t = "%dx.types.Handle"
+    lines = [
+        f"  %mod.ty.fb = and i32 %mod.cv.flags, {DEBUG_BUFFER_TYPES}",
+        "  %mod.ty.fon = icmp ne i32 %mod.ty.fb, 0",
+        f"  %mod.ty.cx = icmp eq i32 {tx}, %mod.cv.half",
+        f"  %mod.ty.cy = icmp eq i32 {ty}, %mod.cv.half",
+        "  %mod.ty.c0 = and i1 %mod.ty.cx, %mod.ty.cy",
+        "  %mod.ty.c = and i1 %mod.ty.c0, %mod.ty.fon",
+    ]
+    handle = [f"  %mod.ty.uh = call {t} @dx.op.createHandleFromBinding(i32 217, %dx.types.ResBind "
+              f"{{ i32 0, i32 0, i32 {MOD_SPACE}, i8 1 }}, i32 0, i1 false)",
+              f"  %mod.ty.u = call {t} @dx.op.annotateHandle(i32 216, {t} %mod.ty.uh, "
+              "%dx.types.ResourceProperties { i32 4107, i32 0 })"]
+    if values is None:
+        return lines + [
+            "  br i1 %mod.ty.c, label %mod.cgb.tyz, label %mod.cgb.tyend",
+            "",
+            "mod.cgb.tyz:",
+            *handle,
+            f"  call void @dx.op.rawBufferStore.i32(i32 140, {t} %mod.ty.u, i32 {TYPES_REGION}, i32 undef, i32 0, "
+            "i32 undef, i32 undef, i32 undef, i8 1, i32 4)",
+            "  br label %mod.cgb.tyend",
+            "",
+            "mod.cgb.tyend:",
+        ]
+    # the first thread of each cell (and of the grid's column: tx * TYPES_N / N)
+    lines += [
+        f"  %mod.ty.x7 = mul i32 {tx}, {TYPES_N}",
+        f"  %mod.ty.y7 = mul i32 {ty}, {TYPES_N}",
+        "  %mod.ty.xr = urem i32 %mod.ty.x7, %mod.cv.n",
+        "  %mod.ty.yr = urem i32 %mod.ty.y7, %mod.cv.n",
+        f"  %mod.ty.xf = icmp ult i32 %mod.ty.xr, {TYPES_N}",
+        f"  %mod.ty.yf = icmp ult i32 %mod.ty.yr, {TYPES_N}",
+        f"  %mod.ty.xi = icmp ult i32 {tx}, %mod.cv.n",
+        f"  %mod.ty.yi = icmp ult i32 {ty}, %mod.cv.n",
+        "  %mod.ty.g0 = and i1 %mod.ty.xf, %mod.ty.yf",
+        "  %mod.ty.g1 = and i1 %mod.ty.xi, %mod.ty.yi",
+        "  %mod.ty.g2 = and i1 %mod.ty.g0, %mod.ty.g1",
+        "  %mod.ty.go = and i1 %mod.ty.g2, %mod.ty.fon",
+        "  br i1 %mod.ty.go, label %mod.cgb.ty, label %mod.cgb.tyend",
+        "",
+        "mod.cgb.ty:",
+        *handle,
+        "  br i1 %mod.ty.c, label %mod.cgb.tyh, label %mod.cgb.tyw",
+        "",
+        "mod.cgb.tyh:",
+        "  %mod.ty.nf = uitofp i32 %mod.cv.n to float",
+        "  %mod.ty.of = fdiv fast float 6.400000e+01, %mod.ty.nf",
+        "  %mod.ty.oi = bitcast float %mod.ty.of to i32",
+        "  %mod.ty.fr = lshr i32 %mod.cv.flags, 16",
+        f"  call void @dx.op.rawBufferStore.i32(i32 140, {t} %mod.ty.u, i32 {TYPES_REGION}, i32 undef, "
+        f"i32 {TYPES_MAGIC}, i32 %mod.ty.fr, i32 %mod.cv.n, i32 %mod.ty.oi, i8 15, i32 4)",
+        "  br label %mod.cgb.tyw",
+        "",
+        "mod.cgb.tyw:",
+        "  %mod.ty.gx = udiv i32 %mod.ty.x7, %mod.cv.n",
+        "  %mod.ty.gy = udiv i32 %mod.ty.y7, %mod.cv.n",
+        f"  %mod.ty.gc0 = mul i32 %mod.ty.gy, {TYPES_N}",
+        "  %mod.ty.gc = add i32 %mod.ty.gc0, %mod.ty.gx",
+        "  %mod.ty.go0 = shl i32 %mod.ty.gc, 2",
+        f"  %mod.ty.go1 = add i32 %mod.ty.go0, {TYPES_REGION + 16}",
+    ]
+    em = Emitter("ty.")
+    n = WEATHER_SLICES
+    inside = [em.cmp("ogt", values[k], TYPES_IN_LAYER_C) for k in range(n)]
+    # each slice's layer: base and cover up from below, top and cover down from above
+    base, cover_up = [], []
+    for k in range(n):
+        if k == 0:
+            base.append(0.0)
+            cover_up.append(values[0])
+            continue
+        base.append(em.select(inside[k - 1], base[k - 1], slice_bottom(k)))
+        cover_up.append(em.max(values[k], em.select(inside[k - 1], cover_up[k - 1], 0.0)))
+    top, cover = [None] * n, [None] * n
+    for k in reversed(range(n)):
+        if k == n - 1:
+            top[k], cover[k] = slice_bottom(k + 1), cover_up[k]
+            continue
+        top[k] = em.select(inside[k + 1], top[k + 1], slice_bottom(k + 1))
+        cover[k] = em.max(cover_up[k], em.select(inside[k + 1], cover[k + 1], 0.0))
+    weights = []
+    for k in range(n):
+        depth = em.sub(top[k], base[k])
+        above = em.sub(base[k], terrain)
+        broken = smoothstep(em, cover[k], *TYPES_BROKEN)
+        low = em.sub(1.0, smoothstep(em, above, *TYPES_LOW_BASE))
+        ice = em.sat(em.mad(em.sub(base[k], "%mod.coh"), 1.0 / TYPES_ICE_BLEND_M, 1.0))
+        high = em.mul(em.mul(ice, ice), em.mad(ice, -2.0, 3.0))
+        mid = em.mul(em.sub(1.0, low), em.sub(1.0, high))
+        deep = smoothstep(em, depth, *TYPES_DEEP)
+        lowb = em.mul(low, broken)
+        st_base = em.sub(1.0, smoothstep(em, above, *TYPES_ST_BASE))
+        st_thin = em.sub(1.0, smoothstep(em, depth, *TYPES_ST_DEPTH))
+        sc_thin = em.sub(1.0, smoothstep(em, depth, *TYPES_SC_DEPTH))
+        st = em.mul(em.mul(lowb, st_base), st_thin)
+        sc = em.sub(em.mul(lowb, sc_thin), st)
+        mid_nd = em.mul(mid, em.sub(1.0, deep))
+        as_ = em.mul(em.mul(mid_nd, broken), smoothstep(em, depth, *TYPES_AS_DEPTH))
+        ac = em.sub(mid_nd, as_)
+        weights.append([em.select(inside[k], w, 0.0) for w in (sc, st, ac, as_)])
+    # outside a layer: the layer's below, else the one above (weights are 0 outside layers)
+    words = []
+    for k in range(TYPES_SLICES):
+        out = []
+        for c in range(4):
+            above = weights[k + 1][c] if k + 1 < n else 0.0
+            near = em.select(inside[k - 1], weights[k - 1][c], above) if 1 <= k <= n else above
+            out.append(em.lit(em.select(inside[k], weights[k][c], near) if k < n else near))
+        words.append(out)
+    lines += em.lines
+    for k, out in enumerate(words):
+        w = pack_unorm8(out, f"ty.p{k}.", lines)
+        lines += [f"  %mod.ty.a{k} = add i32 %mod.ty.go1, {4 * TYPES_N * TYPES_N * k}",
+                  f"  call void @dx.op.rawBufferStore.i32(i32 140, {t} %mod.ty.u, i32 %mod.ty.a{k}, i32 undef, "
+                  f"i32 {w}, i32 undef, i32 undef, i32 undef, i8 1, i32 4)"]
+    return lines + ["  br label %mod.cgb.tyend", "", "mod.cgb.tyend:"]
+
+
 def patch_cloud_gen_capture(text: str) -> tuple[str, str]:
     """ch_cloudDensity, every variant: on capture (DebugCapture bits 0 and 6)
     dump its constants, its input textures and its output (layout above) into
@@ -3591,7 +3931,9 @@ def patch_cloud_gen_capture(text: str) -> tuple[str, str]:
     stock while C20 <= 0."""
     ir = Ir(text)
     anchor = "no METAR anchoring (not the live-weather family)"
+    values = None
     if all(srv_shapes(text).get(reg) == sh for reg, sh in CG_LAYOUTS["weather map"]["shapes"].items()):
+        values = find_weather_values(ir)  # (the anchoring keeps their names)
         anchor = apply_metar_anchor(ir)
         ir.reindex()
     tids = re.findall(r"^\s+(%[\w.]+) = call i32 @dx\.op\.threadId\.i32\(i32 93, i32 ([01])\)", text, re.M)
@@ -3703,6 +4045,7 @@ def patch_cloud_gen_capture(text: str) -> tuple[str, str]:
         "  br label %mod.cgb.vend",
         "",
         "mod.cgb.vend:",
+        *cloud_types_lines(values, tx, ty, terrain[1]),
         ir.lines[br],
     ]
     ir.lines[br:br + 1] = out
@@ -3847,7 +4190,9 @@ def patch_cloud_gen_capture(text: str) -> tuple[str, str]:
         r.append("  br label %mod.cgb.end")
     r += ["", "mod.cgb.end:", "  ret void"]
     ir.lines[rets[0]:rets[0] + 1] = r
-    return finish(ir, cloud=True, debug_uav=True), (f"{anchor}; capture at {CLOUD_GEN_REGION:#x}: constants, output"
+    types = f"cloud types at {TYPES_REGION:#x}" if values else "no cloud types (zeroes their magic)"
+    return finish(ir, cloud=True, debug_uav=True), (f"{anchor}; {types}; capture at {CLOUD_GEN_REGION:#x}: "
+                                                    "constants, output"
                                         + (f"; {layout} family: noise t{lay['noise']}, coverage curve t{lay['lut']}"
                                            + (", weather maps, precipitation" if lay["maps"] else "")
                                            + (", 2D map t4" if map2d else "") if layout else

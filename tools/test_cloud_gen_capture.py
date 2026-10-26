@@ -331,6 +331,30 @@ class LutTex(Tex):
         return (v, v, v, v)
 
 
+class ProfileTex(Tex):
+    """A weather map with one value per slice everywhere."""
+
+    def __init__(self, reg, dims, profile):
+        super().__init__(reg, dims)
+        self.profile = profile
+
+    def sample(self, *c, lod=0.0):
+        k = int(c[2] * 32)
+        v = f32(self.profile[k]) if 0 <= k < len(self.profile) else 0.0
+        return (v, v, v, v)
+
+
+class FlatTex(Tex):
+    """The same value everywhere (terrain)."""
+
+    def __init__(self, reg, dims, value):
+        super().__init__(reg, dims)
+        self.value = f32(value)
+
+    def sample(self, *c, lod=0.0):
+        return (self.value,) * 4
+
+
 def anchor_cloud(strength=STRENGTH):
     c = [0.0] * (P.CLOUD_PARAMS_SIZE // 4)
     c[20], c[21] = strength, RADIUS_KM
@@ -425,6 +449,142 @@ TEX_LAYERS = {0: Tex(0, (64, 64, 0, 1)), 1: Tex(1, (512, 512, 0, 1)), 2: Tex(2, 
 LAYER_CRCS = {"0x9197d2d6": False, "0x41442a54": True}  # crc -> binds the 2D map t4
 
 
+def smoothstep(x, lo, hi):
+    t = min(max((x - lo) / (hi - lo), 0.0), 1.0)
+    return t * t * (3 - 2 * t)
+
+
+def types_ref(c, terrain, ice=P.OPTICAL_ICE_DEFAULT_M):
+    """The 32 slices' type weights (Sc, St, Ac, As), float64, from the column's
+    weather values c (31) and terrain (m), as patch_dxil.cloud_types_lines."""
+    n = P.WEATHER_SLICES
+    inside = [x > P.TYPES_IN_LAYER_C for x in c]
+    base, cover_up = [], []
+    for k in range(n):
+        joined = k > 0 and inside[k - 1]
+        base.append(base[k - 1] if joined else 15.625 * k * k)
+        cover_up.append(max(c[k], cover_up[k - 1] if joined else 0.0))
+    top, cover = [0.0] * n, [0.0] * n
+    for k in reversed(range(n)):
+        joined = k + 1 < n and inside[k + 1]
+        top[k] = top[k + 1] if joined else 15.625 * (k + 1) ** 2
+        cover[k] = max(cover_up[k], cover[k + 1] if joined else 0.0)
+    weights = []
+    for k in range(n):
+        depth, above = top[k] - base[k], base[k] - terrain
+        broken = smoothstep(cover[k], *P.TYPES_BROKEN)
+        low = 1 - smoothstep(above, *P.TYPES_LOW_BASE)
+        mid = (1 - low) * (1 - smoothstep(base[k], ice - P.TYPES_ICE_BLEND_M, ice))
+        st = low * broken * (1 - smoothstep(above, *P.TYPES_ST_BASE)) * (1 - smoothstep(depth, *P.TYPES_ST_DEPTH))
+        sc = low * broken * (1 - smoothstep(depth, *P.TYPES_SC_DEPTH)) - st
+        mid_nd = mid * (1 - smoothstep(depth, *P.TYPES_DEEP))
+        as_ = mid_nd * broken * smoothstep(depth, *P.TYPES_AS_DEPTH)
+        weights.append((sc, st, mid_nd - as_, as_) if inside[k] else (0.0,) * 4)
+    out = []
+    for k in range(P.TYPES_SLICES):
+        if k < n and inside[k]:
+            out.append(weights[k])
+        elif 1 <= k <= n and inside[k - 1]:
+            out.append(weights[k - 1])
+        else:
+            out.append(weights[k + 1] if k + 1 < n else (0.0,) * 4)
+    return out
+
+
+def check_types_table(check):
+    """The classification itself, on made-up columns (sea-level terrain): the
+    approved table (notes/cloud-shapes.md 4h)."""
+    def column(c, slices):
+        v = [0.0] * P.WEATHER_SLICES
+        for k in slices:
+            v[k] = c
+        return v
+    names = ("Sc", "St", "Ac", "As")
+    cases = [("OVC stratus 140-560 m", column(1.0, range(3, 6)), "St"),
+             ("BKN stratocumulus 1-1.6 km", column(0.58, range(8, 10)), "Sc"),
+             ("SCT cumulus 1-1.9 km", column(0.38, range(8, 11)), "Cu"),
+             ("FEW thin cumulus 400-770 m", column(0.21, range(5, 7)), "Cu"),
+             ("BKN towering cumulus 1-6 km", column(0.58, range(8, 19)), "Cu"),
+             ("BKN altostratus 3.5-4.5 km", column(0.6, range(15, 17)), "As"),
+             ("SCT altocumulus 3.5-4.5 km", column(0.38, range(15, 17)), "Ac"),
+             ("BKN cirrus 9.8-11.3 km", column(0.6, range(25, 27)), "Cu")]
+    for what, c, want in cases:
+        w = types_ref(c, 0.0)
+        k = next(k for k in range(P.WEATHER_SLICES) if c[k] > 0)
+        rest = 1 - sum(w[k])
+        got = max(zip((*w[k], rest), (*names, "Cu")))[1]
+        check(got == want and max(*w[k], rest) > 0.7, f"cloud types: {what} is {got} ({w[k]}, cumulus {rest:.2f})")
+    print("cloud types: the classification table holds on", len(cases), "made-up layers")
+
+
+def check_types(stock_p, patched_p, values, h_name, table, tex, check):
+    """The live-weather family's grid: the first thread of each cell writes
+    its column's weights (against types_ref), the centre thread the header;
+    other threads and runs without bit 7 write nothing, and the volume is
+    unchanged."""
+    flags = P.DEBUG_BUFFER_16MB | P.DEBUG_BUFFER_TYPES | (5 << 16)
+    big = bytearray(table) + bytearray((20 << 20) - len(table))
+    worst = 0
+    for tid in [(256, 256), (300, 220), (200, 328), (128, 400), (40, 40), (264, 248), (4, 508)]:
+        ref = Machine(patched_p, constants(P.DEBUG_BUFFER_16MB, cloud=anchor_cloud()), tex, bytearray(big)).run(tid)
+        m = Machine(patched_p, constants(flags, cloud=anchor_cloud()), tex, bytearray(big))
+        out = m.run(tid)
+        check(out == ref, f"{tid}: cloud types changed the volume")
+        c = [m.env[values[k]] for k in range(P.WEATHER_SLICES)]
+        want = types_ref(c, m.env[h_name])
+        gx, gy = tid[0] * P.TYPES_N // N, tid[1] * P.TYPES_N // N
+        for k in range(P.TYPES_SLICES):
+            o = P.TYPES_REGION + 16 + 4 * ((k * P.TYPES_N + gy) * P.TYPES_N + gx)
+            got = list(m.buf[o:o + 4])
+            exp = [u8(x) for x in want[k]]
+            err = max(abs(a - b) for a, b in zip(got, exp))
+            worst = max(worst, err)
+            check(err <= 1, f"{tid} slice {k}: cloud type weights {got} != {exp}")
+        hdr = struct.unpack_from("<3If", m.buf, P.TYPES_REGION)
+        if tid == (N // 2, N // 2):
+            check(hdr == (P.TYPES_MAGIC, 5, N, 64.0 / N), f"cloud types header {hdr}")
+        else:
+            check(hdr == (0, 0, 0, 0.0), f"{tid}: wrote the cloud types header")
+        kinds = [max(zip((*w, 1 - sum(w)), ("Sc", "St", "Ac", "As", "Cu")))[1] for w, x in zip(want, c)
+                 if x > P.TYPES_IN_LAYER_C]
+        print(f"cloud types at {tid}: cell ({gx}, {gy}), {len(kinds)} slices in layers ({' '.join(kinds)}), "
+              f"max byte error {worst}")
+    # layered weather maps (no anchoring, terrain at 50 m): each layer's type end to end
+    cases = [("OVC stratus", [((3, 6), 1.0)], ["St"]),
+             ("BKN stratocumulus", [((8, 10), 0.58)], ["Sc"]),
+             ("SCT cumulus", [((8, 11), 0.38)], ["Cu"]),
+             ("BKN stratocumulus under BKN altostratus", [((8, 10), 0.58), ((15, 17), 0.6)], ["Sc", "As"]),
+             ("SCT altocumulus under cirrus", [((15, 17), 0.38), ((25, 27), 0.6)], ["Ac", "Cu"]),
+             ("BKN towering cumulus", [((8, 19), 0.58)], ["Cu"])]
+    for what, layers, kinds in cases:
+        profile = [0.0] * P.WEATHER_SLICES
+        for (k0, k1), cv in layers:
+            profile[k0:k1] = [cv] * (k1 - k0)
+        tex = {**TEX, 0: FlatTex(0, (64, 64, 0, 1), 50.0 / 65535), 5: ProfileTex(5, TEX[5].dims, profile),
+               6: ProfileTex(6, TEX[6].dims, profile)}
+        m = Machine(patched_p, constants(flags, cloud=[0.0] * 32), tex, bytearray(20 << 20))
+        m.run((N // 2, N // 2))
+        c = [m.env[values[k]] for k in range(P.WEATHER_SLICES)]
+        want = types_ref(c, m.env[h_name])
+        g = P.TYPES_N // 2
+        got_kinds = []
+        for k in range(P.TYPES_SLICES):
+            o = P.TYPES_REGION + 16 + 4 * ((k * P.TYPES_N + g) * P.TYPES_N + g)
+            got = list(m.buf[o:o + 4])
+            check(max(abs(a - u8(b)) for a, b in zip(got, want[k])) <= 1,
+                  f"{what} slice {k}: cloud type weights {got} != {[u8(x) for x in want[k]]}")
+            if any(k == k0 for (k0, _), _ in layers):
+                w = [x / 255 for x in got]
+                got_kinds.append(max(zip((*w, 1 - sum(w)), ("Sc", "St", "Ac", "As", "Cu")))[1])
+        check(got_kinds == kinds, f"{what}: the shader's types {got_kinds}, expected {kinds}")
+        print(f"cloud types, {what}: {got_kinds}")
+    # not the first thread of its cell; no bit 7: nothing in the grid
+    for tid, f in (((257, 256), flags), ((256, 256), P.DEBUG_BUFFER_16MB)):
+        m = Machine(patched_p, constants(f, cloud=anchor_cloud()), tex, bytearray(big))
+        m.run(tid)
+        check(not any(m.buf[P.TYPES_REGION:]), f"{tid} flags {f:#x}: wrote to the cloud types grid")
+
+
 def check_layers(dxc, index, check):
     base = P.CLOUD_GEN_REGION
     lo = N // 2 - P.CG_VOL_N // 2
@@ -472,6 +632,14 @@ def check_layers(dxc, index, check):
                 o = base + P.CG_VOLSUB + ((y // 4) * P.CG_VOL_N + x // 4) * 128
                 check(list(buf[o:o + 128]) == expect, f"{crc} {tid}: subsampled volume copy")
             print(f"{crc} thread {tid}: {len(ref)} slices stored; {sum(1 for b in buf if b)} bytes dumped")
+        # the cloud types: the centre thread writes 0 over the live family's magic (with bit 7 only)
+        for f, cleared in ((P.DEBUG_BUFFER_TYPES, True), (0, False)):
+            buf = bytearray(20 << 20)
+            struct.pack_into("<I", buf, P.TYPES_REGION, P.TYPES_MAGIC)
+            m = Machine(patched_p, constants(f), TEX_LAYERS, buf)
+            m.run((N // 2, N // 2))
+            magic = struct.unpack_from("<I", m.buf, P.TYPES_REGION)[0]
+            check(magic == (0 if cleared else P.TYPES_MAGIC), f"{crc} flags {f:#x}: cloud types magic {magic:#x}")
 
 
 def main():
@@ -631,6 +799,8 @@ def main():
                 ("wrong magic", on_flags, anchor_cloud(), with_table(STATIONS, magic=P.ANCHOR_MAGIC ^ 1))):
             got = Machine(patched_p, constants(flags, cloud=cloud), TEX, buf).run(tid)
             check(got == ref, f"{tid}: anchoring off ({what}) but the volume differs from stock")
+    check_types_table(check)
+    check_types(stock_p, patched_p, values, h_name, table, TEX_ANCHOR, check)
     # the cloud constants as the shader saw them, in the header
     cap = Machine(patched_p, constants(1 | P.DEBUG_BUFFER_16MB, cloud=anchor_cloud()), TEX, bytearray(table))
     cap.run((0, 0))

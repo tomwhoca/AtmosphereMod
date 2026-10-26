@@ -285,6 +285,68 @@ def main():
     out = CAPTURES / f"{args.capture}_clouds.png"
     fig.savefig(out, dpi=80)
     print("\nwrote", out)
+    show_types(args.capture, cov_sub, s, n)
+
+
+TYPE_NAMES = ("Sc", "St", "Ac", "As", "Cu")
+TYPE_COLOURS = ("tab:orange", "tab:green", "tab:purple", "tab:red", "tab:blue")
+
+
+def show_types(capture: str, cov_sub, s: float, n: int):
+    """The cloud types grid (<id>_types.bin, patch_dxil.py TYPES_REGION): per
+    slice, the mean weights in covered cells (whole disc and around the
+    centre), and <id>_types.png: the dominant type per cell where the volume
+    has cloud, in a section through the centre and per slice."""
+    path = CAPTURES / f"{capture}_types.bin"
+    if not path.exists():
+        print("\nno cloud types in this capture")
+        return
+    raw = path.read_bytes()
+    magic, frame, tn, _ = struct.unpack_from("<4I", raw, 0)
+    g = P.TYPES_N
+    w = np.frombuffer(raw, np.uint8, g * g * P.TYPES_SLICES * 4, 16).reshape(P.TYPES_SLICES, g, g, 4) / 255.0
+    w = np.concatenate([w, np.clip(1 - w.sum(-1, keepdims=True), 0, 1)], -1)  # + cumulus
+    # the grid's cells against the every-4th-column volume copy (both cover the disc; N = 512: the same columns)
+    sub = cov_sub.shape[0]
+    idx = np.minimum((np.arange(g) * n / g / 4).astype(int), sub - 1)
+    cloudy = (cov_sub[np.ix_(idx, idx)] > 0.5).transpose(2, 0, 1)  # [slice, y, x]
+    print(f"\ncloud types ({path.name}: magic {'ok' if magic == P.TYPES_MAGIC else hex(magic)}, frame {frame}, "
+          f"N {tn}); mean weights in covered cells, whole disc | within ~20 km")
+    print("slice  altitude  cells   " + "  ".join(f"{t:>4}" for t in TYPE_NAMES) + "   |  "
+          + "  ".join(f"{t:>4}" for t in TYPE_NAMES))
+    c0 = g // 2
+    for k in range(P.TYPES_SLICES):
+        m = cloudy[k]
+        if not m.any():
+            continue
+        near = np.zeros_like(m)
+        near[c0 - 8:c0 + 8, c0 - 8:c0 + 8] = True
+        whole = w[k][m].mean(0)
+        close = w[k][m & near].mean(0) if (m & near).any() else np.full(5, np.nan)
+        print(f"{k:5d}  {CENTRES[k]:7.0f} m  {m.sum():5d}  " + "  ".join(f"{x:4.2f}" for x in whole) + "   |  "
+              + "  ".join(f"{x:4.2f}" for x in close))
+    dominant = np.where(cloudy, w.argmax(-1), -1)
+    cmap = matplotlib.colors.ListedColormap(["white", *TYPE_COLOURS])
+    fig, axes = plt.subplots(1, 2, figsize=(16, 7))
+    span = g * 4 * s / max(n, 1) / 1000
+    axes[0].imshow(dominant[:, c0, :] + 1, origin="lower", cmap=cmap, vmin=0, vmax=5, aspect="auto",
+                   extent=(-span / 2, span / 2, 0, P.TYPES_SLICES))
+    axes[0].set_yticks(range(0, P.TYPES_SLICES, 4), [f"{EDGES[k] / 1000:.1f}" for k in range(0, P.TYPES_SLICES, 4)])
+    axes[0].set_ylabel("altitude (km MSL, slices)")
+    axes[0].set_xlabel("km (warped)")
+    axes[0].set_title("dominant type where the volume has cloud, section through the centre", fontsize=9)
+    low = np.full((g, g), -1)
+    for k in reversed(range(P.TYPES_SLICES)):
+        low = np.where(dominant[k] >= 0, dominant[k], low)
+    axes[1].imshow(low + 1, origin="lower", cmap=cmap, vmin=0, vmax=5, extent=(-span / 2, span / 2, -span / 2, span / 2))
+    axes[1].set_title("type of the lowest cloud (whole disc)", fontsize=9)
+    handles = [matplotlib.patches.Patch(color=c, label=t) for t, c in zip(TYPE_NAMES, TYPE_COLOURS)]
+    axes[1].legend(handles=handles, fontsize=8, loc="upper right")
+    fig.suptitle(f"cloud types, capture {capture}", fontsize=12)
+    fig.tight_layout()
+    out = CAPTURES / f"{capture}_types.png"
+    fig.savefig(out, dpi=80)
+    print("wrote", out)
 
 
 if __name__ == "__main__":
