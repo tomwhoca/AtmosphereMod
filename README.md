@@ -1,5 +1,7 @@
 # AtmosphereMod
 
+![AtmosphereMod: experimental sky, lighting and cloud shaders for MSFS 2024](Screenshots/cover.png)
+
 AtmosphereMod is an experimental ReShade add-on for **Microsoft Flight
 Simulator 2024**. It aims to give the sim more realistic atmosphere and cloud
 rendering, and consists of several components:

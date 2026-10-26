@@ -116,8 +116,10 @@ def addon_version() -> str:
 
 
 def release_readme() -> str:
-    """README.md with its Screenshots section replaced by a link (the images stay on GitHub)."""
+    """README.md without the cover image and with its Screenshots section replaced by a link (the
+    images stay on GitHub)."""
     text = (ROOT / "README.md").read_text(encoding="utf-8")
+    text = re.sub(r"^!\[[^\]]*\]\(Screenshots/cover\.png\)\n\n", "", text, flags=re.M)
     start = text.index("## Screenshots\n")
     end = text.index("\n## ", start) + 1
     return (text[:start] + "## Screenshots\n\nComparison screenshots, with the mod off and on, are on the GitHub page:\n"
