@@ -228,7 +228,7 @@ settings changed from the defaults.
   </tr>
   <tr>
     <td><b>Cloud lighting</b>, with its "More" section open: silver lining, glory, your aircraft's shadow.</td>
-    <td><b>Clouds</b>, with "More" open: the METAR anchoring, solid clouds and smooth bases.</td>
+    <td><b>Clouds</b>, with "More" open: the METAR anchoring, solid clouds, cloud types and smooth bases; under "More", each cloud type's thickness.</td>
   </tr>
 </table>
 
