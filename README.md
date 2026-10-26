@@ -45,8 +45,11 @@ rendering, and consists of several components:
 
 ## Screenshots
 
-Taken with live weather and the shipping settings. Each
-pair was taken a few seconds apart.
+Taken on 26 October 2026 with live weather, each pair a few seconds apart
+with the mod off and on.
+The settings were the shipping ones except for solid clouds 4 (2 by default),
+crisper cloud edges 2 (off by default) and small changes to the cloud
+lighting.
 
 ### Haze
 
@@ -56,43 +59,43 @@ pair was taken a few seconds apart.
     <th width="50%">Mod on</th>
   </tr>
   <tr>
-    <td><img src="Screenshots/haze-niamey-off.jpg" alt="Mod off: Niamey, dust at 6 km"></td>
-    <td><img src="Screenshots/haze-niamey-on.jpg" alt="Mod on: Niamey, dust at 6 km"></td>
+    <td><img src="Screenshots/haze-monterrey-off.jpg" alt="Mod off: Monterrey, humid haze at 8 km"></td>
+    <td><img src="Screenshots/haze-monterrey-on.jpg" alt="Mod on: Monterrey, humid haze at 8 km"></td>
   </tr>
   <tr>
-    <td colspan="2"><b>Niamey</b>, dust at 6 km: the haze thickens to the reported visibility. MSFS shows its usual light, lavender-tinted haze.<br><sub>METAR <code>DRRN 240900Z 16005KT 120V200 6000 NSC 34/11 Q1014 TEMPO 4000 DU</code></sub></td>
+    <td colspan="2"><b>Monterrey</b>, humid haze at 8 km: a bright, milky haze, with the mountains fading into it. MSFS shows clear air under a dark overcast.<br><sub>METAR <code>MMMY 261340Z 00000KT 5SM BKN020 BKN080 20/19 A3022 RMK 8/530 HZY</code></sub></td>
   </tr>
   <tr>
-    <td><img src="Screenshots/haze-dakar-off.jpg" alt="Mod off: Dakar, dust at 1.6 km"></td>
-    <td><img src="Screenshots/haze-dakar-on.jpg" alt="Mod on: Dakar, dust at 1.6 km"></td>
+    <td><img src="Screenshots/haze-tenerife-south-off.jpg" alt="Mod off: Tenerife South, haze at 9 km"></td>
+    <td><img src="Screenshots/haze-tenerife-south-on.jpg" alt="Mod on: Tenerife South, haze at 9 km"></td>
   </tr>
   <tr>
-    <td colspan="2"><b>Dakar</b>, dust at 1.6 km: a dense, brownish dust haze.<br><sub>METAR <code>GOBD 240930Z 05011KT 1600 DU NSC 30/18 Q1013 NOSIG</code></sub></td>
+    <td colspan="2"><b>Tenerife South</b>, haze at 9 km: a pale haze over the coast, with the distance fading as reported. MSFS's air is clear.<br><sub>METAR <code>GCTS 261400Z 11008KT 9000 NSC 27/22 Q1016 NOSIG</code></sub></td>
   </tr>
   <tr>
-    <td><img src="Screenshots/haze-mumbai-off.jpg" alt="Mod off: Mumbai, humid haze at 1.8 km"></td>
-    <td><img src="Screenshots/haze-mumbai-on.jpg" alt="Mod on: Mumbai, humid haze at 1.8 km"></td>
+    <td><img src="Screenshots/haze-keflavik-off.jpg" alt="Mod off: Keflavík, drizzle and mist at 2 km"></td>
+    <td><img src="Screenshots/haze-keflavik-on.jpg" alt="Mod on: Keflavík, drizzle and mist at 2 km"></td>
   </tr>
   <tr>
-    <td colspan="2"><b>Mumbai</b>, white humid haze at 1.8 km.<br><sub>METAR <code>VABB 241000Z 29010KT 1800 HZ NSC 34/24 Q1007 NOSIG</code></sub></td>
+    <td colspan="2"><b>Keflavík</b>, drizzle and mist at 2 km: the mist closes in as reported. MSFS shows blue sky and clouds beyond it.<br><sub>METAR <code>BIKF 261330Z 16003KT 2000 -DZ BR FEW002 BKN005 04/03 Q0983</code></sub></td>
   </tr>
   <tr>
-    <td><img src="Screenshots/haze-delhi-off.jpg" alt="Mod off: Delhi, haze at 5 km"></td>
-    <td><img src="Screenshots/haze-delhi-on.jpg" alt="Mod on: Delhi, haze at 5 km"></td>
+    <td><img src="Screenshots/haze-nouakchott-off.jpg" alt="Mod off: Nouakchott, 6 km in very dry air"></td>
+    <td><img src="Screenshots/haze-nouakchott-on.jpg" alt="Mod on: Nouakchott, 6 km in very dry air"></td>
   </tr>
   <tr>
-    <td colspan="2"><b>Delhi</b>, haze at 5 km: a grey haze in place of MSFS's lavender one.<br><sub>METAR <code>VIDP 241000Z 15005KT 5000 HZ FEW100 31/16 Q1010 NOSIG</code></sub></td>
+    <td colspan="2"><b>Nouakchott</b>, 6 km in very dry air (the METAR has no weather code; the mod infers dust from the humidity): the haze closes in to the reported visibility. MSFS's view is clear to the horizon.<br><sub>METAR <code>GQNO 261400Z 12014KT 6000 NSC 41/07 Q1011 NOSIG</code></sub></td>
   </tr>
   <tr>
-    <td><img src="Screenshots/haze-amman-off.jpg" alt="Mod off: Amman, dry haze at 5 km"></td>
-    <td><img src="Screenshots/haze-amman-on.jpg" alt="Mod on: Amman, dry haze at 5 km"></td>
+    <td><img src="Screenshots/haze-itaituba-off.jpg" alt="Mod off: Itaituba, smoke and mist at 3 km"></td>
+    <td><img src="Screenshots/haze-itaituba-on.jpg" alt="Mod on: Itaituba, smoke and mist at 3 km"></td>
   </tr>
   <tr>
-    <td colspan="2"><b>Amman</b>, dry haze at 5 km: a pale blue sky with a few cumulus, as reported.<br><sub>METAR <code>OJAI 241000Z 12005KT 5000 HZ FEW035 29/12 Q1017 NOSIG</code></sub></td>
+    <td colspan="2"><b>Itaituba</b>, in the Amazon, smoke and mist at 3 km: the haze closes in to the reported visibility. MSFS keeps a shallow haze layer below.<br><sub>METAR <code>SBIH 261400Z 12004KT 3000 BR FU SCT017 BKN080 27/24 Q1014</code></sub></td>
   </tr>
 </table>
 
-### Sky colours
+### Sky colours and low sun
 
 <table>
   <tr>
@@ -100,15 +103,61 @@ pair was taken a few seconds apart.
     <th width="50%">Mod on</th>
   </tr>
   <tr>
-    <td><img src="Screenshots/sky-san-francisco-sunset-off.jpg" alt="Mod off: San Francisco at sunset, the sun 2&deg; high"></td>
-    <td><img src="Screenshots/sky-san-francisco-sunset-on.jpg" alt="Mod on: San Francisco at sunset, the sun 2&deg; high"></td>
+    <td><img src="Screenshots/sky-san-francisco-dawn-off.jpg" alt="Mod off: San Francisco before sunrise"></td>
+    <td><img src="Screenshots/sky-san-francisco-dawn-on.jpg" alt="Mod on: San Francisco before sunrise"></td>
   </tr>
   <tr>
-    <td colspan="2"><b>San Francisco</b> at sunset, the sun 2&deg; high: the clouds glow orange and red under a purple sky.<br><sub>METAR <code>KSFO 240056Z 28016KT 10SM FEW035 18/11 A3002 RMK AO2 SLP165 T01780111</code></sub></td>
+    <td colspan="2"><b>San Francisco</b> before sunrise: the sky and the bay turn pink and violet, with the clouds dark against them. MSFS's dawn is blue-grey.<br><sub>METAR <code>KSFO 261356Z 17003KT 10SM FEW009 BKN027 13/12 A3014 RMK AO2 SLP205 T01330117 $</code></sub></td>
+  </tr>
+  <tr>
+    <td><img src="Screenshots/sky-jackson-hole-sunrise-off.jpg" alt="Mod off: Jackson Hole at sunrise"></td>
+    <td><img src="Screenshots/sky-jackson-hole-sunrise-on.jpg" alt="Mod on: Jackson Hole at sunrise"></td>
+  </tr>
+  <tr>
+    <td colspan="2"><b>Jackson Hole</b> at sunrise: the underside of the overcast glows orange above the Tetons. MSFS's is a flat yellow.<br><sub>METAR <code>KJAC 261356Z 00000KT 10SM BKN041 OVC070 01/M01 A3022 RMK AO2 SLP244 T00111006</code></sub></td>
+  </tr>
+  <tr>
+    <td><img src="Screenshots/sky-tbilisi-off.jpg" alt="Mod off: Tbilisi in the late afternoon"></td>
+    <td><img src="Screenshots/sky-tbilisi-on.jpg" alt="Mod on: Tbilisi in the late afternoon"></td>
+  </tr>
+  <tr>
+    <td colspan="2"><b>Tbilisi</b> in the late afternoon: the low sun lights the cumulus in warm colours, with deeper shading. MSFS's clouds stay white.<br><sub>METAR <code>UGTB 261300Z 16004KT 9999 SCT025 BKN039 15/11 Q1022 NOSIG</code></sub></td>
+  </tr>
+  <tr>
+    <td><img src="Screenshots/sky-santorini-off.jpg" alt="Mod off: Santorini in the late afternoon"></td>
+    <td><img src="Screenshots/sky-santorini-on.jpg" alt="Mod on: Santorini in the late afternoon"></td>
+  </tr>
+  <tr>
+    <td colspan="2"><b>Santorini</b> in the late afternoon: a warm, hazy sky over the caldera, with a flat band of low cloud, as reported. MSFS covers the sky in white cloud.<br><sub>METAR <code>LGSR 261350Z 24007KT 9999 SCT020 20/12 Q1009</code></sub></td>
+  </tr>
+  <tr>
+    <td><img src="Screenshots/sky-bergen-off.jpg" alt="Mod off: Bergen in the low afternoon sun"></td>
+    <td><img src="Screenshots/sky-bergen-on.jpg" alt="Mod on: Bergen in the low afternoon sun"></td>
+  </tr>
+  <tr>
+    <td colspan="2"><b>Bergen</b> in the low afternoon sun: broken cloud with blue sky between, and the sun bright on the fjord. MSFS shows a dark shower cloud.<br><sub>METAR <code>ENBR 261350Z 24009KT 180V280 9999 VCSH BKN040CB 10/03 Q0998 TEMPO 24010G20KT RMK WIND 1200FT 28020G31KT</code></sub></td>
   </tr>
 </table>
 
-### Cloud lighting: the glory
+### Cloud lighting
+
+With the mod only: MSFS has neither a glory nor its strong silver lining.
+
+<table>
+  <tr>
+    <td width="50%"><img src="Screenshots/glory-london.jpg" alt="The glory around the aircraft's shadow on the cloud tops, from the cabin window"></td>
+    <td width="50%"><img src="Screenshots/cloud-lighting-london.jpg" alt="The cloud tops glowing toward the low sun, from the cockpit"></td>
+  </tr>
+  <tr>
+    <td><b>The glory</b>, climbing out of London above the overcast: coloured rings around the aircraft's shadow on the cloud tops, seen from the cabin window.</td>
+    <td><b>Toward the low sun</b>, over the same deck: the cloud tops glow with forward-scattered light, the sun 12&deg; high.</td>
+  </tr>
+  <tr>
+    <td colspan="2"><sub>METAR <code>EGWU 261450Z 21010KT 6000 -DZ FEW005 OVC008 15/15 Q1006 TEMPO 9999 NSW</code></sub></td>
+  </tr>
+</table>
+
+### Clouds
 
 <table>
   <tr>
@@ -116,83 +165,46 @@ pair was taken a few seconds apart.
     <th width="50%">Mod on</th>
   </tr>
   <tr>
-    <td><img src="Screenshots/glory-stockholm-1-off.jpg" alt="Mod off: Near Stockholm"></td>
-    <td><img src="Screenshots/glory-stockholm-1-on.jpg" alt="Mod on: Near Stockholm"></td>
+    <td><img src="Screenshots/clouds-palanga-off.jpg" alt="Mod off: Palanga"></td>
+    <td><img src="Screenshots/clouds-palanga-on.jpg" alt="Mod on: Palanga"></td>
   </tr>
   <tr>
-    <td colspan="2"><b>Near Stockholm</b>: the glory around the aircraft's shadow, on the deck the METARs report. MSFS shows scattered cumulus here.<br><sub>METAR <code>ESCM 241050Z AUTO 12009KT 9999 SCT010/// BKN015/// BKN076/// 11/09 Q1012</code></sub></td>
+    <td colspan="2"><b>Palanga</b>: the broken layers and the CB the METAR reports, a dark deck with light under its edge. MSFS shows scattered cumulus.<br><sub>METAR <code>EYPA 261320Z 23008KT 170V280 9999 SCT019 BKN023 BKN029CB 12/08 Q1011</code></sub></td>
   </tr>
   <tr>
-    <td><img src="Screenshots/glory-stockholm-2-off.jpg" alt="Mod off: the glory near Stockholm, two and a half minutes later"></td>
-    <td><img src="Screenshots/glory-stockholm-2-on.jpg" alt="Mod on: the glory near Stockholm, two and a half minutes later"></td>
+    <td><img src="Screenshots/clouds-westman-islands-off.jpg" alt="Mod off: Westman Islands"></td>
+    <td><img src="Screenshots/clouds-westman-islands-on.jpg" alt="Mod on: Westman Islands"></td>
   </tr>
   <tr>
-    <td colspan="2">The same flight, two and a half minutes later.<br><sub>METAR <code>ESCM 241050Z AUTO 12009KT 9999 SCT010/// BKN015/// BKN076/// 11/09 Q1012</code></sub></td>
-  </tr>
-</table>
-
-### Cloud lighting and forming
-
-<table>
-  <tr>
-    <th width="50%">Mod off (MSFS 2024)</th>
-    <th width="50%">Mod on</th>
+    <td colspan="2"><b>Westman Islands</b>: a field of altocumulus with blue gaps, as reported at 16,000 ft. MSFS draws heavy grey layers.<br><sub>METAR <code>BIVM 261400Z 36005KT 9999 FEW014 BKN160 03/00 Q0982</code></sub></td>
   </tr>
   <tr>
-    <td><img src="Screenshots/clouds-tenerife-off.jpg" alt="Mod off: Tenerife North"></td>
-    <td><img src="Screenshots/clouds-tenerife-on.jpg" alt="Mod on: Tenerife North"></td>
+    <td><img src="Screenshots/clouds-clermont-ferrand-off.jpg" alt="Mod off: Clermont-Ferrand"></td>
+    <td><img src="Screenshots/clouds-clermont-ferrand-on.jpg" alt="Mod on: Clermont-Ferrand"></td>
   </tr>
   <tr>
-    <td colspan="2"><b>Tenerife North</b>: scattered cloud, as reported, lit bright from inside. MSFS shows a dark overcast.<br><sub>METAR <code>GCXO 241030Z 11007KT 070V160 9999 SCT009 SCT015 20/18 Q1027 NOSIG</code></sub></td>
+    <td colspan="2"><b>Clermont-Ferrand</b>, layered stratocumulus: smooth, flat bases with soft edges. MSFS's clouds are streaky grey.<br><sub>METAR <code>LFLC 261400Z AUTO 15003KT 090V230 9999 SCT029 BKN041 BKN047 16/09 Q1020 NOSIG</code></sub></td>
   </tr>
   <tr>
-    <td><img src="Screenshots/clouds-liverpool-showers-off.jpg" alt="Mod off: Liverpool, showers under three layers"></td>
-    <td><img src="Screenshots/clouds-liverpool-showers-on.jpg" alt="Mod on: Liverpool, showers under three layers"></td>
+    <td><img src="Screenshots/clouds-shannon-off.jpg" alt="Mod off: above Shannon"></td>
+    <td><img src="Screenshots/clouds-shannon-on.jpg" alt="Mod on: above Shannon"></td>
   </tr>
   <tr>
-    <td colspan="2"><b>Liverpool</b>, showers under three layers: the mod builds the decks the METAR reports, with a dark shower cloud ahead. With MSFS's own clouds the view is grey murk.<br><sub>METAR <code>EGGP 241120Z 17013G23KT 9999 7000NW -SHRA BKN016 BKN035 OVC040 09/07 Q0997</code></sub></td>
+    <td colspan="2"><b>Above Shannon</b>, on the stratocumulus deck the METAR reports: smooth, soft tops. MSFS shows a field of lumpy cumulus.<br><sub>METAR <code>EINN 261400Z 17018KT 9999 -RA FEW018 BKN020 BKN035 17/14 Q0990 NOSIG</code></sub></td>
   </tr>
   <tr>
-    <td><img src="Screenshots/clouds-liverpool-runway-off.jpg" alt="Mod off: Liverpool, runway 09 in light showers"></td>
-    <td><img src="Screenshots/clouds-liverpool-runway-on.jpg" alt="Mod on: Liverpool, runway 09 in light showers"></td>
+    <td><img src="Screenshots/clouds-bordeaux-off.jpg" alt="Mod off: Bordeaux"></td>
+    <td><img src="Screenshots/clouds-bordeaux-on.jpg" alt="Mod on: Bordeaux"></td>
   </tr>
   <tr>
-    <td colspan="2"><b>Liverpool</b>, runway 09 in light showers: darker under the shower, brighter towards the sun. MSFS's overcast is an even grey.<br><sub>METAR <code>EGGP 241120Z 17013G23KT 9999 7000NW -SHRA BKN016 BKN035 OVC040 09/07 Q0997</code></sub></td>
+    <td colspan="2"><b>Bordeaux</b>: broken cumulus with blue sky between, as reported. MSFS closes it to a dark overcast.<br><sub>METAR <code>LFBD 261400Z AUTO VRB03KT 9999 BKN028 20/15 Q1019 NOSIG</code></sub></td>
   </tr>
   <tr>
-    <td><img src="Screenshots/clouds-bratislava-off.jpg" alt="Mod off: Bratislava"></td>
-    <td><img src="Screenshots/clouds-bratislava-on.jpg" alt="Mod on: Bratislava"></td>
+    <td><img src="Screenshots/clouds-horta-off.jpg" alt="Mod off: Horta, Azores"></td>
+    <td><img src="Screenshots/clouds-horta-on.jpg" alt="Mod on: Horta, Azores"></td>
   </tr>
   <tr>
-    <td colspan="2"><b>Bratislava</b>: firm, sunlit cumulus with clear air between the layers. MSFS's clouds blur into grey.<br><sub>METAR <code>LZIB 241030Z 07003KT 050V110 9999 FEW008 SCT033 11/08 Q1019 NOSIG</code></sub></td>
-  </tr>
-  <tr>
-    <td><img src="Screenshots/clouds-cologne-off.jpg" alt="Mod off: Cologne, two broken layers"></td>
-    <td><img src="Screenshots/clouds-cologne-on.jpg" alt="Mod on: Cologne, two broken layers"></td>
-  </tr>
-  <tr>
-    <td colspan="2"><b>Cologne</b>, two broken layers: wide, flat-based clouds instead of separate puffs.<br><sub>METAR <code>EDDK 241120Z AUTO 24014KT 9999 BKN034 BKN042 11/04 Q1014 NOSIG</code></sub></td>
-  </tr>
-  <tr>
-    <td><img src="Screenshots/clouds-tbilisi-off.jpg" alt="Mod off: Tbilisi"></td>
-    <td><img src="Screenshots/clouds-tbilisi-on.jpg" alt="Mod on: Tbilisi"></td>
-  </tr>
-  <tr>
-    <td colspan="2"><b>Tbilisi</b>: firmer cumulus with deeper shading, and more blue sky between.<br><sub>METAR <code>UGTB 241100Z 22004KT 160V310 9999 FEW061 19/12 Q1022 NOSIG</code></sub></td>
-  </tr>
-  <tr>
-    <td><img src="Screenshots/clouds-stockholm-cockpit-off.jpg" alt="Mod off: Stockholm Arlanda, from the cockpit"></td>
-    <td><img src="Screenshots/clouds-stockholm-cockpit-on.jpg" alt="Mod on: Stockholm Arlanda, from the cockpit"></td>
-  </tr>
-  <tr>
-    <td colspan="2"><b>Stockholm Arlanda</b>: scattered cloud with blue sky between, as reported. MSFS closes it to an overcast.<br><sub>METAR <code>ESSA 241050Z 11009KT 9999 SCT011 10/08 Q1012 TEMPO BKN012</code></sub></td>
-  </tr>
-  <tr>
-    <td><img src="Screenshots/clouds-cape-town-off.jpg" alt="Mod off: Cape Town"></td>
-    <td><img src="Screenshots/clouds-cape-town-on.jpg" alt="Mod on: Cape Town"></td>
-  </tr>
-  <tr>
-    <td colspan="2"><b>Cape Town</b>: broad, flat-based clouds over Table Bay instead of round puffs.<br><sub>METAR <code>FACT 241000Z 17011KT 140V200 9999 BKN016 20/14 Q1020 NOSIG</code></sub></td>
+    <td colspan="2"><b>Horta</b>, Azores: firm cumulus over the island with blue sky between, and a deeper blue sea.<br><sub>METAR <code>LPHR 261400Z 34011KT 300V040 9999 FEW025 BKN060 19/12 Q1018</code></sub></td>
   </tr>
 </table>
 
