@@ -165,6 +165,7 @@ export const TABS: TabSpec[] = [
       plain("C16", "Solid clouds", 0, 4, 0.25, 2, { format: (d) => (d <= 0 ? "the sim's" : d.toFixed(2)) }),
       percent("C23", "Cloud types", 1),
       percent("C28", "Smooth cloud bases", 1),
+      { kind: "switch", key: "C32", label: "Thunderstorms (experimental)" },
       {
         kind: "slider", key: "C17", label: "Cloud bases: soft to solid", min: 0, max: 1, step: 0.05, more: true,
         toDisplay: (raw) => clamp((1 - (raw > 0 ? raw : 1)) / 0.67, 0, 1),

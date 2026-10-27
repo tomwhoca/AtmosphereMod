@@ -1559,10 +1559,31 @@ def find_cloud_edges(ir: Ir) -> dict:
     return {"ramps": [(x, name) for _, x, name in ramps], "depth": depth}
 
 
+def view_march_step(ir: Ir, x: str) -> tuple:
+    """The view ramp's input x = depth * 8000 / max(floor, step), the floor 160 m
+    (80 m in the variants with the thin 2D layer, which also step finer):
+    returns (that max, the march step in metres). MSFS widens every edge to at
+    least one step so the march can resolve it."""
+    need(x in ir.binops and ir.binops[x][0] == "fdiv", f"{x}: the ramp input is not a division")
+    den = ir.binops[x][2]
+    m = re.match(rf"\s+{re.escape(den)} = call float @dx\.op\.binary\.f32\(i32 35, float (\S+), float (\S+)\)",
+                 ir.lines[ir.defs[den]])
+    need(m and sum(not o.startswith("%") for o in (m[1], m[2])) == 1, f"{den}: not max(floor, step)")
+    floor, step = (m[1], m[2]) if not m[1].startswith("%") else (m[2], m[1])
+    need(float(literal_value(floor)) > 0, f"{den}: floor {floor}")
+    return den, step
+
+
 VOLUME_HEIGHT_SCALE = "0x3F10624DE0000000"  # the weather volume's altitude scale (used to find the sample altitude)
 OPTICAL_REF = 0.01        # 1/m: the cloud extinction left unchanged by the profile exponent (B = 0.1, a cumulus core)
 OPTICAL_ICE_DEFAULT_M = 6000.0
 OPTICAL_ICE_BLEND_M = 3000.0  # the ice blend: from C18 - 3 km (liquid) to C18 (MSFS's profile)
+# At most this optical depth per view-march step (sigma' <= tau / step). Far
+# away the steps are 100-300 m: unlimited, the thicker clouds turned opaque
+# within one step, so each pixel's jittered step decided where the surface
+# was, a noise the temporal reprojection can't hide where a second cloud
+# layer shows behind (notes/cloud-shapes.md 4k). Near, short steps: no effect.
+OPTICAL_STEP_TAU = 2.0
 
 
 def find_view_extinction(ir: Ir) -> dict:
@@ -1610,9 +1631,12 @@ def apply_cloud_optical(ir: Ir) -> str:
     sheets keep their translucent, soft edges instead of turning into opaque
     sheets with cut-out holes. Only the view march: the
     lighting (MSFS's light volume and short sun march) is unchanged, so the
-    visible surface gets more solid without darkening the cloud."""
+    visible surface gets more solid without darkening the cloud. At most
+    OPTICAL_STEP_TAU per march step (sigma' <= tau / step)."""
     v = find_view_extinction(ir)
     prod, sigma, h = v["prod"], v["sigma"], v["height"]
+    _, step = view_march_step(ir, find_cloud_edges(ir)["ramps"][0][0])
+    need(ir.defs[step] < ir.defs[prod], f"{step}: the march step comes after the extinction")
     i = ir.defs[prod]
     lines = [
         f"  %mod.op.r = fmul fast float {sigma}, {f32(1.0 / OPTICAL_REF)}",
@@ -1627,7 +1651,9 @@ def apply_cloud_optical(ir: Ir) -> str:
         f"  %mod.op.iv = fmul fast float {sigma}, %mod.coki",
         "  %mod.op.d = fsub fast float %mod.op.iv, %mod.op.w",
         "  %mod.op.m = call float @dx.op.tertiary.f32(i32 46, float %mod.op.d, float %mod.op.iw, float %mod.op.w)",
-        f"  %mod.op.s = select i1 %mod.cooff, float {sigma}, float %mod.op.m",
+        f"  %mod.op.cap = fdiv fast float {f32(OPTICAL_STEP_TAU)}, {step}",
+        "  %mod.op.mc = call float @dx.op.binary.f32(i32 36, float %mod.op.m, float %mod.op.cap)",
+        f"  %mod.op.s = select i1 %mod.cooff, float {sigma}, float %mod.op.mc",
     ]
     _, a, b = ir.binops[prod]
     new = ir.lines[i].replace(f", {sigma}", ", %mod.op.s", 1) if b == sigma else \
@@ -1635,6 +1661,103 @@ def apply_cloud_optical(ir: Ir) -> str:
     need(new != ir.lines[i], f"{prod}: couldn't substitute the extinction")
     ir.lines[i:i + 1] = lines + [new]
     return f"cloud optical thickness: {prod} = ramp * {sigma}, altitude {h}"
+
+
+# Untiling the erosion noise. MSFS erodes every cloud surface with one 3D noise
+# sampled at (position - Global[51].xyz) / 8000 m (and / 1000 m, / 250 m in some
+# variants), which wraps every 8 km: the same puff shapes come back on an 8 km
+# grid along the world axes (capture 184: repeats at (8.1, 0) and (8.4, 8.3) km).
+# Global[51] itself wraps modulo 8 km as the camera moves, so the offset comes
+# from the Earth-fixed position (the planet rows Global[110..112], unit sphere):
+# per noise axis (x, z), two plane waves sin(2 pi (k . P + phase)) of amplitude
+# a in fixed directions, with wavelengths of 46-73 km (the argument reduced with
+# frac before the sine). Neighbouring tiles then sample the noise ~1 km apart,
+# farther ones unrelated; the local stretch stays below ~0.3. The same metres
+# in every octave and march (shadows match), at each lookup (inside MSFS's
+# near-surface branch). Exactly stock with C0 = 0 (notes/cloud-shapes.md 4l).
+UNTILE_WAVES = (  # (noise axis 0 = x, 2 = z; amplitude m; wavelength m; direction in the planet frame; phase)
+    (0, 1300.0, 58300.0, (0.62, -0.31, 0.72), 0.11),
+    (0, 1300.0, 45700.0, (-0.21, 0.88, 0.43), 0.34),
+    (2, 1300.0, 73100.0, (-0.47, 0.55, 0.69), 0.64),
+    (2, 1300.0, 52900.0, (0.83, 0.19, -0.52), 0.85),
+)
+
+
+def find_noise_lookups(ir: Ir) -> list:
+    """The erosion noise's lookups: 3D samples whose coordinates are each
+    (position_i - Global[51].i) * one constant scale. Grouped by their frame
+    coordinates w (one group per march position), in IR order: [{"w": (w0, w1,
+    w2), "pos": (p0, p1, p2), "global": handle, "coords": [(c0, c1, c2, scale), ...]}]."""
+    groups = {}
+    for i, line in enumerate(ir.lines):
+        m = re.match(rf"\s+({V}) = call %dx\.types\.ResRet\.f32 @dx\.op\.sampleLevel\.f32\(i32 62, %dx\.types\.Handle "
+                     rf"{V}, %dx\.types\.Handle {V}, float ({V}), float ({V}), float ({V}), float undef,", line)
+        if not m:
+            continue
+        cs = [m[2], m[3], m[4]]
+        prods = [ir.binops.get(c) for c in cs]
+        if not all(p and p[0] == "fmul" for p in prods):
+            continue
+        scale = {p[2] if not p[2].startswith("%") else p[1] for p in prods}
+        ws = [p[1] if p[1].startswith("%") else p[2] for p in prods]
+        if len(scale) != 1 or any(s.startswith("%") for s in scale):
+            continue
+        frame, handle = [], None
+        for w, comp in zip(ws, range(3)):
+            b = ir.binops.get(w)
+            if not b or b[0] != "fsub" or b[2] not in ir.extracts:
+                break
+            load, c = ir.extracts[b[2]]
+            if c != comp or load not in ir.loads or ir.loads[load][1] != 51 or ir.cbs.get(ir.loads[load][0], ("", 0))[1] != 4800:
+                break
+            handle = ir.loads[load][0]
+            frame.append(b[1])
+        if len(frame) != 3:
+            continue
+        g = groups.setdefault(tuple(ws), {"w": tuple(ws), "pos": tuple(frame), "global": handle, "coords": [], "at": i})
+        g["coords"].append((cs[0], cs[1], cs[2], next(iter(scale))))
+    return sorted(groups.values(), key=lambda g: g["at"])
+
+
+def apply_cloud_untile(ir: Ir) -> str:
+    """ch_volumetric_clouds_render: the erosion noise's coordinates offset by
+    UNTILE_WAVES (above) in every march, exactly stock while C0 <= 0."""
+    groups = find_noise_lookups(ir)
+    need(groups, "no erosion-noise lookups (position - Global[51]) * scale")
+    edits = []
+    for n, g in enumerate(groups):
+        em = Emitter(f"ut{n}.")
+        rows = [em.load(g["global"], 110 + r) for r in range(3)]
+        p = []
+        for r in range(3):
+            c = [em.ext(rows[r], q) for q in range(4)]
+            p.append(em.mad(g["pos"][2], c[2], em.mad(g["pos"][1], c[1], em.mad(g["pos"][0], c[0], c[3]))))
+        off = {0: None, 2: None}
+        for axis, amp, wave, direc, phase in UNTILE_WAVES:
+            norm = math.sqrt(sum(x * x for x in direc))
+            k = [x / norm * EARTH_RADIUS_M / wave for x in direc]  # cycles per unit of the planet frame
+            cyc = em.mad(p[2], k[2], em.mad(p[1], k[1], em.mad(p[0], k[0], phase)))
+            s = em.unary(13, em.mul(em.unary(22, cyc), 2.0 * math.pi))
+            off[axis] = em.mul(s, amp) if off[axis] is None else em.mad(s, amp, off[axis])
+        on = em.cmp("ogt", "%mod.cmix", 0.0)
+        wu = {}
+        for axis in (0, 2):
+            wu[axis] = em.select(on, em.add(g["w"][axis], off[axis]), g["w"][axis])
+        last = max(ir.defs[w] for w in g["w"])
+        edits.append((last, [ir.lines[last], *em.lines]))
+        for c0, c1, c2, scale in g["coords"]:
+            for axis, c in ((0, c0), (2, c2)):
+                j = ir.defs[c]
+                need(j > last, f"{c}: the noise coordinate comes before its frame")
+                lhs, rhs = ir.lines[j].split(" = ", 1)
+                new = re.sub(rf"{re.escape(g['w'][axis])}(?![\w.])", wu[axis], rhs, count=1)
+                need(new != rhs, f"{c}: couldn't offset its noise coordinate")
+                edits.append((j, [f"{lhs} = {new}"]))
+    for j, new_lines in sorted(edits, key=lambda e: -e[0]):
+        ir.lines[j:j + 1] = new_lines
+    return (f"untiled erosion noise: {len(groups)} march(es), "
+            f"{sum(len(g['coords']) for g in groups)} lookups (scales "
+            f"{', '.join(sorted({c[3] for g in groups for c in g['coords']}))})")
 
 
 DETAIL_AMP = "0x3FA99999A0000000"      # the 1 km detail octave's amplitude (used to find it)
@@ -1791,7 +1914,10 @@ def apply_cloud_shape(ir: Ir) -> str:
 
     Edges: MSFS ramps density across every boundary. C8 steepens the ramp
     about its midpoint (the boundary stays put):
-    sat((ramp - 0.5) * (1 + C8) + 0.5), in every march so shadows match.
+    sat((ramp - 0.5) * (1 + C8) + 0.5), in every march so shadows match. In
+    the view march the slope is at most max(160 m, step) / step: MSFS widens
+    an edge to at least one step, and an edge thinner than a step is only
+    hit or missed by each pixel's jittered step (stripes and dither far away).
 
     Glory (C9-C11): coloured rings around the antisolar point from droplets
     of radius r (C10, 10 um if 0). Per channel, 0.1 C9 * J0(z)^2 averaged over
@@ -1879,10 +2005,17 @@ def apply_cloud_shape(ir: Ir) -> str:
     for k, (x, ramp) in enumerate(edges["ramps"]):
         j = ir.defs[ramp]
         p = f"%mod.es{k}."
+        if k == 0:  # the view march: no steeper than its step resolves
+            den, step = view_march_step(ir, x)
+            slope = [f"  {p}q = fdiv fast float {den}, {step}",
+                     f"  {p}kq = call float @dx.op.binary.f32(i32 36, float %mod.cek, float {p}q)"]
+        else:
+            slope = [f"  {p}kq = fadd fast float %mod.cek, 0.000000e+00"]
         edits.append((j, [
             ir.lines[j].replace(f"{ramp} = ", f"{p}r = ", 1),
             f"  {p}c = fsub fast float {p}r, 5.000000e-01",
-            f"  {p}k = call float @dx.op.tertiary.f32(i32 46, float {p}c, float %mod.cek, float 5.000000e-01)",
+            *slope,
+            f"  {p}k = call float @dx.op.tertiary.f32(i32 46, float {p}c, float {p}kq, float 5.000000e-01)",
             f"  {p}s = call float @dx.op.unary.f32(i32 7, float {p}k)",
             f"  {ramp} = select i1 %mod.ceoff, float {p}r, float {p}s",
         ]))
@@ -1900,6 +2033,10 @@ def apply_cloud_shape(ir: Ir) -> str:
 # 132, 134: optical depth 9.3 -> 1.9 and 1.9 -> 0.14; real decks 5-20).
 TYPES_BASE_MIX = (0.0, 0.0, 0.5, 1.0)
 TYPES_CU_EDGE_MIN = 1.0
+# ... and how much of MSFS's erosion puffs (its 8 km and 1 km noise octaves, in the view march)
+# each keeps: altostratus and stratus are featureless sheets, stratocumulus has rolls,
+# altocumulus its puffs; cumulus keeps all (so do towers; anvils are altostratus)
+TYPES_PUFF = (0.6, 0.15, 1.0, 0.1)
 
 
 def find_volume_sample(ir: Ir, h: str, before: int) -> tuple:
@@ -1925,6 +2062,40 @@ def find_volume_sample(ir: Ir, h: str, before: int) -> tuple:
     return max(found)
 
 
+CIRRUS_MAP_SCALE = "0x3ECBF64760000000"  # MSFS's cirrus cover map: 1 / 300 km (world metres)
+
+
+def find_cirrus(ir: Ir, at: int) -> tuple | None:
+    """The view march's cirrus band (MSFS's thin ice layer), after line `at`:
+    (its altitude, User[9].x as extracted; its cover, the saturated .x of the
+    first 2D lookup after the band test at CIRRUS_MAP_SCALE), or None in
+    variants without a band. Found by data flow: the texture registers differ
+    between variants."""
+    user = {h for h, (_, size) in ir.cbs.items() if size == 10528}
+    r9 = next((ir.def_name(n) for n in range(at + 1, len(ir.lines))
+               if re.match(rf"\s+{V} = call %dx\.types\.CBufRet\.f32 @dx\.op\.cbufferLoadLegacy\.f32\(i32 59, "
+                           rf"%dx\.types\.Handle ({V}), i32 9\)", ir.lines[n])
+               and re.search(r"%dx\.types\.Handle (\S+), i32 9\)", ir.lines[n])[1] in user), None)
+    alt0 = [n for n, (load, comp) in ir.extracts.items() if load == r9 and comp == 0] if r9 else []
+    band = [n for n, (kind, a, b) in ir.binops.items() if kind == "fadd" and alt0 and alt0[0] in (a, b)
+            and {"-5.000000e+02", "3.500000e+02"} & {a, b}]
+    if len(alt0) != 1 or len(band) != 2:
+        return None  # (no cirrus band in this variant)
+    start = max(ir.defs[b] for b in band)
+    sample = None
+    for n in range(start, len(ir.lines)):
+        m = re.match(rf"\s+({V}) = call %dx\.types\.ResRet\.f32 @dx\.op\.sampleLevel\.f32\(i32 62, %dx\.types\.Handle "
+                     rf"{V}, %dx\.types\.Handle {V}, float ({V}), float ({V}), float undef,", ir.lines[n])
+        if m and m[2] in ir.binops and ir.binops[m[2]][0] == "fmul" and CIRRUS_MAP_SCALE in ir.binops[m[2]][1:]:
+            sample = m[1]
+            break
+    need(sample, "a cirrus band but no cover lookup at 1 / 300 km")
+    x = [n for n, (res, comp) in ir.resret.items() if res == sample and comp == 0]
+    sat = [n for n, (op, arg) in ir.unary.items() if op == OP_SATURATE and x and arg == x[0]]
+    need(len(sat) == 1, "no saturated cirrus cover")
+    return alt0[0], sat[0]
+
+
 def apply_cloud_types(ir: Ir) -> str:
     """ch_volumetric_clouds_render: the cloud types (C23-C27), in the view
     march; exactly as without them while C23 <= 0, without DebugCapture bit 7
@@ -1940,9 +2111,18 @@ def apply_cloud_types(ir: Ir) -> str:
     never thinner than MSFS's own extinction (or the untyped value, if lower);
       - edges: the view ramp's C0 * C8 becomes
         C0 C8 (1 - S) + S w_cu max(C0 C8, C0 TYPES_CU_EDGE_MIN): soft (MSFS's)
-        for the stratiform types, crisp for cumulus.
-    Runs after apply_cloud_optical and apply_cloud_shape, whose view-march
-    lines it rewrites."""
+        for the stratiform types, crisp for cumulus;
+      - puffs: the view march's 8 km and 1 km erosion octaves are scaled by
+        1 - S + S (w_cu + sum w_x p_x) (TYPES_PUFF): smooth stratiform sheets
+        (and anvils, which the generator types altostratus), billowing cumulus;
+      - cirrus: the storm cells' anvils (ANVIL_REGION, cover-weighted level):
+        where they cover more than CI_MIN_COV, MSFS's cirrus band (User[9].x)
+        is centred on their level and its cover is at least theirs;
+      - sky light: on the storm towers' sides (TOWER_REGION), the light
+        volume's ambient visibilities above and below are at least
+        CB_SIDE_AMBIENT (find_light_volume_sums).
+    Runs after apply_cloud_optical, apply_cloud_detail and apply_cloud_shape,
+    whose view-march lines it rewrites."""
     j = next((i for i, l in enumerate(ir.lines) if l.startswith("  %mod.op.ih0 = fsub fast float ")), None)
     need(j is not None, "no optical-thickness patch")
     h = re.match(r"  %mod\.op\.ih0 = fsub fast float (\S+), %mod\.coh$", ir.lines[j])[1]
@@ -2013,16 +2193,27 @@ def apply_cloud_types(ir: Ir) -> str:
     bx, by = em.sub(1.0, ax), em.sub(1.0, ay)
     bil = [em.mul(bx, by), em.mul(ax, by), em.mul(bx, ay), em.mul(ax, ay)]
     thick, base, total = 1.0, None, None
+    vals = []
     for c in range(4):
         raw = [em.new(f"uitofp i32 {em.new(f'and i32 {x}, {255 << 8 * c}') if c < 3 else em.new(f'lshr i32 {x}, 24')}"
                       " to float") for x in words]
         val = em.mul(bil[0], raw[0])
         for q in (1, 2, 3):
             val = em.mad(bil[q], raw[q], val)
+        vals.append(val)
         thick = em.mad(f"%mod.ty.k{c}na", val, thick)
         base = em.mul(f"%mod.ty.k{c}b", val) if base is None else em.mad(f"%mod.ty.k{c}b", val, base)
         total = em.mad(val, -scale[c], 1.0 if total is None else total)
     cu = em.max(total, 0.0)
+    # the puffs (MSFS's 8 km and 1 km erosion octaves) by type: 1 - S + S (cu + sum w_x p_x)
+    puff = cu
+    for c in range(4):
+        puff = em.mad(vals[c], scale[c] * TYPES_PUFF[c], puff)
+    less = em.sub(puff, 1.0)
+    em.lines += [
+        f"  %mod.ty.pf0 = call float @dx.op.tertiary.f32(i32 46, float %mod.ty.S, float {less}, float 1.000000e+00)",
+        "  %mod.ty.pf = select i1 %mod.ty.on, float %mod.ty.pf0, float 1.000000e+00",
+    ]
     em.lines += [
         f"  %mod.ty.T = fadd fast float {thick}, 0.000000e+00",
         f"  %mod.ty.m = fadd fast float {base}, 0.000000e+00",
@@ -2031,7 +2222,54 @@ def apply_cloud_types(ir: Ir) -> str:
         "  %mod.ty.cek = fadd fast float %mod.ty.ce, 1.000000e+00",
         "  %mod.ty.ceoff = fcmp fast ole float %mod.ty.ce, 0.000000e+00",
     ]
+    # ---- the storm cells' anvils (ANVIL_REGION): cover bilinearly, level weighted by cover
+    acell = em.new(f"add i32 {em.new(f'mul i32 {yi}, {TYPES_N}')}, {xi}")
+    aaddr = em.new(f"add i32 {em.new(f'shl i32 {acell}, 3')}, {ANVIL_REGION}")
+    corners = []
+    for dy in (0, 8 * TYPES_N):
+        addr = em.new(f"select i1 %mod.ty.on, i32 {em.new(f'add i32 {aaddr}, {dy}')}, i32 0")
+        ld = em.new(f"call {rr} @dx.op.rawBufferLoad.f32(i32 139, {t} %mod.ty.u, i32 {addr}, i32 undef, i8 15, i32 4)")
+        q = [em.new(f"extractvalue {rr} {ld}, {c}") for c in range(4)]
+        corners += [(q[0], q[1]), (q[2], q[3])]  # (x, y), (x + 1, y)
+    cov, wsum = None, None
+    for b, (lev, c) in zip(bil, corners):
+        wc = em.mul(b, c)
+        cov = wc if cov is None else em.add(cov, wc)
+        wsum = em.mul(wc, lev) if wsum is None else em.mad(wc, lev, wsum)
+    floor = em.max(cov, 1e-6)
+    em.lines += [
+        f"  %mod.ci.cov = select i1 %mod.ty.on, float {cov}, float 0.000000e+00",
+        f"  %mod.ci.alt = fdiv fast float {wsum}, {floor}",
+        f"  %mod.ci.on = fcmp fast ogt float %mod.ci.cov, {f32(CI_MIN_COV)}",
+    ]
+    # ---- the storm towers' marks (TOWER_REGION): the mark bilinearly, the base weighted by it; the
+    # floor of the light volume's above and below visibilities (sums of its n taps):
+    # n CB_SIDE_AMBIENT mark sat((h - base) / CB_SIDE_RAMP_M)
+    sums = find_light_volume_sums(ir)
+    if sums:
+        taddr = em.new(f"add i32 {em.new(f'shl i32 {acell}, 3')}, {TOWER_REGION}")
+        corners = []
+        for dy in (0, 8 * TYPES_N):
+            addr = em.new(f"select i1 %mod.ty.on, i32 {em.new(f'add i32 {taddr}, {dy}')}, i32 0")
+            ld = em.new(f"call {rr} @dx.op.rawBufferLoad.f32(i32 139, {t} %mod.ty.u, i32 {addr}, i32 undef, i8 15, "
+                        "i32 4)")
+            q = [em.new(f"extractvalue {rr} {ld}, {c}") for c in range(4)]
+            corners += [(q[0], q[1]), (q[2], q[3])]
+        mark, bsum = None, None
+        for b, (mk, mb) in zip(bil, corners):
+            wm = em.mul(b, mk)
+            mark = wm if mark is None else em.add(mark, wm)
+            bsum = em.mul(wm, mb) if bsum is None else em.mad(wm, mb, bsum)
+        ramp = em.sat(em.mul(em.sub(h, em.div(bsum, em.max(mark, 1e-6))), 1.0 / CB_SIDE_RAMP_M))
+        em.lines += [f"  %mod.sa.lf = select i1 %mod.ty.on, float {em.mul(em.mul(mark, ramp), sums[2] * CB_SIDE_AMBIENT)}, "
+                     "float 0.000000e+00"]
     edits = [(at, [ir.lines[at], *em.lines])]
+    for c, top in enumerate(sums[:2] if sums else ()):
+        n = ir.defs[top]
+        edits.append((n, [ir.lines[n], f"  %mod.sa.v{c} = call float @dx.op.binary.f32(i32 35, float {top}, "
+                                       "float %mod.sa.lf)"]))
+        for i in ir.users(top):
+            edits.append((i, [re.sub(rf"{re.escape(top)}\b", f"%mod.sa.v{c}", ir.lines[i])]))
     # ---- the optical thickness: thinner and with a softer base by type
     i = next(i for i, l in enumerate(ir.lines) if l == "  %mod.op.w = fmul fast float %mod.op.p, %mod.cok")
     edits.append((i, [
@@ -2046,18 +2284,98 @@ def apply_cloud_types(ir: Ir) -> str:
         "  %mod.op.w = select i1 %mod.ty.on, float %mod.op.tm, float %mod.op.w0",
     ]))
     # ---- the view ramp's sharpening by type
-    for prefix, old, new in (("  %mod.es0.k = ", "%mod.cek", "%mod.ty.cek"),
+    for prefix, old, new in (("  %mod.es0.kq = ", "%mod.cek", "%mod.ty.cek"),
                              (None, "select i1 %mod.ceoff, float %mod.es0.r,",
                               "select i1 %mod.ty.ceoff, float %mod.es0.r,")):
         q = [n for n, l in enumerate(ir.lines) if (l.startswith(prefix) if prefix else old in l)]
         need(len(q) == 1 and old in ir.lines[q[0]], f"the view ramp's sharpening: {len(q)} lines for {old}")
         edits.append((q[0], [ir.lines[q[0]].replace(old, new)]))
+    # ---- the puffs: the view march's 8 km erosion octave (0.25 (n - 0.75), the first after the
+    # lookup) and its 1 km octave (apply_cloud_detail's site 0), times the puff factor
+    eight = None
+    for n in range(at + 1, len(ir.lines)):
+        m = re.match(r"  (%\d+) = fmul fast float (%\d+), 2\.500000e-01$", ir.lines[n])
+        if m and m[2] in ir.binops and ir.binops[m[2]][0] == "fadd" and "-7.500000e-01" in ir.binops[m[2]][1:]:
+            eight = (n, m[1], m[2])
+            break
+    need(eight is not None, "no 8 km erosion octave after the view march's volume lookup")
+    n, name, arg = eight
+    edits.append((n, [f"  %mod.ty.e8 = fmul fast float {arg}, 2.500000e-01",
+                      f"  {name} = fmul fast float %mod.ty.e8, %mod.ty.pf"]))
+    one = [n for n, l in enumerate(ir.lines) if re.match(r"  %\d+ = select i1 %mod\.cbsoff, float %mod\.bd0\.xs, ", l)]
+    need(len(one) <= 1, f"{len(one)} view-march 1 km octaves")
+    if one:
+        name = ir.def_name(one[0])
+        need(one[0] > eight[0], "the 1 km octave comes before the 8 km one")
+        edits.append((one[0], [ir.lines[one[0]].replace(f"{name} = ", "%mod.ty.e1 = ", 1),
+                               f"  {name} = fmul fast float %mod.ty.e1, %mod.ty.pf"]))
+    # ---- the view march's cirrus band (MSFS's thin ice layer at User[9].x, +350 / -500 m, its
+    # cover sat(t8.x) at the sample): over the storm cells' anvils, centred on their level and
+    # covered as much as they are
+    cirrus = find_cirrus(ir, at)
+    if cirrus:
+        for name, old, new in ((cirrus[0], "%mod.ci.a0", "select i1 %mod.ci.on, float %mod.ci.alt, float %mod.ci.a0"),
+                               (cirrus[1], "%mod.ci.c0", "call float @dx.op.binary.f32(i32 35, float %mod.ci.c0, "
+                                                         "float %mod.ci.cov)")):
+            n = ir.defs[name]
+            edits.append((n, [ir.lines[n].replace(f"{name} = ", f"{old} = ", 1), f"  {name} = {new}"]))
     need(all(n > at for n, _ in edits[1:]), "the view-march lines come before the volume lookup")
+    need(len({n for n, _ in edits}) == len(edits), "two edits of one line")
     for n, new_lines in sorted(edits, key=lambda e: -e[0]):
         ir.lines[n:n + 1] = new_lines
     define = next(n for n, l in enumerate(ir.lines) if l.startswith("define void @"))
     ir.lines[define + 1:define + 1] = entry
-    return f"cloud types: grid at {TYPES_REGION:#x}, read at the volume lookup ({u}, {v}, {w})"
+    return (f"cloud types: grid at {TYPES_REGION:#x}, read at the volume lookup ({u}, {v}, {w}); "
+            + (f"anvils' cirrus at {cirrus[0]}, {cirrus[1]}" if cirrus else "no cirrus band")
+            + (f"; towers' sky light on {sums[0]}, {sums[1]}" if sums else "; no light volume"))
+
+
+def find_light_volume_sums(ir: Ir) -> tuple[str, str, int] | None:
+    """The view march's light-volume lookup (ch_cloudLightMap's volume: 8 taps
+    summed per channel, or one in 20 cheaper variants): the sums of its .y
+    (the ambient's visibility above) and .z (below) and the number of taps,
+    found from the sun visibility's d = (1 - V) / V with V the .x (0.125
+    times the sum of the same taps'). None if there is none."""
+    ext_re = re.compile(r"\s+(%\d+) = extractvalue %dx\.types\.ResRet\.f32 (%\d+), (\d)$")
+    ext = {}
+    for line in ir.lines:
+        if m := ext_re.match(line):
+            ext[m[1]] = (m[2], int(m[3]))
+
+    def leaves(v, out):
+        if v in ext:
+            out.append(ext[v])
+        elif v in ir.binops and ir.binops[v][0] == "fadd":
+            for op in ir.binops[v][1:]:
+                if not leaves(op, out):
+                    return False
+        else:
+            return False
+        return True
+    found = []
+    for name, (kind, a, b) in ir.binops.items():
+        if kind != "fdiv" or ir.binops.get(a) != ("fsub", "1.000000e+00", b):
+            continue
+        if ext.get(b, (None, -1))[1] == 0:  # (one tap)
+            tops = [[v for v, rc in ext.items() if rc == (ext[b][0], c)] for c in (1, 2)]
+            need(all(len(t) == 1 for t in tops), f"{name}: the light volume's .y and .z: {tops}")
+            found.append((tops[0][0], tops[1][0], 1))
+            continue
+        if b not in ir.binops or ir.binops[b][0] != "fmul" or "1.250000e-01" not in ir.binops[b][1:]:
+            continue
+        taps = []
+        if not leaves([op for op in ir.binops[b][1:] if op != "1.250000e-01"][0], taps) or len(taps) != 8 or \
+                any(c != 0 for _, c in taps):
+            continue
+        res = sorted(r for r, _ in taps)
+        tops = []
+        for c in (1, 2):
+            tops += [v for v, (k, *_) in ir.binops.items() if k == "fadd" and (got := []) is not None
+                     and leaves(v, got) and sorted(got) == sorted((r, c) for r in res)]
+        need(len(tops) == 2, f"{name}: {len(tops)} sums of the light volume's .y and .z")
+        found.append((*tops, 8))
+    need(len(found) <= 1, f"{len(found)} light-volume lookups")
+    return found[0] if found else None
 
 
 def find_ap_depth(ir: Ir) -> str:
@@ -2413,6 +2731,9 @@ def patch_clouds(text: str) -> tuple[str, str]:
     ir.reindex()
     optical = apply_cloud_optical(ir)  # (before apply_cloud_shape renames the edge ramps)
     ir.reindex()
+    untile = apply_cloud_untile(ir)  # (its offset coordinates keep their names; the finer octave inherits them)
+    ir.reindex()
+    optical += "; " + untile
     detail = apply_cloud_detail(ir)
     ir.reindex()
     shape = apply_cloud_shape(ir)
@@ -3309,6 +3630,7 @@ CG_LAYOUTS = {
 }
 CG_MAP2D_FLAG = 4
 DEBUG_BUFFER_16MB = 64  # DebugCapture bit 6
+DEBUG_STORMS_OFF = 256  # DebugCapture bit 8: no thunderstorm cells (tunables.ini C32 <= 0)
 # The renderer's own User cbuffer (ch_volumetric_clouds_render): 64 registers
 # at CLOUD_USER_REGION + 16, stamp at + 0, on capture with bit 4.
 CLOUD_USER_REGION = 0x3E2000
@@ -3358,6 +3680,18 @@ TYPES_DEEP = (2500.0, 3500.0)
 TYPES_ICE_BLEND_M = 1500.0
 assert TYPES_REGION >= CLOUD_GEN_REGION + CG_END
 assert TYPES_REGION + 16 + 4 * TYPES_N * TYPES_N * TYPES_SLICES <= 20 << 20
+# ... followed by the storm cells' anvils on the same grid, for the renderer's cirrus: per cell
+# float2 (the anvil level (m), its cover 0..1), from the same thread (apply_cb_towers). Where the
+# cover exceeds CI_MIN_COV the renderer centres MSFS's cirrus band on that level and raises the
+# cirrus cover to it, so the anvil's top and frayed edge are MSFS's own ice cloud: its streak
+# textures, relief and wind drift.
+ANVIL_REGION = TYPES_REGION + 16 + 4 * TYPES_N * TYPES_N * TYPES_SLICES
+CI_MIN_COV = 0.01
+assert ANVIL_REGION % 16 == 0 and ANVIL_REGION + 8 * TYPES_N * TYPES_N <= 20 << 20
+# ... and the storm towers' marks for the renderer's sky light: per cell float2 (the mark 0..1, the
+# column's storm base (m)), same thread (apply_cb_towers; CB_SIDE_AMBIENT).
+TOWER_REGION = ANVIL_REGION + 8 * TYPES_N * TYPES_N
+assert TOWER_REGION + 8 * TYPES_N * TYPES_N <= 20 << 20
 
 RES_CLASS = {"t": 0, "u": 1, "cb": 2, "s": 3}
 
@@ -3662,6 +3996,754 @@ def apply_speck_suppression(ir: Ir, values: dict) -> str:
     return f"specks: {len(sites)} shape terms lowered below C {SPECK_C[1]} (with C16)"
 
 
+# Cumulonimbus towers (live-weather family, while the optical thickness is on).
+# MSFS's live weather has no convective towers: its cloud stops at ~9.4-11.8 km
+# and its heaviest rain (50-100 mm/h) sits under the same flat top as the drier
+# cloud around it (capture 181, notes/cloud-shapes.md 4j). Its rain map is
+# coarse (3.9 km texels, plateaus tens of km wide), so the towers get their own
+# footprint: a jittered grid fixed to latitude and longitude, one candidate per
+# CB_CELL_KM cell, present with a chance and a strength set by the rain at its
+# centre (CB_RAIN, mm/h). Each is a mature cell (2026-10-27; until then a
+# plain domed column): an updraft tower from CB_BASE_AGL_M above the terrain
+# (with a wall cloud) to a share of the tropopause (by latitude), leaning
+# downwind with height, an overshooting dome over it, a flanking line of lower
+# turrets and an anvil at the equilibrium level streaming downwind. A signed
+# distance in x (metres / 8000, the renderer's edge scale, so its erosion noise
+# roughens the surface) and a cumulus-core density in y (the anvil's thinner),
+# max() with MSFS's. z and w (rain) stay MSFS's. A column sees the 3 x 3 cells
+# around it: a cell reaches at most CB_REACH_M from its centre, and a centre
+# lies at least CB_JITTER[0] of a cell inside its own.
+CB_CELL_KM = 28.0
+CB_RAIN = (8.0, 35.0)
+CB_CHANCE = 0.75
+CB_RADIUS_M = (2500.0, 7000.0)
+CB_BASE_AGL_M = 1000.0
+# Evidence: cells only where something shows a storm (the user: no supercells everywhere).
+# - The METAR stations' (the add-on's table, the row the anchoring doesn't read: cloud_anchor.h
+#   kStormRow): thunder 1, VCTS 0.8, CB 0.7, TCU 0.35, times the station's weight; full within
+#   CB_EVIDENCE_KM[0] of the cell's centre, gone by [1]. Read whenever the table is there (bit 6),
+#   with or without the anchoring (C20).
+# - Very heavy rain, which stratiform cloud doesn't give: S(rate, CB_RAIN_EVIDENCE) times
+#   CB_RAIN_EVIDENCE_MAX.
+# A cell exists where its chance hash is below CB_CHANCE E, fading in over CB_EXIST_SOFT of it,
+# so it grows in as the evidence builds and decays out as it goes. A station's report also gives
+# at least CB_EVIDENCE_W of its evidence as strength, where MSFS's rain is weaker than the METAR.
+CB_EVIDENCE_KM = (30.0, 60.0)
+CB_RAIN_EVIDENCE = (40.0, 80.0)
+CB_RAIN_EVIDENCE_MAX = 0.6
+CB_EVIDENCE_W = 0.4
+CB_EXIST_SOFT = 0.15
+# Life cycle in time (Global[0].y, seconds since the sim started): each grid cell has one storm
+# after another. Generation n of a cell starts every CB_PERIOD_S (at the cell's own offset), lives
+# CB_LIFE_S (random), and gets its own position, size and shape (the hash takes n). It rises from
+# its base over the first CB_BIRTH of its life and is gone by its end, thinning from CB_DEATH.
+CB_PERIOD_S = 6000.0
+CB_LIFE_S = (2700.0, 4800.0)
+CB_BIRTH = 0.05
+CB_DEATH = 0.9
+CB_ANVIL_GROW = 0.15           # the anvil grows in over this share of the life after CB_ANVIL_STAGE
+CB_HASH_GEN = 1103515245       # (the generation into the cell's hash)
+CB_SALT_TIME = 696921401       # (the cell's own time offset, the same for all its generations)
+# Sizes: most cells small, the biggest the rarest: the size hash raised to CB_SIZE_POW. Without a
+# station's report the vigour (anvil level, overshoot) is CB_VIGOUR_RAIN of what it would be:
+# the biggest, highest cells need a report.
+CB_SIZE_POW = 3.0             # (applied as a cube)
+CB_VIGOUR_RAIN = 0.5
+# A thunder report (TS 1, VCTS 0.8: station evidence above CB 0.7) lifts the vigour to at least
+# CB_THUNDER_VIGOUR (S(evidence, CB_THUNDER)): thunder means a tower well above the freezing level,
+# whatever MSFS's rain shows (light rain under tropical CB left their anvils at 60-70 % of 16 km).
+CB_THUNDER = (0.72, 0.8)
+CB_THUNDER_VIGOUR = 0.7
+# Types (the user: thunderstorms come in many shapes): each cell is one of CB_TYPES, its shape
+# parameters scaling the common ones (CB_TYPE_PARAMS, per type):
+# - single: upright cauliflower tower (bulges x1.4), small anvil, little overshoot;
+# - sheared: leaning hard (x1.6), the anvil a long plume downwind (stretch x2) and nothing upwind;
+# - multicell: big flanking turrets reaching higher, a wider anvil;
+# - supercell: wide (x1.35), smooth (bulges x0.3) and banded (CB_BAND: plates every 1.8 km in the
+#   middle of the tower), a deep wall cloud, a big overshoot, a thick anvil spreading upwind too;
+# - embedded: rising out of a thick low shelf that wraps its middle, small anvil.
+# Picked by hash 12 with weights (CB_TYPE_W): single 0.3 + 1.2 (1 - s), sheared 0.1 + 1.2 s,
+# multicell 0.2 + 0.8 S(evidence, CB_TYPE_HEAVY), supercell 3 x thunder x S(s, CB_TYPE_SHEAR) x
+# S(size, CB_TYPE_BIG) (rare: all three), embedded 0.25. The pick's edges are soft (CB_TYPE_SOFT,
+# in weight): as the wind or the evidence shifts the weights, a cell changes type smoothly.
+# (The flanking turrets keep the cell's radius, not the type's: the supercell's are no wider.)
+CB_TYPES = ("single", "sheared", "multicell", "supercell", "embedded")
+CB_TYPE_PARAMS = {
+    "tilt": (0.4, 1.6, 1.0, 0.8, 0.6),
+    "radius": (1.0, 0.9, 1.0, 1.35, 0.8),
+    "bulge": (1.4, 1.0, 1.1, 0.3, 0.8),
+    "bands": (0.0, 0.0, 0.0, 1.0, 0.0),
+    "wall": (0.5, 0.8, 0.8, 1.8, 0.0),
+    "overshoot": (0.4, 0.8, 0.8, 1.6, 0.5),
+    "flank": (0.6, 0.8, 1.5, 0.9, 0.5),      # the turrets' distance and (half of it) radius
+    "flank_top": (0.8, 0.9, 1.2, 1.0, 0.7),
+    "anvil": (0.55, 0.9, 1.15, 1.4, 0.6),    # its half-width
+    "down": (0.5, 2.0, 1.0, 0.8, 0.8),       # x CB_ANVIL_DOWN: the downwind stretch
+    "back": (0.5, 2.2, 1.0, -0.5, 1.0),      # x CB_ANVIL_BACK: the upwind shrink (< 0: spreading upwind)
+    "thick": (0.6, 0.6, 1.0, 1.3, 0.7),
+    "shelf": (0.4, 0.5, 1.0, 0.7, 2.5),      # the mid-level shelf's thickness
+    "shelf_base": (0.4, 0.4, 0.4, 0.4, 0.2),  # its centre's share of the height to the anvil level
+}
+assert all(len(v) == len(CB_TYPES) for v in CB_TYPE_PARAMS.values())
+CB_TYPE_W = {"single": (0.3, 1.2), "sheared": (0.1, 1.2), "multicell": (0.2, 0.8), "supercell": 3.0,
+             "embedded": 0.25}
+CB_TYPE_HEAVY = (0.5, 0.9)
+CB_TYPE_SHEAR = (0.5, 0.9)
+CB_TYPE_BIG = (0.3, 0.7)
+CB_TYPE_SOFT = 0.05
+# The supercell's bands: the radius times 1 + A 4 f (1 - f) cos(2 pi h / lambda) (f the share of
+# the height to the anvil level), plates in the middle of the tower; lambda >= 4 slices' spacing
+# up there, so the slices resolve them.
+CB_BAND = (0.18, 2400.0)
+assert all(0.7 * d >= -0.4 * b for d, b in zip(CB_TYPE_PARAMS["down"], CB_TYPE_PARAMS["back"]))  # (see CB_BUDGET_M)
+# The towers' sky light. MSFS's light volume darkens the ambient light by the cloud above each
+# point, over footprints 1-10 km wide (ch_cloudLightMap: its LOD 0-3 mips up to 17 slices up),
+# fine for cumulus and decks, but a storm tower's own top and anvil then darken its sides at any
+# sun angle, where real ones see the sky beside them. So the generator marks the towers
+# (TOWER_REGION: per cell max over the cells of 1 within CB_SIDE_REACH times the radius of the
+# axis, fading to 0 over CB_SIDE_FADE_M beyond; and the base) and the renderer keeps the
+# ambient's above and below visibilities at least CB_SIDE_AMBIENT there (MSFS's free value is
+# e^0.6 = 1.82), rising over CB_SIDE_RAMP_M above the base (the base itself stays dark).
+CB_SIDE_REACH = 1.3
+CB_SIDE_FADE_M = 2500.0
+CB_SIDE_AMBIENT = 1.0
+CB_SIDE_RAMP_M = 2500.0
+# The anvil level (the equilibrium level) as a share of the tropopause, by the cell's vigour v:
+# wide, rain-heavy updrafts entrain less and rise higher (and overshoot more) than small ones,
+# v = w (CB_VIGOUR[0] + CB_VIGOUR[1] h) with h the size hash (the radius's), plus +-CB_TOP_JITTER.
+CB_TOP_SHARE = (0.6, 1.0)
+CB_VIGOUR = (0.5, 0.5)
+CB_TOP_JITTER = 0.04
+CB_OVERSHOOT_M = 1500.0
+CB_DOME_M = 2500.0             # the dome: the top falls by up to this at the tower's edge
+CB_TOP_MAX_M = 15000.0         # (slice 30's top; slice 31 is always empty)
+CB_DENSITY_B = 0.045           # B in the tower (MSFS's low cumulus cores: 0.05-0.13)
+CB_JITTER = (0.15, 0.7)        # centre at (0.15 + 0.7 h) of its cell, h in [0, 1)
+CB_EDGE_M = 8000.0             # x = sat(0.5 + 0.5 d / 8000): the renderer's s * 8000 is metres
+# The wind: PostProcess[5].xy, world X/Z (m/s); +P[5] is downwind, as in Asobo's storm-cell variant
+# (core 2.5 km downwind, leaning 6 km further with height). The lean and the anvil's stretch grow
+# with the wind, full from CB_WIND_FULL; with no wind the cell is upright and round.
+CB_WIND_FULL = 10.0
+CB_TILT_M = 5000.0             # the updraft tower leans this far downwind at the anvil level
+CB_WIDEN = 0.15                # and widens by this share up to it (Asobo's: 4 to 6.5 km)
+CB_WALL_M = 400.0              # the wall cloud: the base drops by this under the updraft
+# The flanking line: turrets stepping out and down from the tower, CB_FLANK_TURN degrees off
+# upwind to a random side; distance, radius and top as (first, step) shares of the tower's radius
+# and of its height to the anvil level, each jittered by +-CB_FLANK_JITTER.
+CB_FLANK_N = 3
+CB_FLANK_TURN = (20.0, 30.0)
+CB_FLANK_FROM = (0.8, 0.55)
+CB_FLANK_RADIUS = (0.6, -0.1)
+CB_FLANK_TOP = (0.75, -0.17)
+CB_FLANK_JITTER = 0.1
+# The anvil: a shelf under the equilibrium level (the top without the overshoot) around the
+# tower's leaning top. Across the wind its half-width is the tower's radius times (1.5 + 1.5 w);
+# downwind it stretches by (1 + 0.7 s), upwind it shrinks by (1 - 0.4 s), s = sat(wind / full).
+# Thick at the core, thin and drooping at the edge; ice, so thinner than the tower.
+CB_ANVIL_SCALE = (2.0, 2.0)
+CB_ANVIL_DOWN = 0.7
+CB_ANVIL_BACK = 0.4
+CB_ANVIL_H_M = (1200.0, 1800.0)  # thickness at the core: 1.2 km + 1.8 km w
+CB_ANVIL_THIN = 0.75           # the thickness falls by this share at the edge
+CB_ANVIL_DROOP_M = 250.0       # the top falls by this at the edge
+CB_ANVIL_B = 0.008              # (ice: an optical depth of ~1-2.5, so the tower under it keeps its light)
+CB_CIRRUS_EDGE_M = 3000.0      # the anvil's cirrus cover rises over this distance inside its fringe
+# Outlines: the anvil's (and the mid-level shelf's) normalised radius is divided by
+# 1 + a sum_n A_n cos(n theta - phi_n), random phases and a in [0.5, 1] per cell, so no two are
+# alike and neighbours merge into a ragged shield.
+CB_LOBES = ((2, 0.10), (3, 0.06), (5, 0.04))
+CB_LOBE_MAX = 1.0 + sum(a for _, a in CB_LOBES)
+CB_SHELF_PHASE = (2.1, 1.3, 0.7)  # the shelf's phases: the anvil's plus these (radians)
+# The anvil cirrus: a faint sheet under the anvil's top, out to CB_FRINGE times its outline (as
+# thick as the slices are apart up there, ~850 m: thinner sheets fall between slice centres).
+CB_FRINGE = 1.25
+CB_FRINGE_H_M = 1000.0
+CB_FRINGE_B = 0.003
+# The mid-level shelf (altostratus: the debris and stratiform region around a mature cell), a
+# lens centred at the type's shelf_base of the height to the anvil level plus half its thickness,
+# (0.6 + 1.2 w) km times the type's shelf thick at its centre and (1 - CB_SHELF_THIN) of that at
+# its edge, only in cells with w above ~0.3; across the wind R (1.8 + 1.2 w), downwind
+# x(1 + 0.4 s), its centre half the lean downwind.
+CB_SHELF_H_M = (600.0, 1200.0)
+CB_SHELF_THIN = 0.6
+CB_SHELF_W = (0.3, 0.7)
+CB_SHELF_SCALE = (1.8, 1.2)
+CB_SHELF_DOWN = 0.4
+CB_SHELF_SHIFT = 0.5
+CB_SHELF_B = 0.012
+CB_SHELF_LOBE1 = 0.3          # ... and a one-sided harmonic (n = 1), so it hangs off one side
+# Variety. A life-cycle stage g per cell (hash): growing (towering cumulus) up to CB_STAGE[0],
+# mature, dissipating from CB_STAGE[1]; grow = S(g, 0, CB_STAGE[0]), decay = S(g, CB_STAGE[1], 1).
+# - A growing tower reaches CB_YOUNG_TOP of the mature height, rising to all of it; no anvil before
+#   CB_ANVIL_STAGE (by then it nearly reaches the anvil level), no overshoot until mature.
+# - A dissipating one sinks by CB_OLD_SINK of its height and thins by CB_OLD_THIN of its radius,
+#   under an anvil spread by CB_OLD_SPREAD (the orphan anvil), with CB_OLD_DEBRIS more mid-level
+#   shelf.
+CB_STAGE = (0.2, 0.75)
+CB_YOUNG_TOP = 0.45
+CB_ANVIL_STAGE = 0.18
+CB_OLD_SINK = 0.35
+CB_OLD_THIN = 0.35
+CB_OLD_SPREAD = 0.25
+CB_OLD_DEBRIS = 0.6
+CB_ANVIL_THICK_JITTER = 0.25   # anvil thickness x (1 +- this)
+# Bulges: the tower's radius times 1 + sum_j A_j sin(2 pi h / lambda_j + Phi_j) cos(n_j theta - psi_j)
+# (theta around the leaning axis; random phases): necks and bulges at several heights and sides.
+CB_BULGES = ((1, 3000.0, 0.12), (2, 2000.0, 0.08), (0, 4500.0, 0.10))  # (n, lambda m, A)
+# MSFS's own shape noise roughens the bodies, as it does its cumulus: d += CB_NOISE_M (N_k - 0.5),
+# N_k = s_k + L_k - 0.25 (the slice's shape term before the specks and its coverage threshold).
+CB_NOISE_M = 1500.0
+# The base: MSFS's own lowest cloud in the column (its shape term s_k > 0) if that is less than
+# CB_BASE_RANGE_M above the terrain, else CB_BASE_AGL_M; at least CB_BASE_MIN_M above it (real
+# CB bases: the condensation level, ~0.5-1.5 km). So the cells stand on the cumulus base around
+# them, ragged where theirs is. The wall cloud reaches down to CB_WALL_MIN_M at most, and the
+# noise fades out over CB_NOISE_BASE_M above the base (it moved bases down by up to 750 m).
+CB_BASE_RANGE_M = 3500.0
+CB_BASE_MIN_M = 600.0
+CB_WALL_MIN_M = 400.0
+CB_NOISE_BASE_M = 1000.0
+# The anvil (with its fringe) and the shelf reach at most CB_BUDGET_M from the cell's centre: their
+# half-widths are capped per column by the lean, the stretch, the lobes and the fringe, so calm
+# cells get broad anvils and windy ones long narrow ones.
+CB_BUDGET_M = 31000.0
+EARTH_KM_PER_DEG = 111.195
+_cbt = {k: max(v) for k, v in CB_TYPE_PARAMS.items()}  # (bounds over the types and their blends)
+CB_REACH_M = max(CB_BUDGET_M,
+                 _cbt["tilt"] * CB_TILT_M + CB_RADIUS_M[1] * _cbt["radius"] * (1.0 + CB_WIDEN)
+                 * (1.0 + _cbt["bulge"] * sum(a for _, _, a in CB_BULGES) + _cbt["bands"] * CB_BAND[0])
+                 + 0.5 * CB_NOISE_M,
+                 CB_RADIUS_M[1] * (1.0 + CB_FLANK_JITTER) * (_cbt["flank"] * (CB_FLANK_FROM[0] + CB_FLANK_FROM[1]
+                                                                             * (CB_FLANK_N - 1))
+                                                            + (0.5 + 0.5 * _cbt["flank"]) * CB_FLANK_RADIUS[0]))
+assert CB_REACH_M < (1.0 + CB_JITTER[0]) * CB_CELL_KM * 1000.0  # (the 3 x 3 cells around a column)
+CB_HASH = (-1640531535, -2048144777, 739982445, 695872825, 1540483477)  # 0x9E3779B1, 0x85EBCA77, ...
+CB_SALTS = (0, 1540483477, 668265263, 374761393, 625341585, 1821285621, 1640531527, 2146121005, 1013904242,
+            1442695041, 1597334677)  # (eleven rounds: twenty-two numbers per cell)
+CB_GOLDEN = 0.6180339887
+
+
+def tropopause_m(lat_deg: float) -> float:
+    """The tropopause height (m) by latitude, a fit to zonal means: ~16.5 km in
+    the tropics, 11.3 km at 45 degrees, 8.7 km at the poles (no season)."""
+    a = abs(lat_deg)
+    t = min(max((a - 45.0) / 35.0, 0.0), 1.0)
+    return 11200.0 + 5300.0 / (1.0 + math.exp((a - 30.0) / 4.0)) - 2500.0 * t * t * (3 - 2 * t)
+
+
+def affine_row(ir: Ir, value: str) -> dict:
+    """value = c_x X + c_y Y + c_z Z + w, as the generator computes its map and
+    planet coordinates: fadd(FMad(Z, c_z, FMad(Y, c_y, fmul(c_x, X))), w), the
+    coefficients being cbuffer extracts. Returns the names X, Y, Z, cx, cy, cz, w."""
+    need(value in ir.binops and ir.binops[value][0] == "fadd", f"{value}: not an affine row")
+    _, a, w = ir.binops[value]
+    if a not in ir.fmad:
+        a, w = w, a
+    need(a in ir.fmad and w in ir.extracts, f"{value}: no FMad term and cbuffer constant")
+    out = {"w": w}
+    for axis in ("Z", "Y"):
+        p, q, rest = ir.fmad[a]
+        out[axis], out["c" + axis.lower()] = (q, p) if p in ir.extracts else (p, q)
+        a = rest
+        if axis == "Z":
+            need(a in ir.fmad, f"{value}: no second FMad")
+    need(a in ir.binops and ir.binops[a][0] == "fmul", f"{value}: no x term")
+    _, p, q = ir.binops[a]
+    out["X"], out["cx"] = (q, p) if p in ir.extracts else (p, q)
+    need(all(out[c] in ir.extracts for c in ("cx", "cy", "cz")), f"{value}: coefficients aren't cbuffer constants")
+    return out
+
+
+def find_rain_lookup(ir: Ir, text: str) -> dict:
+    """The column's rain-map lookup: the two keyframes t2 and t3 sampled at the
+    map coordinates (u, v) and blended by PostProcess[6].y (the stations' pull
+    comes after). Returns the sample's handles and sampler, u, v (as affine
+    rows) and the blend factor."""
+    t2, t3 = binding_handle(text, "t", 2), binding_handle(text, "t", 3)
+    need(t2 and t3, "no t2/t3 (the precipitation keyframes)")
+    found = {}
+    for i, line in enumerate(ir.lines):
+        m = re.match(rf"\s+({V}) = call %dx\.types\.ResRet\.f32 @dx\.op\.sampleLevel\.f32\(i32 62, %dx\.types\.Handle "
+                     rf"({V}), %dx\.types\.Handle ({V}), float ({V}), float ({V}), float undef,", line)
+        if not m:
+            continue
+        ann = ir.lines[ir.defs[m[2]]] if m[2] in ir.defs else ""
+        for key, raw in (("t2", t2), ("t3", t3)):
+            if re.search(rf"@dx\.op\.annotateHandle\(i32 216, %dx\.types\.Handle {re.escape(raw)},", ann):
+                need(key not in found, f"two {key} lookups")
+                found[key] = {"res": m[1], "handle": m[2], "sampler": m[3], "u": m[4], "v": m[5]}
+    need(set(found) == {"t2", "t3"} and (found["t2"]["u"], found["t2"]["v"]) == (found["t3"]["u"], found["t3"]["v"]),
+         "the rain keyframes aren't sampled once each at the same coordinates")
+    e2 = next(n for n, (res, comp) in ir.resret.items() if res == found["t2"]["res"] and comp == 0)
+    e3 = next(n for n, (res, comp) in ir.resret.items() if res == found["t3"]["res"] and comp == 0)
+    diff = [n for n, (kind, a, b) in ir.binops.items() if kind == "fsub" and (a, b) == (e3, e2)]
+    need(len(diff) == 1, "no rain keyframe difference")
+    prod = [(n, a if b == diff[0] else b) for n, (kind, a, b) in ir.binops.items() if kind == "fmul" and diff[0] in (a, b)]
+    need(len(prod) == 1, "no rain keyframe blend")
+    return {"t2": found["t2"]["handle"], "t3": found["t3"]["handle"], "sampler": found["t2"]["sampler"],
+            "u_name": found["t2"]["u"], "v_name": found["t2"]["v"],
+            "u": affine_row(ir, found["t2"]["u"]), "v": affine_row(ir, found["t2"]["v"]), "lerp": prod[0][1]}
+
+
+def apply_cb_towers(ir: Ir, text: str, values: dict) -> str:
+    """ch_cloudDensity, live-weather family: the cumulonimbus towers (CB_*,
+    above) into the 31 slice stores' x and y, before the first store. Exactly
+    stock while the optical thickness is off (%mod.cooff) or with DebugCapture
+    bit 8 (DEBUG_STORMS_OFF: the add-on's thunderstorms setting, C32, off)."""
+    planet = find_planet_direction(ir)
+    need(planet, "no planet direction")
+    rows = [affine_row(ir, p) for p in planet]  # G110..G112 dotted with (X, -alt, Z, 1)
+    rain = find_rain_lookup(ir, text)
+    X, Z = rows[0]["X"], rows[0]["Z"]
+    need(all(r["X"] == X and r["Z"] == Z for r in rows + [rain["u"], rain["v"]]),
+         "the planet and map coordinates don't share the column's X and Z")
+    _, terrain = column_terrain(ir, text)
+    need(terrain != "0.000000e+00", "no global terrain H")
+    stores = []
+    for i, line in enumerate(ir.lines):
+        m = re.match(r"(\s+call void @dx\.op\.textureStore\.f32\(i32 67, %dx\.types\.Handle \S+, i32 \S+, i32 \S+, "
+                     r"i32 (\d+), )float ([^,]+), float ([^,]+), (float [^,]+, float [^,]+, i8 15\).*)$", line)
+        if m:
+            stores.append((i, int(m[2]), m))
+    need(sorted(k for _, k, _ in stores) == list(range(CG_SLICES)), "not 32 slice stores")
+    first = min(i for i, _, _ in stores)
+    # MSFS's own shape per slice: s_k before the specks (N_k + 0.25 - L_k), its threshold L_k, and
+    # s_k after them (the speck suppression's select)
+    sites = coverage_sites(ir, values)
+    shape = {}
+    for k in range(WEATHER_SLICES):
+        s0, L = sites[k]["shape"], sites[k]["L"]
+        sel = [ir.def_name(i) for i in ir.users(s0)
+               if re.match(rf"\s+{V} = select i1 %mod\.cooff, float {re.escape(s0)},", ir.lines[i])]
+        need(len(sel) == 1, f"slice {k}: no speck-suppressed shape term")
+        need(max(ir.defs[s0], ir.defs[L], ir.defs[sel[0]]) < first, f"slice {k}: shape terms after the stores")
+        shape[k] = (s0, L, sel[0])
+
+    em = Emitter("cb.")
+    # off with the optical thickness off, or with DebugCapture bit 8 (the add-on: thunderstorms off, C32)
+    flags = em.new(f"bitcast float {em.ext(em.load('%mod.ah', 0), 0)} to i32")
+    storms_off = em.new(f"icmp ne i32 {em.new(f'and i32 {flags}, {DEBUG_STORMS_OFF}')}, 0")
+    gate = em.new(f"or i1 %mod.cooff, {storms_off}")
+    R = EARTH_RADIUS_M
+    deg = 180.0 / math.pi
+    px, py, pz = planet
+    # the column's latitude and longitude (degrees) and its unit planet vector
+    n2 = em.mad(pz, pz, em.mad(py, py, em.mul(px, px)))
+    rn = em.unary(25, n2)
+    ux, uy, uz = em.mul(px, rn), em.mul(py, rn), em.mul(pz, rn)
+    lat = em.mul(em.unary(16, em.min(em.max(uz, -1.0), 1.0)), deg)
+    q = em.unary(17, em.div(py, px))  # atan(y / x) (the ratio of the raw ones: |p| isn't 1 off the camera), quadrant
+    west = em.cmp("olt", px, 0.0)
+    north = em.cmp("oge", py, 0.0)
+    lon = em.mul(em.select(west, em.add(q, em.select(north, math.pi, -math.pi)), q), deg)
+    # the tropopause by latitude (tropopause_m)
+    alat = em.unary(6, lat)
+    e = em.unary(21, em.mul(em.sub(alat, 30.0), 0.25 * math.log2(math.e)))
+    trop = em.sub(em.add(11200.0, em.div(5300.0, em.add(1.0, e))), em.mul(2500.0, smoothstep(em, alat, 45.0, 80.0)))
+    # the base: MSFS's lowest cloud in the column (s_k > 0) within CB_BASE_RANGE_M of the terrain
+    base = em.add(terrain, CB_BASE_AGL_M)
+    for k in reversed(range(WEATHER_SLICES)):
+        low = em.cmp("olt", em.sub(slice_bottom(k), terrain), CB_BASE_RANGE_M)
+        ok = em.new(f"and i1 {em.cmp('ogt', shape[k][2], 0.0)}, {low}")
+        base = em.select(ok, slice_bottom(k), base)
+    base = em.max(base, em.add(terrain, CB_BASE_MIN_M))
+    # the map coordinates per world metre (the rain map is sampled at each candidate's centre)
+    du = (rain["u"]["cx"], rain["u"]["cz"])
+    dv = (rain["v"]["cx"], rain["v"]["cz"])
+    # the wind (PostProcess[5].xy, world X/Z): downwind unit vector, strength s and the tower's lean
+    post = [h for h, (_, size) in ir.cbs.items() if size == 832]
+    need(len(post) == 1, "no PostProcess cbuffer (832 B) for the wind")
+    p5 = em.load(post[0], 5)
+    vx, vz = em.ext(p5, 0), em.ext(p5, 1)
+    v2 = em.mad(vz, vz, em.mul(vx, vx))
+    calm = em.cmp("olt", v2, 1e-4)
+    vr = em.unary(25, em.max(v2, 1e-4))
+    wdx = em.select(calm, 1.0, em.mul(vx, vr))
+    wdz = em.select(calm, 0.0, em.mul(vz, vr))
+    ws = em.sat(em.mul(em.unary(24, v2), 1.0 / CB_WIND_FULL))
+    tilt = em.mul(ws, CB_TILT_M)
+    # the types' weights that depend on the wind (the shear) only
+    w_single = em.mad(ws, -CB_TYPE_W["single"][1], CB_TYPE_W["single"][0] + CB_TYPE_W["single"][1])
+    w_sheared = em.mad(ws, CB_TYPE_W["sheared"][1], CB_TYPE_W["sheared"][0])
+    shear = smoothstep(em, ws, *CB_TYPE_SHEAR)
+    shelf_den = em.mul(em.mad(ws, CB_SHELF_DOWN, 1.0), CB_LOBE_MAX + CB_SHELF_LOBE1)
+    # the time (Global[0].y: s since the sim started), for the cells' life cycles
+    glob = [h for h, (_, size) in ir.cbs.items() if size == 4800]
+    need(len(glob) == 1, "no Global cbuffer (4800 B) for the time")
+    now = em.ext(em.load(glob[0], 0), 1)
+    # the METAR stations' storm evidence (the anchoring's table; DebugCapture bit 6 and its magic):
+    # per station its unit planet vector and weight, and its evidence (row kStormRow)
+    uav = em.new(f"call %dx.types.Handle @dx.op.createHandleFromBinding(i32 217, %dx.types.ResBind "
+                 f"{{ i32 0, i32 0, i32 {MOD_SPACE}, i8 1 }}, i32 0, i1 false)")
+    uav = em.new(f"call %dx.types.Handle @dx.op.annotateHandle(i32 216, %dx.types.Handle {uav}, "
+                 "%dx.types.ResourceProperties { i32 4107, i32 0 })")
+    fon = em.new(f"icmp ne i32 {em.new(f'and i32 {flags}, {DEBUG_BUFFER_16MB}')}, 0")
+
+    def table_load(offset):
+        addr = em.new(f"select i1 {fon}, i32 {ANCHOR_TABLE + offset}, i32 0")
+        ld = em.new(f"call %dx.types.ResRet.f32 @dx.op.rawBufferLoad.f32(i32 139, %dx.types.Handle {uav}, "
+                    f"i32 {addr}, i32 undef, i8 15, i32 4)")
+        return [em.new(f"extractvalue %dx.types.ResRet.f32 {ld}, {c}") for c in range(4)]
+    hdr = table_load(0)
+    magic = em.new(f"icmp eq i32 {em.new(f'bitcast float {hdr[0]} to i32')}, {ANCHOR_MAGIC}")
+    table_on = em.new(f"and i1 {fon}, {magic}")
+    stations = []
+    for i in range(ANCHOR_STATIONS):
+        sx, sy, sz, sw = table_load(16 + 16 * i)
+        ev = table_load(16 + 16 * ANCHOR_STATIONS + 16 * (ANCHOR_ROWS * i + ANCHOR_ROWS - 1))[0]
+        stations.append((sx, sy, sz, em.select(table_on, em.mul(sw, ev), 0.0)))
+    # the 3 x 3 cells around the column: rows by latitude, then per row columns by longitude (cells ~square)
+    dlat = CB_CELL_KM / EARTH_KM_PER_DEG
+    i0 = em.unary(27, em.mul(lat, 1.0 / dlat))
+    candidates = []
+    for di in (-1.0, 0.0, 1.0):
+        row = em.add(i0, di) if di else i0
+        clat = em.mul(em.add(row, 0.5), dlat)
+        dlon = em.div(dlat, em.max(em.unary(12, em.mul(clat, 1.0 / deg)), 0.1))
+        j0 = em.unary(27, em.div(lon, dlon))
+        candidates += [(row, em.add(j0, dj) if dj else j0, dlon) for dj in (-1.0, 0.0, 1.0)]
+    towers, anvils, marks = [], [], []
+    for ci, cj, dlon in candidates:
+        # the cell: its own offset in time, then its current generation's hash (22 numbers in [0, 1))
+        ii = em.new(f"fptosi float {ci} to i32")
+        jj = em.new(f"fptosi float {cj} to i32")
+        a = em.new(f"add i32 {em.new(f'mul i32 {ii}, {CB_HASH[0]}')}, {em.new(f'mul i32 {jj}, {CB_HASH[1]}')}")
+
+        def mix(b):
+            b = em.new(f"xor i32 {b}, {em.new(f'lshr i32 {b}, 15')}")
+            b = em.new(f"mul i32 {b}, {CB_HASH[2]}")
+            b = em.new(f"xor i32 {b}, {em.new(f'lshr i32 {b}, 12')}")
+            b = em.new(f"mul i32 {b}, {CB_HASH[3]}")
+            return em.new(f"xor i32 {b}, {em.new(f'lshr i32 {b}, 15')}")
+
+        def unit16(b, high):
+            bits = em.new(f"lshr i32 {b}, 16") if high else em.new(f"and i32 {b}, 65535")
+            return em.mul(em.new(f"uitofp i32 {bits} to float"), 1.0 / 65536)
+        offset = unit16(mix(em.new(f"xor i32 {a}, {CB_SALT_TIME}")), False)
+        tc = em.mad(offset, CB_PERIOD_S, now)
+        gen = em.unary(27, em.mul(tc, 1.0 / CB_PERIOD_S))
+        phase = em.mad(gen, -CB_PERIOD_S, tc)  # s since this generation began
+        gen_i = em.new(f"fptosi float {gen} to i32")
+        a = em.new(f"add i32 {a}, {em.new(f'mul i32 {gen_i}, {CB_HASH_GEN}')}")
+        hs = []
+        for salt in CB_SALTS:
+            b = mix(em.new(f"xor i32 {a}, {salt}") if salt else a)
+            hs += [unit16(b, False), unit16(b, True)]
+        # its centre (degrees, then the unit planet vector) and its distance from the column
+        clat = em.mul(em.add(ci, em.mad(hs[0], CB_JITTER[1], CB_JITTER[0])), dlat)
+        clon = em.mul(em.add(cj, em.mad(hs[1], CB_JITTER[1], CB_JITTER[0])), dlon)
+        la, lo = em.mul(clat, 1.0 / deg), em.mul(clon, 1.0 / deg)
+        cl = em.unary(12, la)
+        cx_, cy_, cz_ = em.mul(cl, em.unary(12, lo)), em.mul(cl, em.unary(13, lo)), em.unary(13, la)
+        dx, dy, dz = em.sub(cx_, ux), em.sub(cy_, uy), em.sub(cz_, uz)
+        # the centre's world offset (the planet rows are a rotation / R: their inverse is R^2 times the
+        # transpose) and its rain
+        wx = em.mul(em.mad(rows[2]["cx"], dz, em.mad(rows[1]["cx"], dy, em.mul(rows[0]["cx"], dx))), R * R)
+        wz = em.mul(em.mad(rows[2]["cz"], dz, em.mad(rows[1]["cz"], dy, em.mul(rows[0]["cz"], dx))), R * R)
+        uc = em.mad(du[1], wz, em.mad(du[0], wx, rain["u_name"]))
+        vc = em.mad(dv[1], wz, em.mad(dv[0], wx, rain["v_name"]))
+        keys = []
+        for handle in (rain["t2"], rain["t3"]):
+            s = em.new(f"call %dx.types.ResRet.f32 @dx.op.sampleLevel.f32(i32 62, %dx.types.Handle {handle}, "
+                       f"%dx.types.Handle {rain['sampler']}, float {uc}, float {vc}, float undef, float undef, "
+                       "i32 0, i32 0, i32 undef, float 0.000000e+00)")
+            keys.append(em.new(f"extractvalue %dx.types.ResRet.f32 {s}, 0"))
+        rate = em.mad(rain["lerp"], em.sub(keys[1], keys[0]), keys[0])
+        # the evidence: the stations' reports near its centre, else very heavy rain
+        est = None
+        for sx, sy, sz, se in stations:
+            ex_, ey_, ez_ = em.sub(cx_, sx), em.sub(cy_, sy), em.sub(cz_, sz)
+            dkm = em.mul(em.unary(24, em.mad(ez_, ez_, em.mad(ey_, ey_, em.mul(ex_, ex_)))), R / 1000.0)
+            e = em.mul(se, em.sub(1.0, smoothstep(em, dkm, *CB_EVIDENCE_KM)))
+            est = e if est is None else em.max(est, e)
+        evidence = em.max(est, em.mul(smoothstep(em, rate, *CB_RAIN_EVIDENCE), CB_RAIN_EVIDENCE_MAX))
+        # the cell exists (softly) by the evidence and lives its generation's life
+        exist = em.sat(em.mul(em.sub(em.mul(evidence, CB_CHANCE), hs[2]), 1.0 / CB_EXIST_SOFT))
+        stage = em.div(phase, em.mad(hs[21], CB_LIFE_S[1] - CB_LIFE_S[0], CB_LIFE_S[0]))
+        present = em.new(f"and i1 {em.cmp('ogt', exist, 0.0)}, {em.cmp('olt', stage, 1.0)}")
+        # its strength w from the rain (or a station's report), its size (skewed small); radius, vigour,
+        # anvil level
+        w = em.max(smoothstep(em, rate, *CB_RAIN), em.mul(est, CB_EVIDENCE_W))
+        size = em.mul(em.mul(hs[3], hs[3]), hs[3])  # (CB_SIZE_POW)
+        radius = em.mul(em.mad(size, CB_RADIUS_M[1] - CB_RADIUS_M[0], CB_RADIUS_M[0]), em.mad(w, 0.3, 0.7))
+        reported = em.mad(em.sat(em.mul(est, 1.25)), 1.0 - CB_VIGOUR_RAIN, CB_VIGOUR_RAIN)
+        vigour = em.mul(em.mul(w, em.mad(size, CB_VIGOUR[1], CB_VIGOUR[0])), reported)
+        thunder = smoothstep(em, est, *CB_THUNDER)
+        vigour = em.max(vigour, em.mul(thunder, CB_THUNDER_VIGOUR))
+        # its type (CB_TYPES): the weights' running sums are the pick's edges; past edge j the
+        # parameters step from type j - 1's to type j's, softly
+        w_multi = em.mad(smoothstep(em, evidence, *CB_TYPE_HEAVY), CB_TYPE_W["multicell"][1],
+                         CB_TYPE_W["multicell"][0])
+        w_super = em.mul(em.mul(thunder, shear), em.mul(smoothstep(em, size, *CB_TYPE_BIG), CB_TYPE_W["supercell"]))
+        edges = [w_single]
+        for wt in (w_sheared, w_multi, w_super):
+            edges.append(em.add(edges[-1], wt))
+        pick = em.mul(hs[12], em.add(edges[-1], CB_TYPE_W["embedded"]))
+        steps = [em.sat(em.mad(em.sub(pick, c), 1.0 / CB_TYPE_SOFT, 0.5)) for c in edges]
+        ty = {}
+        for name, vals in CB_TYPE_PARAMS.items():
+            ty[name] = vals[0]
+            for g, a, b in zip(steps, vals, vals[1:]):
+                if b != a:
+                    ty[name] = em.mad(g, b - a, ty[name])
+        # its lean, and the anvil's and the shelf's largest half-widths within the reach budget
+        tilt_c = em.mul(tilt, ty["tilt"])
+        tx, tz = em.mul(tilt_c, wdx), em.mul(tilt_c, wdz)
+        down = em.mul(ty["down"], CB_ANVIL_DOWN)
+        anvil_cap = em.div(em.sub(CB_BUDGET_M, tilt_c), em.mul(em.mad(ws, down, 1.0), CB_LOBE_MAX * CB_FRINGE))
+        shelf_cap = em.div(em.mad(tilt_c, -CB_SHELF_SHIFT, CB_BUDGET_M), shelf_den)
+        share = em.add(em.mad(vigour, CB_TOP_SHARE[1] - CB_TOP_SHARE[0], CB_TOP_SHARE[0]),
+                       em.mad(hs[20], 2.0 * CB_TOP_JITTER, -CB_TOP_JITTER))
+        level = em.min(em.mul(trop, share), CB_TOP_MAX_M)
+        span = em.max(em.sub(level, base), 1.0)
+        # its life: rising from its base (birth), growing, dissipating, gone (death); weaker evidence
+        # keeps it younger and older at once, so it grows in and decays out with the evidence
+        birth = em.mul(smoothstep(em, stage, 0.0, CB_BIRTH), em.sat(em.mul(exist, 3.0)))
+        grow = em.mul(smoothstep(em, stage, 0.0, CB_STAGE[0]), exist)
+        decay = em.max(smoothstep(em, stage, CB_STAGE[1], 1.0), em.sub(1.0, exist))
+        death = em.sub(1.0, smoothstep(em, stage, CB_DEATH, 1.0))
+        mature = em.mul(grow, em.sub(1.0, decay))
+        full = em.min(em.mad(em.mul(vigour, mature), em.mul(ty["overshoot"], CB_OVERSHOOT_M), em.mul(trop, share)),
+                      CB_TOP_MAX_M)
+        height = em.mul(em.mul(em.mad(grow, 1.0 - CB_YOUNG_TOP, em.mul(birth, CB_YOUNG_TOP)),
+                               em.mad(decay, -CB_OLD_SINK, 1.0)), death)
+        top = em.mad(em.sub(full, base), height, base)
+        dome = em.min(em.mul(em.sub(top, base), 0.3), CB_DOME_M)
+        rt0 = em.max(em.mul(em.mul(em.mul(radius, ty["radius"]), em.mad(decay, -CB_OLD_THIN, 1.0)), death), 50.0)
+        # the column from the centre (world metres)
+        qx, qz = em.sub(0.0, wx), em.sub(0.0, wz)
+        r0sq = em.mad(qz, qz, em.mul(qx, qx))
+        # the updraft tower, evaluated per slice around its leaning axis; the wall cloud lowers its
+        # base by CB_WALL_M (1 - (r / (R / 2))^2) under the updraft; its bulges' phases (A cos Phi,
+        # A sin Phi; cos psi, sin psi)
+        inv_r2 = em.div(1.0, em.mul(rt0, rt0))
+        wall = em.mul(em.sat(em.mad(em.mul(r0sq, inv_r2), -4.0, 1.0)), em.mul(ty["wall"], CB_WALL_M))
+        bulges = []
+        for j, (n_ang, _, amp) in enumerate(CB_BULGES):
+            ph = em.mul(hs[13 + j], 2.0 * math.pi)
+            ps = em.mul(hs[18 + j], 2.0 * math.pi) if n_ang else None
+            a_j = em.mul(ty["bulge"], amp)
+            bulges.append((em.mul(em.unary(12, ph), a_j), em.mul(em.unary(13, ph), a_j),
+                           (em.unary(12, ps), em.unary(13, ps)) if n_ang else None))
+        tower = {"qx": qx, "qz": qz, "tx": tx, "tz": tz, "radius": rt0, "widen": em.mul(rt0, CB_WIDEN),
+                 "bulges": bulges, "band": em.mul(ty["bands"], 4.0 * CB_BAND[0]),
+                 "inv_span": em.div(1.0, span), "top": em.select(present, top, -1.0e9),
+                 "dome": em.mul(dome, inv_r2),
+                 "base": em.max(em.sub(base, wall), em.add(terrain, CB_WALL_MIN_M))}
+        # the tower's mark for the renderer's sky light: 1 near its axis (at half its height), fading out
+        mx, mz = em.mad(tx, -0.5, qx), em.mad(tz, -0.5, qz)
+        near = em.sub(em.mul(rt0, CB_SIDE_REACH / CB_SIDE_FADE_M),
+                      em.mul(em.unary(24, em.mad(mz, mz, em.mul(mx, mx))), 1.0 / CB_SIDE_FADE_M))
+        marks.append(em.select(present, em.mul(em.sat(em.add(near, 1.0)), birth), 0.0))
+        # the flanking line: from upwind (a random direction as the wind falls calm), turned to a side
+        ang = em.mul(hs[7], 2.0 * math.pi)
+        bx = em.mad(em.sub(1.0, ws), em.unary(12, ang), em.mul(ws, em.sub(0.0, wdx)))
+        bz = em.mad(em.sub(1.0, ws), em.unary(13, ang), em.mul(ws, em.sub(0.0, wdz)))
+        bn = em.unary(25, em.max(em.mad(bz, bz, em.mul(bx, bx)), 1e-6))
+        bx, bz = em.mul(bx, bn), em.mul(bz, bn)
+        turn = em.mul(em.mad(em.unary(22, em.mul(hs[4], 2.0)), CB_FLANK_TURN[1], CB_FLANK_TURN[0]), math.pi / 180.0)
+        turn = em.select(em.cmp("olt", hs[4], 0.5), turn, em.sub(0.0, turn))
+        ct, st = em.unary(12, turn), em.unary(13, turn)
+        fx, fz = em.sub(em.mul(bx, ct), em.mul(bz, st)), em.mad(bx, st, em.mul(bz, ct))
+        turrets = []
+        f_rho = em.mul(radius, ty["flank"])
+        f_rt = em.mul(radius, em.mad(ty["flank"], 0.5, 0.5))
+        f_th = em.mul(em.mul(span, height), ty["flank_top"])
+        for i in range(CB_FLANK_N):
+            f = em.unary(22, em.add(hs[5], CB_GOLDEN * i))
+            g = em.unary(22, em.add(hs[6], CB_GOLDEN * i))
+            jf = em.mad(f, 2.0 * CB_FLANK_JITTER, 1.0 - CB_FLANK_JITTER)
+            jg = em.mad(g, 2.0 * CB_FLANK_JITTER, 1.0 - CB_FLANK_JITTER)
+            rho = em.mul(f_rho, em.mul(jg, CB_FLANK_FROM[0] + CB_FLANK_FROM[1] * i))
+            rt = em.mul(f_rt, em.mul(jf, CB_FLANK_RADIUS[0] + CB_FLANK_RADIUS[1] * i))
+            th = em.mul(f_th, em.mul(jf, CB_FLANK_TOP[0] + CB_FLANK_TOP[1] * i))
+            ex, ez = em.sub(qx, em.mul(fx, rho)), em.sub(qz, em.mul(fz, rho))
+            rti = em.div(em.unary(24, em.mad(ez, ez, em.mul(ex, ex))), rt)
+            tt = em.sub(em.add(base, th), em.mul(em.min(em.mul(th, 0.3), CB_DOME_M), em.mul(rti, rti)))
+            turrets.append({"side": em.mul(rt, em.sub(1.0, rti)), "top": em.select(present, tt, -1.0e9)})
+        # the outlines' lobes: per harmonic n, cos phi_n and sin phi_n, and the amplitude scale
+        lobe_amp = em.mad(hs[11], 0.5, 0.5)
+        phases = []
+        for i in range(len(CB_LOBES)):
+            ph = em.mul(hs[8 + i], 2.0 * math.pi)
+            phases.append((em.unary(12, ph), em.unary(13, ph)))
+
+        def ellipse(cx, cz, half, down, back):
+            """An ellipse around (cx, cz): half-width `half` across the wind, stretched by
+            (1 + down s) downwind and (1 + back s) upwind. Its normalised radius, and the
+            cos and sin of n times its angle for the lobes."""
+            ax, az = em.sub(qx, cx), em.sub(qz, cz)
+            along = em.mad(az, wdz, em.mul(ax, wdx))
+            cross = em.sub(em.mul(az, wdx), em.mul(ax, wdz))
+            stretch = em.select(em.cmp("ogt", along, 0.0), em.mad(ws, down, 1.0), em.mad(ws, back, 1.0))
+            ea, ec = em.div(along, em.mul(half, stretch)), em.div(cross, half)
+            e = em.unary(24, em.mad(ec, ec, em.mul(ea, ea)))
+            # cos and sin of the angle in the normalised ellipse, then its harmonics
+            inv = em.div(1.0, em.max(e, 1e-6))
+            c, s_ = em.mul(ea, inv), em.mul(ec, inv)
+            c2, s2 = em.sub(em.mul(c, c), em.mul(s_, s_)), em.mul(em.mul(c, s_), 2.0)
+            c3, s3 = em.sub(em.mul(c2, c), em.mul(s2, s_)), em.mad(c2, s_, em.mul(s2, c))
+            c5, s5 = em.sub(em.mul(c3, c2), em.mul(s3, s2)), em.mad(c3, s2, em.mul(s3, c2))
+            return e, {1: (c, s_), 2: (c2, s2), 3: (c3, s3), 5: (c5, s5)}
+
+        def lobed(e, harm, offsets, one=None):
+            m = None
+            for (n, amp), (cp, sp), off in zip(CB_LOBES, phases, offsets):
+                if off:  # phi + off: cos phi cos off - sin phi sin off, sin phi cos off + cos phi sin off
+                    cp, sp = (em.sub(em.mul(cp, math.cos(off)), em.mul(sp, math.sin(off))),
+                              em.mad(cp, math.sin(off), em.mul(sp, math.cos(off))))
+                term = em.mul(em.mad(harm[n][0], cp, em.mul(harm[n][1], sp)), amp)
+                m = term if m is None else em.add(m, term)
+            m = em.mul(m, lobe_amp)
+            if one:  # (amplitude, cos psi, sin psi): a one-sided term, not scaled by lobe_amp
+                m = em.mad(em.mad(harm[1][0], one[1], em.mul(harm[1][1], one[2])), one[0], m)
+            return em.div(e, em.add(m, 1.0))
+
+        # the anvil around the leaning top, and its cirrus fringe: en = the normalised radius; none
+        # while the tower is still growing, spread wider as it dissipates
+        # the anvil from CB_ANVIL_STAGE, growing in (its size, thickness and cirrus) over CB_ANVIL_GROW of the
+        # life and thinning out at its end; spread wider as the cell dissipates
+        anvil_on = em.new(f"and i1 {present}, {em.cmp('oge', stage, CB_ANVIL_STAGE)}")
+        anvil_grow = em.mul(em.mul(smoothstep(em, stage, CB_ANVIL_STAGE, CB_ANVIL_STAGE + CB_ANVIL_GROW),
+                                   em.sat(em.mul(exist, 2.0))), death)
+        ac = em.min(em.mul(em.mul(em.mul(radius, ty["anvil"]), em.mad(w, CB_ANVIL_SCALE[1], CB_ANVIL_SCALE[0])),
+                           em.mad(decay, CB_OLD_SPREAD, 1.0)), anvil_cap)
+        ac = em.max(em.mul(ac, em.mad(anvil_grow, 0.7, 0.3)), 500.0)
+        e, harm = ellipse(tx, tz, ac, down, em.mul(ty["back"], -CB_ANVIL_BACK))
+        en = lobed(e, harm, (0.0, 0.0, 0.0))
+        # its cirrus cover here (inside the fringe's outline) and level, for the renderer's cirrus
+        cover = em.sat(em.mul(em.mul(ac, em.sub(CB_FRINGE, en)), 1.0 / CB_CIRRUS_EDGE_M))
+        anvils.append((em.select(anvil_on, em.mul(cover, anvil_grow), 0.0), level))
+        e2 = em.mul(en, en)
+        thick = em.mul(em.mul(em.mul(em.mad(w, CB_ANVIL_H_M[1], CB_ANVIL_H_M[0]), ty["thick"]),
+                              em.mad(hs[17], 2.0 * CB_ANVIL_THICK_JITTER, 1.0 - CB_ANVIL_THICK_JITTER)), anvil_grow)
+        atop = em.select(anvil_on, em.sub(level, em.mul(e2, CB_ANVIL_DROOP_M)), -1.0e9)
+        strat = [({"side": em.mul(ac, em.sub(1.0, en)), "top": atop,
+                   "bottom": em.sub(level, em.mul(thick, em.mad(e2, -CB_ANVIL_THIN, 1.0)))}, CB_ANVIL_B),
+                 ({"side": em.mul(ac, em.sub(CB_FRINGE, en)), "top": atop,
+                   "bottom": em.sub(atop, em.mul(anvil_grow, CB_FRINGE_H_M))}, CB_FRINGE_B)]
+        # the mid-level shelf, around the tower half its lean downwind, with its own lobes
+        sh = em.min(em.mul(radius, em.mad(w, CB_SHELF_SCALE[1], CB_SHELF_SCALE[0])), shelf_cap)
+        e, harm = ellipse(em.mul(tx, CB_SHELF_SHIFT), em.mul(tz, CB_SHELF_SHIFT), sh, CB_SHELF_DOWN, 0.0)
+        side_ang = em.mul(hs[16], 2.0 * math.pi)
+        en = lobed(e, harm, CB_SHELF_PHASE, (CB_SHELF_LOBE1, em.unary(12, side_ang), em.unary(13, side_ang)))
+        sthick = em.mul(em.mul(em.mul(em.mad(w, CB_SHELF_H_M[1], CB_SHELF_H_M[0]), ty["shelf"]),
+                               smoothstep(em, w, *CB_SHELF_W)),
+                        em.mul(em.mul(grow, em.mad(decay, CB_OLD_DEBRIS, 1.0)), death))
+        smid = em.mad(sthick, 0.5, em.mad(span, ty["shelf_base"], base))
+        shalf = em.mul(em.mul(sthick, 0.5), em.mad(em.mul(en, en), -CB_SHELF_THIN, 1.0))
+        strat.append(({"side": em.mul(sh, em.sub(1.0, en)),
+                       "top": em.select(present, em.add(smid, shalf), -1.0e9), "bottom": em.sub(smid, shalf)},
+                      CB_SHELF_B))
+        towers.append((tower, turrets, strat))
+    # per slice (at its centre): the signed distance into the nearest surface of the towers' bodies
+    # and of each stratiform part (anvil, cirrus fringe, mid-level shelf); x from all, y from each
+    # with its density; and the stratiform share for the cloud types (altostratus: smooth, not
+    # cumulus) where those parts are cloud and the bodies aren't
+    out, shares, raw, frees = {}, {}, [], []
+    for k in range(WEATHER_SLICES):
+        h = 15.625 * (k + 0.5) ** 2
+        above = em.sub(h, base)
+        body, flat = None, [None] * len(towers[0][2])
+        for tower, turrets, strat in towers:
+            # the updraft tower: its axis leans f = sat((h - base) / span) of the way, its radius widens
+            f = em.sat(em.mul(above, tower["inv_span"]))
+            px, pz = em.mad(f, em.sub(0.0, tower["tx"]), tower["qx"]), em.mad(f, em.sub(0.0, tower["tz"]), tower["qz"])
+            rk2 = em.mad(pz, pz, em.mul(px, px))
+            # its bulges: sin(2 pi h / lambda + Phi) from the slice's (literal) angle, cos(n theta - psi)
+            inv = em.unary(25, em.max(rk2, 1.0))
+            c, s_ = em.mul(px, inv), em.mul(pz, inv)
+            bulge = None
+            for (n_ang, lam, _), (acp, asp, psi) in zip(CB_BULGES, tower["bulges"]):
+                a = 2.0 * math.pi * h / lam
+                term = em.mad(acp, math.sin(a), em.mul(asp, math.cos(a)))  # A sin(a + Phi)
+                if n_ang == 1:
+                    term = em.mul(term, em.mad(c, psi[0], em.mul(s_, psi[1])))
+                elif n_ang == 2:
+                    c2, s2 = em.sub(em.mul(c, c), em.mul(s_, s_)), em.mul(em.mul(c, s_), 2.0)
+                    term = em.mul(term, em.mad(c2, psi[0], em.mul(s2, psi[1])))
+                bulge = term if bulge is None else em.add(bulge, term)
+            # the supercell's bands: A 4 f (1 - f) cos(2 pi h / lambda)
+            band = em.mul(em.mul(em.sub(1.0, f), f), tower["band"])
+            bulge = em.mad(band, math.cos(2.0 * math.pi * h / CB_BAND[1]), bulge)
+            rk = em.mul(em.mad(f, tower["widen"], tower["radius"]), em.add(bulge, 1.0))
+            side = em.sub(rk, em.unary(24, rk2))
+            ztop = em.sub(tower["top"], em.mul(tower["dome"], rk2))
+            parts = [em.min(side, em.min(em.sub(ztop, h), em.sub(h, tower["base"])))]
+            parts += [em.min(t["side"], em.min(em.sub(t["top"], h), above)) for t in turrets]
+            for dc in parts:
+                body = dc if body is None else em.max(body, dc)
+            for i, (p, _) in enumerate(strat):
+                da = em.min(p["side"], em.min(em.sub(p["top"], h), em.sub(h, p["bottom"])))
+                flat[i] = da if flat[i] is None else em.max(flat[i], da)
+        # MSFS's own shape noise on the bodies: N_k = s_k + L_k - 0.25
+        # (fading out toward the base, which stays flat)
+        noise = em.sub(em.add(shape[k][0], shape[k][1]), 0.25)
+        fade = em.sat(em.mul(above, 1.0 / CB_NOISE_BASE_M))
+        body = em.mad(em.mul(em.sub(noise, 0.5), fade), CB_NOISE_M, body)
+        norm = lambda d: em.min(em.max(em.mul(d, 1.0 / CB_EDGE_M), -1.0), 1.0)  # noqa: E731
+        xb = norm(body)
+        xs = [norm(d) for d in flat]
+        xmax = xb
+        for x in xs:
+            xmax = em.max(xmax, x)
+        xcb = em.sat(em.mad(xmax, 0.5, 0.5))
+        inside = lambda x: em.sat(em.mad(x, 25.0, 1.0))  # noqa: E731
+        b = em.mul(inside(xb), CB_DENSITY_B)
+        for x, (_, density) in zip(xs, towers[0][2]):
+            b = em.max(b, em.mul(inside(x), density))
+        ycb = em.sat(em.mad(em.unary(24, b), 0.5, 0.5))
+        out[k] = (xcb, ycb)
+        xflat = xs[0]
+        for x in xs[1:]:
+            xflat = em.max(xflat, x)
+        free = em.sub(1.0, inside(xb))
+        raw.append(em.mul(inside(xflat), free))
+        frees.append(free)
+    # the shares, spread one slice up and down outside the bodies: a sheet's top and bottom
+    # surfaces lie between its slice and the next, which the renderer's types reach too
+    for k in range(WEATHER_SLICES):
+        near = [raw[j] for j in (k - 1, k + 1) if 0 <= j < WEATHER_SLICES]
+        nb = near[0] if len(near) == 1 else em.max(near[0], near[1])
+        share = em.max(raw[k], em.mul(nb, frees[k]))
+        shares[k] = f"%mod.cb.ty{k}"
+        em.lines.append(f"  {shares[k]} = select i1 {gate}, float 0.000000e+00, float {share}")
+    ir.cb_type_shares = shares
+    # the anvils for the renderer's cirrus: the most-covering cell's cover and level
+    cov, alt = anvils[0]
+    for c, lev in anvils[1:]:
+        alt = em.select(em.cmp("ogt", c, cov), lev, alt)
+        cov = em.max(cov, c)
+    em.lines += [f"  %mod.cb.ccov = select i1 {gate}, float 0.000000e+00, float {cov}",
+                 f"  %mod.cb.calt = fadd fast float {alt}, 0.000000e+00"]
+    ir.cb_anvil = ("%mod.cb.calt", "%mod.cb.ccov")
+    # the towers' mark and the base, for the renderer's sky light
+    mark = marks[0]
+    for m_ in marks[1:]:
+        mark = em.max(mark, m_)
+    em.lines += [f"  %mod.cb.mark = select i1 {gate}, float 0.000000e+00, float {mark}",
+                 f"  %mod.cb.mbase = fadd fast float {base}, 0.000000e+00"]
+    ir.cb_tower = ("%mod.cb.mark", "%mod.cb.mbase")
+    edits = []
+    for i, k, m in stores:
+        if k not in out:
+            continue
+        xcb, ycb = out[k]
+        xo, yo = f"%mod.cb.x{k}", f"%mod.cb.y{k}"
+        edits.append((i, [
+            f"  {xo}m = call float @dx.op.binary.f32(i32 35, float {m[3]}, float {xcb})",
+            f"  {xo} = select i1 {gate}, float {m[3]}, float {xo}m",
+            f"  {yo}m = call float @dx.op.binary.f32(i32 35, float {m[4]}, float {ycb})",
+            f"  {yo} = select i1 {gate}, float {m[4]}, float {yo}m",
+            f"{m[1]}float {xo}, float {yo}, {m[5]}",
+        ]))
+    for i, new_lines in sorted(edits, key=lambda e: -e[0]):
+        ir.lines[i:i + 1] = new_lines
+    ir.lines[first:first] = em.lines
+    return (f"cumulonimbus towers: 9 candidates per column on a {CB_CELL_KM:.0f} km grid (leaning tower, "
+            f"{CB_FLANK_N} flanking turrets, anvil; wind P[5]), rain {rain['t2']}/{rain['t3']}, "
+            f"x and y of {len(out)} slices")
+
+
 def apply_metar_anchor(ir: Ir) -> str:
     """ch_cloudDensity, live-weather family: blend the weather-map value C of
     every slice toward the METAR stations' rows (ANCHOR_TABLE, above) by
@@ -3865,10 +4947,15 @@ def slice_bottom(k: int) -> float:
     return 15.625 * k * k
 
 
-def cloud_types_lines(values: dict | None, tx: str, ty: str, terrain: str) -> list[str]:
+def cloud_types_lines(values: dict | None, tx: str, ty: str, terrain: str, shares: dict | None = None,
+                      anvil: tuple | None = None, tower: tuple | None = None) -> list[str]:
     """ch_cloudDensity, after the column's stores (in the block they end in;
     ends in a new block): the cloud types (layout above). Without values (the
-    layer family), the centre thread only writes 0 over the magic."""
+    layer family), the centre thread only writes 0 over the magic. shares:
+    slice -> the storm cells' stratiform share there (apply_cb_towers), which
+    goes to altostratus, the other weights making room; anvil: their (level,
+    cover) for the renderer's cirrus, written at ANVIL_REGION; tower: the
+    towers' (mark, base) for the renderer's sky light, at TOWER_REGION."""
     t = "%dx.types.Handle"
     lines = [
         f"  %mod.ty.fb = and i32 %mod.cv.flags, {DEBUG_BUFFER_TYPES}",
@@ -3977,6 +5064,9 @@ def cloud_types_lines(values: dict | None, tx: str, ty: str, terrain: str) -> li
             above = weights[k + 1][c] if k + 1 < n else 0.0
             near = em.select(inside[k - 1], weights[k - 1][c], above) if 1 <= k <= n else above
             out.append(em.lit(em.select(inside[k], weights[k][c], near) if k < n else near))
+        if shares and k in shares:
+            keep = em.sub(1.0, shares[k])
+            out = [em.mul(o, keep) for o in out[:3]] + [em.mad(out[3], keep, shares[k])]
         words.append(out)
     lines += em.lines
     for k, out in enumerate(words):
@@ -3984,6 +5074,15 @@ def cloud_types_lines(values: dict | None, tx: str, ty: str, terrain: str) -> li
         lines += [f"  %mod.ty.a{k} = add i32 %mod.ty.go1, {4 * TYPES_N * TYPES_N * k}",
                   f"  call void @dx.op.rawBufferStore.i32(i32 140, {t} %mod.ty.u, i32 %mod.ty.a{k}, i32 undef, "
                   f"i32 {w}, i32 undef, i32 undef, i32 undef, i8 1, i32 4)"]
+    if anvil:
+        lines += ["  %mod.ty.an0 = shl i32 %mod.ty.gc, 3",
+                  f"  %mod.ty.an = add i32 %mod.ty.an0, {ANVIL_REGION}",
+                  f"  call void @dx.op.rawBufferStore.f32(i32 140, {t} %mod.ty.u, i32 %mod.ty.an, i32 undef, "
+                  f"float {anvil[0]}, float {anvil[1]}, float undef, float undef, i8 3, i32 4)"]
+    if tower:
+        lines += [f"  %mod.ty.tw = add i32 %mod.ty.an0, {TOWER_REGION}",
+                  f"  call void @dx.op.rawBufferStore.f32(i32 140, {t} %mod.ty.u, i32 %mod.ty.tw, i32 undef, "
+                  f"float {tower[0]}, float {tower[1]}, float undef, float undef, i8 3, i32 4)"]
     return lines + ["  br label %mod.cgb.tyend", "", "mod.cgb.tyend:"]
 
 
@@ -4001,6 +5100,8 @@ def patch_cloud_gen_capture(text: str) -> tuple[str, str]:
         anchor = apply_metar_anchor(ir)
         ir.reindex()
         anchor += "; " + apply_speck_suppression(ir, values)  # (from the anchored values)
+        ir.reindex()
+        anchor += "; " + apply_cb_towers(ir, text, values)
         ir.reindex()
     tids = re.findall(r"^\s+(%[\w.]+) = call i32 @dx\.op\.threadId\.i32\(i32 93, i32 ([01])\)", text, re.M)
     tid = {int(c): n for n, c in tids}
@@ -4111,7 +5212,8 @@ def patch_cloud_gen_capture(text: str) -> tuple[str, str]:
         "  br label %mod.cgb.vend",
         "",
         "mod.cgb.vend:",
-        *cloud_types_lines(values, tx, ty, terrain[1]),
+        *cloud_types_lines(values, tx, ty, terrain[1], getattr(ir, "cb_type_shares", None),
+                           getattr(ir, "cb_anvil", None), getattr(ir, "cb_tower", None)),
         ir.lines[br],
     ]
     ir.lines[br:br + 1] = out

@@ -19,7 +19,8 @@ interpreter and compares, for several settings:
     around the antisolar point, against a numpy model of the silhouette;
   - the soft transmittance at every site, with C5 setting its floor (stock
     when off);
-  - every boundary ramp r, sharpened about one half: sat((r - 0.5) (1 + C0 C8) + 0.5);
+  - every boundary ramp r, sharpened about one half: sat((r - 0.5) (1 + C0 C8) + 0.5), the view
+    march's no steeper than max(160, step) / step;
   - the view march's cloud extinction (apply_cloud_optical), ramp * sigma' with
     sigma' = lerp(C16 0.01 (sigma / 0.01)^C17, C19 sigma, sat((h - C18 + 3 km) / 3 km));
   - the surface detail (apply_cloud_detail): every march's 1 km octave
@@ -421,20 +422,31 @@ def check_light_volume(stock, patched, failures):
 def types_buffer(rng, magic=P.TYPES_MAGIC):
     """The debug buffer (float32 words) with the generator's header and a
     random grid of type weights (sum <= 1; some cells all cumulus), and the
-    grid as bytes [slice, y, x, type]."""
+    grid as bytes [slice, y, x, type], the anvils' (level, cover) and the
+    towers' (mark, base) per cell."""
     n, k = P.TYPES_N, P.TYPES_SLICES
     raw = rng.dirichlet(np.ones(5), size=(k, n, n))[..., :4]
     raw[rng.uniform(size=(k, n, n)) < 0.2] = 0.0
     grid = np.floor(raw * 255).astype(np.uint8)
-    words = np.zeros((P.TYPES_REGION + 16) // 4 + k * n * n, np.uint32)
+    words = np.zeros(P.TOWER_REGION // 4 + 2 * n * n, np.uint32)
     words[P.TYPES_REGION // 4:P.TYPES_REGION // 4 + 4] = (magic, 7, 512, np.float32(TYPE_OFFSET).view(np.uint32))
-    words[(P.TYPES_REGION + 16) // 4:] = grid.reshape(-1, 4).copy().view(np.uint32).ravel()
-    return words.view(np.float32), grid
+    words[(P.TYPES_REGION + 16) // 4:P.ANVIL_REGION // 4] = grid.reshape(-1, 4).copy().view(np.uint32).ravel()
+    # the storm cells' anvils: (level, cover) per cell, some cells without
+    anvil = np.stack([rng.uniform(8000, 13000, (n, n)), rng.uniform(0, 1, (n, n))], -1).astype(np.float32)
+    anvil[..., 1][rng.uniform(size=(n, n)) < 0.4] = 0.0
+    words[P.ANVIL_REGION // 4:P.TOWER_REGION // 4] = anvil.reshape(-1).view(np.uint32)
+    # the storm towers' marks: (mark, base) per cell, most cells without
+    tower = np.stack([rng.uniform(0, 1, (n, n)), rng.uniform(300, 2500, (n, n))], -1).astype(np.float32)
+    tower[..., 0][rng.uniform(size=(n, n)) < 0.4] = 0.0
+    words[P.TOWER_REGION // 4:] = tower.reshape(-1).view(np.uint32)
+    return words.view(np.float32), (grid, anvil, tower)
 
 
-def types_ref(c, grid, u, v, w):
-    """Per lane, float64: the thickness factor T, the base mix m and the view
-    ramp's sharpening (cloud types)."""
+def types_ref(c, grids, u, v, w):
+    """Per lane, float64: the thickness factor T, the base mix m, the view
+    ramp's sharpening, the puff factor (cloud types), the anvils' cover and
+    cover-weighted level, and the towers' mark and mark-weighted base."""
+    grid, anvil, tower = grids
     n = P.TYPES_N
     cell = []
     for coord in (u, v):
@@ -457,7 +469,20 @@ def types_ref(c, grid, u, v, w):
     cu = np.maximum(1 - wts.sum(1), 0)
     ce = c0 * clamp(c[8], 0.0, 8.0)
     sharp = ce * (1 - s) + s * cu * max(ce, c0 * P.TYPES_CU_EDGE_MIN)
-    return T, m, sharp
+    puff = 1 - s + s * (cu + (wts * np.array(P.TYPES_PUFF)).sum(1)) if s > 0 else np.ones(len(cu))
+    an = anvil.astype(np.float64)
+    corners = [((1 - ax) * (1 - ay), an[y0, x0]), (ax * (1 - ay), an[y0, x0 + 1]),
+               ((1 - ax) * ay, an[y0 + 1, x0]), (ax * ay, an[y0 + 1, x0 + 1])]
+    cov = sum(b * a[:, 1] for b, a in corners)
+    lev = sum(b * a[:, 1] * a[:, 0] for b, a in corners) / np.maximum(cov, 1e-6)
+    tw = tower.astype(np.float64)
+    corners = [((1 - ax) * (1 - ay), tw[y0, x0]), (ax * (1 - ay), tw[y0, x0 + 1]),
+               ((1 - ax) * ay, tw[y0 + 1, x0]), (ax * ay, tw[y0 + 1, x0 + 1])]
+    mark = sum(b * a[:, 0] for b, a in corners)
+    mbase = sum(b * a[:, 0] * a[:, 1] for b, a in corners) / np.maximum(mark, 1e-6)
+    if s <= 0:
+        cov, mark = np.zeros(len(cov)), np.zeros(len(mark))
+    return T, m, sharp, puff, cov, lev, mark, mbase
 
 
 def soft_output(ir, quarter):
@@ -470,6 +495,55 @@ def soft_output(ir, quarter):
             return None
         v = users[0]
     return v
+
+
+def check_untile(stock: str, patched: str, failures: list) -> float:
+    """The erosion noise's untiling (patch_dxil.apply_cloud_untile): each lookup's x and z
+    coordinates are (position - Global[51] + offset) * scale, the offset from the Earth-fixed
+    position (Global[110..112]) by UNTILE_WAVES, against float64; exactly stock with C0 = 0.
+    Returns the worst error in metres."""
+    groups = P.find_noise_lookups(P.Ir(stock))
+    rng = np.random.default_rng(7)
+    G = np.zeros((300, 4))
+    G[51] = (-3712.5, 52113.0, 1287.25, 307200.0)
+    # a planet frame from a capture near EKCH (world -> unit sphere, the camera in .w)
+    G[110] = (1.308447e-07, 8.637934e-08, -5.639204e-12, 0.5522037)
+    G[111] = (-1.279492e-08, 1.937121e-08, -1.550573e-07, 0.1238358)
+    G[112] = (-8.600219e-08, 1.302749e-07, 2.337183e-08, 0.8272431)
+    seeds = {}
+    pos = {}
+    for g in groups:
+        xyz = np.stack([rng.uniform(-200e3, 200e3, N), rng.uniform(-10e3, 5e3, N), rng.uniform(-200e3, 200e3, N)], -1)
+        for i in range(3):
+            seeds[g["pos"][i]] = xyz[:, i].astype(F)
+        pos[g["w"]] = xyz.astype(F).astype(np.float64)
+    worst = 0.0
+    for c0 in (0.0, 1.0):
+        cloud = np.zeros((P.CLOUD_PARAMS_SIZE // 16, 4))
+        cloud.flat[0] = c0
+        cbs = {4800: G.astype(F), "b1 space50": cloud, "b0 space50": np.zeros((4, 4))}
+        got, want = Evaluator(patched, cbs, seeds), Evaluator(stock, cbs, seeds)
+        for g in groups:
+            p = pos[g["w"]]
+            planet = np.stack([p @ G[110 + r][:3] + G[110 + r][3] for r in range(3)], -1)
+            off = {0: 0.0, 2: 0.0}
+            for axis, amp, wave, direc, phase in P.UNTILE_WAVES:
+                k = np.array(direc) / np.linalg.norm(direc) * P.EARTH_RADIUS_M / wave
+                off[axis] = off[axis] + amp * np.sin(2 * np.pi * ((planet @ k + phase) % 1.0))
+            for c in g["coords"]:
+                scale = float(P.literal_value(c[3]))
+                for axis in (0, 1, 2):
+                    value = got(c[axis]).astype(np.float64)
+                    if c0 <= 0 or axis == 1:
+                        if not np.array_equal(value.astype(F), want(c[axis])):
+                            failures.append(f"untile {c[axis]}: {'C0 = 0' if c0 <= 0 else 'y'} but not stock")
+                        continue
+                    ref = (p[:, axis] - G[51][axis] + off[axis]) * scale
+                    err = float(np.abs(value - ref).max()) / scale
+                    worst = max(worst, err)
+                    if err > 0.5:
+                        failures.append(f"untile {c[axis]}: off by {err:.2f} m")
+    return worst
 
 
 def check(crc: str, stock: str) -> list[str]:
@@ -504,6 +578,14 @@ def check(crc: str, stock: str) -> list[str]:
         dir_names, light_names = cos_ops[:3], cos_ops[3:]
     t_name = P.find_ap_depth(ir)
     ramp_x = np.linspace(-1.0, 2.0, N).astype(F)
+    # the view march's step (m): its ramp is sharpened no steeper than max(160, step) / step,
+    # and its extinction is at most OPTICAL_STEP_TAU per step
+    _, step_name = P.view_march_step(ir, edges["ramps"][0][0])
+    step = np.concatenate([[20.0, 160.0, 400.0], rng.uniform(15, 450, N - 3)]).astype(F)
+    den = P.Ir(stock).lines[P.Ir(stock).defs[P.view_march_step(ir, edges["ramps"][0][0])[0]]]
+    floor = float(P.literal_value(re.search(r"float ([0-9.e+-]+|0x[0-9A-F]+)[,)]", den)[1]))
+    q = np.maximum(floor, step.astype(np.float64)) / step.astype(np.float64)
+    cap = P.OPTICAL_STEP_TAU / step.astype(np.float64)
     softs = []
     for x, quarter in ms["softs"]:
         out = soft_output(ir, quarter)
@@ -544,7 +626,7 @@ def check(crc: str, stock: str) -> list[str]:
         cloud = np.zeros((P.CLOUD_PARAMS_SIZE // 16, 4))
         cloud.flat[:len(c)] = c
         cbs = {"b1 space50": cloud, "b0 space50": np.zeros((4, 4))}
-        seeds = {ms["s"]: s, **rain, opt["sigma"]: sigma, opt["height"]: height, **dseeds}
+        seeds = {ms["s"]: s, **rain, opt["sigma"]: sigma, opt["height"]: height, **dseeds, step_name: step}
         for _, cosname, *_ in blends:
             seeds[cosname] = cos
         for x, _ in softs:
@@ -624,13 +706,14 @@ def check(crc: str, stock: str) -> list[str]:
         # boundary ramps
         x64 = ramp_x.astype(np.float64)
         stock_ramp = np.clip(1.5 - np.exp2(x64 * P.literal_value(P.EDGE_SLOPE)), 0, 1)
-        ref = np.clip((stock_ramp - 0.5) * (1 + sharp) + 0.5, 0, 1)
-        for x, ramp in edges["ramps"]:
+        for r, (x, ramp) in enumerate(edges["ramps"]):
             value = got(ramp).astype(np.float64)
             if sharp <= 0:
                 if not np.array_equal(value.astype(F), want(ramp)):
                     failures.append(f"{tag} {ramp}: edges off but not stock")
                 continue
+            slope = np.minimum(1 + sharp, q) if r == 0 else 1 + sharp
+            ref = np.clip((stock_ramp - 0.5) * slope + 0.5, 0, 1)
             err = float(np.nan_to_num(np.abs(value - ref), nan=np.inf).max())
             if err > 1e-5:
                 failures.append(f"{tag} {ramp}: abs. error max {err:.1e}")
@@ -651,7 +734,7 @@ def check(crc: str, stock: str) -> list[str]:
             ice = (clamp(c[19], 0.0, 20.0) if c[19] > 0 else 1.0) * s64
             h_ice = c[18] if c[18] > 0 else P.OPTICAL_ICE_DEFAULT_M
             wi = np.clip((h64 - h_ice + P.OPTICAL_ICE_BLEND_M) / P.OPTICAL_ICE_BLEND_M, 0, 1)
-            ref = ramp_v.astype(np.float64) * (liquid + wi * (ice - liquid))
+            ref = ramp_v.astype(np.float64) * np.minimum(liquid + wi * (ice - liquid), cap)
             # relative to 1e-5/m at least (products near a cloud's edge are ~0), and to the liquid
             # term's float32 resolution: the ice blend is a lerp, so near the ice side its error
             # is that of the (much larger) liquid value
@@ -697,6 +780,23 @@ def check(crc: str, stock: str) -> list[str]:
                 if err > 2e-5:
                     failures.append(f"{tag} {site['s2']}: finer octave abs. error max {err:.1e}")
     # cloud types: the view ramp and the optical thickness by the grid's weights
+    puff_products = [(e, P.Ir(patched).def_name(i)) for i, l in enumerate(patched.splitlines())
+                     for e in ("%mod.ty.e8", "%mod.ty.e1") if l.endswith(f"= fmul fast float {e}, %mod.ty.pf")]
+    if not any(e == "%mod.ty.e8" for e, _ in puff_products):
+        failures.append("types: the view march's 8 km erosion octave isn't scaled by the puff factor")
+    cirrus = {}
+    for i, l in enumerate(patched.splitlines()):
+        if l.endswith("= select i1 %mod.ci.on, float %mod.ci.alt, float %mod.ci.a0"):
+            cirrus["alt"] = P.Ir(patched).def_name(i)
+        if l.endswith("= call float @dx.op.binary.f32(i32 35, float %mod.ci.c0, float %mod.ci.cov)"):
+            cirrus["cov"] = P.Ir(patched).def_name(i)
+    band = "no cirrus band" not in summary  # (20 variants have no cirrus band)
+    if band and sorted(cirrus) != ["alt", "cov"]:
+        failures.append(f"types: the cirrus band isn't linked to the anvils ({sorted(cirrus)})")
+    # the storm towers' sky light: the light volume's sums of the ambient's visibilities (stock names)
+    lv_sums = P.find_light_volume_sums(ir)
+    if not lv_sums or "%mod.sa.lf = " not in patched:
+        failures.append("types: the towers' sky light isn't on the light volume")
     words, grid = types_buffer(rng)
     bad_magic, _ = types_buffer(np.random.default_rng(3), magic=P.TYPES_MAGIC ^ 1)
     ramp0 = edges["ramps"][0][1]
@@ -712,7 +812,7 @@ def check(crc: str, stock: str) -> list[str]:
         plain = np.zeros((P.CLOUD_PARAMS_SIZE // 16, 4))
         plain.flat[:len(c)] = untyped
         seeds = {ms["s"]: s, **rain, opt["sigma"]: sigma, opt["height"]: height, **dseeds, LV: np.ones(N, F),
-                 edges["depth"]: depth, t_name: dist.astype(F)}
+                 edges["depth"]: depth, t_name: dist.astype(F), step_name: step}
         for _, cosname, *_ in blends:
             seeds[cosname] = cos
         for x, _ in softs:
@@ -723,6 +823,12 @@ def check(crc: str, stock: str) -> list[str]:
         for x, _ in edges["ramps"]:
             seeds[x] = ramp_x
         tag = f"types C={c}"
+        for e_name, _ in puff_products:  # (the octaves themselves need the march's position)
+            seeds[e_name] = rng.uniform(-0.2, 0.1, N).astype(F)
+        seeds["%mod.ci.a0"] = np.full(N, 12000.0, F)  # (MSFS's band and cover: the stock cbuffer and t8)
+        seeds["%mod.ci.c0"] = rng.uniform(0, 1, N).astype(F)
+        for name in (lv_sums or ())[:2]:
+            seeds[name] = rng.uniform(0, 2 * lv_sums[2], N).astype(F)  # (n taps, each up to ~1.82)
         base = Evaluator(patched, {"b1 space50": plain, "b0 space50": mod}, seeds, sampler=fine_sampler, buffer=words)
         want_prod, want_ramp = base(opt["prod"]), base(ramp0)
         # off: without bit 7, with a wrong magic, with C23 = 0: exactly as without types
@@ -733,8 +839,42 @@ def check(crc: str, stock: str) -> list[str]:
             if not (np.array_equal(off(opt["prod"]), want_prod) and np.array_equal(off(ramp0), want_ramp)):
                 failures.append(f"{tag}: types off ({what}) but not as without them")
         got = Evaluator(patched, {"b1 space50": cloud, "b0 space50": mod}, seeds, sampler=fine_sampler, buffer=words)
-        T, m, sharp = types_ref(c, grid, tu, tv, tw)
-        ref_ramp = np.where(sharp <= 0, stock_ramp, np.clip((stock_ramp - 0.5) * (1 + sharp) + 0.5, 0, 1))
+        T, m, sharp, puff, cov, lev, mark, mbase = types_ref(c, grid, tu, tv, tw)
+        # the towers' sky light: the floor n CB_SIDE_AMBIENT mark sat((h - base) / ramp), and the
+        # light volume's sums raised to it exactly
+        if lv_sums:
+            lf = lv_sums[2] * P.CB_SIDE_AMBIENT * mark * np.clip((height.astype(np.float64) - mbase)
+                                                                  / P.CB_SIDE_RAMP_M, 0, 1)
+            err = float(np.abs(got("%mod.sa.lf").astype(np.float64) - lf).max())
+            if err > 1e-4:
+                failures.append(f"{tag} %mod.sa.lf: towers' sky light abs. error max {err:.1e}")
+            for i, name in enumerate(lv_sums[:2]):
+                if not np.array_equal(got(f"%mod.sa.v{i}"), np.maximum(got(name), got("%mod.sa.lf"))):
+                    failures.append(f"{tag} %mod.sa.v{i}: the light volume's {name} isn't raised to the floor")
+        # the anvils' cover and level, and MSFS's cirrus band centred on it / covered as much
+        got_cov = got("%mod.ci.cov").astype(np.float64)
+        err = float(np.abs(got_cov - cov).max())
+        if err > 2e-5:
+            failures.append(f"{tag} %mod.ci.cov: anvil cover abs. error max {err:.1e}")
+        on = cov > 0.02
+        err = float((np.abs(got("%mod.ci.alt").astype(np.float64) - lev) / lev)[on].max()) if on.any() else 0.0
+        if err > 1e-5:
+            failures.append(f"{tag} %mod.ci.alt: anvil level rel. error max {err:.1e}")
+        ci_on = got_cov > P.CI_MIN_COV
+        if band and sorted(cirrus) == ["alt", "cov"]:
+            if not np.array_equal(got(cirrus["alt"]), np.where(ci_on, got("%mod.ci.alt"), got("%mod.ci.a0"))):
+                failures.append(f"{tag} {cirrus['alt']}: the cirrus band isn't centred on the anvils")
+            if not np.array_equal(got(cirrus["cov"]), np.maximum(got("%mod.ci.c0"), got("%mod.ci.cov"))):
+                failures.append(f"{tag} {cirrus['cov']}: the cirrus cover isn't raised to the anvils'")
+        # the puffs: the factor, and the view march's two erosion octaves scaled by it exactly
+        err = float(np.abs(got("%mod.ty.pf").astype(np.float64) - puff).max())
+        if err > 2e-5:
+            failures.append(f"{tag} %mod.ty.pf: puff factor abs. error max {err:.1e}")
+        for e_name, out_name in puff_products:
+            if not np.array_equal(got(out_name), (got(e_name) * got("%mod.ty.pf")).astype(F)):
+                failures.append(f"{tag} {out_name}: the erosion octave isn't scaled by the puff factor")
+        ref_ramp = np.where(sharp <= 0, stock_ramp,
+                            np.clip((stock_ramp - 0.5) * np.minimum(1 + sharp, q) + 0.5, 0, 1))
         err = float(np.nan_to_num(np.abs(got(ramp0).astype(np.float64) - ref_ramp), nan=np.inf).max())
         if err > 2e-5:
             failures.append(f"{tag} {ramp0}: typed view ramp abs. error max {err:.1e}")
@@ -755,7 +895,8 @@ def check(crc: str, stock: str) -> list[str]:
             ice_w = np.clip((h64 - h_ice + P.OPTICAL_ICE_BLEND_M) / P.OPTICAL_ICE_BLEND_M, 0, 1)
         # (against the shader's ramp, checked above: sharpening by up to 9 amplifies its rounding)
         ramp_got = got(ramp0).astype(np.float64)
-        ref = ramp_got * (liquid + ice_w * (ice - liquid))
+        blend = liquid + ice_w * (ice - liquid)
+        ref = ramp_got * (blend if c[16] <= 0 or c0 <= 0 else np.minimum(blend, cap))
         floor = np.maximum(1e-5, 1e-3 * np.abs(ramp_got * liquid))
         err = np.abs(got(opt["prod"]).astype(np.float64) - ref) / np.maximum(np.abs(ref), floor)
         e = float(np.nan_to_num(err, nan=np.inf).max())
@@ -765,9 +906,11 @@ def check(crc: str, stock: str) -> list[str]:
     worst_shadow = check_shadow(patched, dir_names, light_names, t_name, ms["s"], failures)
     worst_shadow = max(worst_shadow, check_shadow_map(patched, dir_names, light_names, t_name, ms["s"], failures))
     check_light_volume(stock, patched, failures)
+    worst_untile = check_untile(stock, patched, failures)
     print(f"{'FAIL' if failures else 'PASS'} {crc}: {len(blends)} phase blend(s), sun phase {ms['blend']}, "
           f"{len(softs)} soft transmittance(s), {len(edges['ramps'])} edge ramp(s); "
-          f"worst p99.9 rel. error {worst:.1e}; shadow max abs. error {worst_shadow:.1e}")
+          f"worst p99.9 rel. error {worst:.1e}; shadow max abs. error {worst_shadow:.1e}; "
+          f"untiling max error {worst_untile:.2f} m")
     return failures
 
 

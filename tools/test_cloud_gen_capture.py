@@ -81,7 +81,7 @@ UN = {12: math.cos, 13: math.sin, 25: lambda x: 1 / math.sqrt(x) if x > 0 else m
       7: lambda x: min(max(x, 0.0), 1.0), 24: lambda x: math.sqrt(x) if x >= 0 else math.nan,
       23: lambda x: math.log2(x) if x > 0 else (-math.inf if x == 0 else math.nan),
       21: lambda x: 2.0 ** x if x < 128 else math.inf, 22: lambda x: x - math.floor(x), 6: abs,
-      27: math.floor, 28: math.ceil, 29: math.trunc}
+      27: math.floor, 28: math.ceil, 29: math.trunc, 16: math.asin, 17: math.atan}
 M32 = 0xFFFFFFFF
 
 
@@ -232,6 +232,9 @@ class Machine:
         m = re.match(r"fptoui float (\S+) to i32", rhs)
         if m:
             return int(v(m[1])) & M32
+        m = re.match(r"fptosi float (\S+) to i32", rhs)
+        if m:
+            return int(v(m[1])) & M32  # (two's complement)
         m = re.match(r"(add|sub|mul|and|or|xor|shl|lshr|udiv|urem)(?: nuw)?(?: nsw)? i32 (\S+), (\S+)", rhs)
         if m:
             a, b = int(v(m[2])) & M32, int(v(m[3])) & M32
@@ -319,6 +322,7 @@ STATIONS = [
     [None, 0.4, [(1200.0, 1800.0, 0.58, 1)], 3700.0],
 ]
 STATION_TIDS = {1: (300, 220), 2: (200, 330)}
+NOW = 2500.0  # (the storm cells' check: Global[0].y)
 STRENGTH, RADIUS_KM = 0.8, 20.0
 
 
@@ -361,8 +365,9 @@ def anchor_cloud(strength=STRENGTH):
     return c
 
 
-def anchor_rows(layers, ceiling):
-    """A station's 32 rows (C, a, deck, smooth), as the add-on builds them (cloud_anchor.h rows)."""
+def anchor_rows(layers, ceiling, storm=0.0):
+    """A station's 32 rows (C, a, deck, smooth), as the add-on builds them (cloud_anchor.h rows); the
+    last is the storm cells' evidence (storm, 1, 0, 0) (cloud_anchor.h kStormRow)."""
     def inside(b, t, k):
         if not 0 <= k < P.WEATHER_SLICES:
             return False
@@ -382,7 +387,7 @@ def anchor_rows(layers, ceiling):
                 st = max(st, 1.0 if kind in (1, 3) else 0.0)
                 sm = max(sm, 1.0 if kind == 3 and not top else 0.0)
         a = 1.0 if covered or (centre < ceiling and k < P.WEATHER_SLICES) else 0.0
-        rows.append((best, a, st, sm))
+        rows.append((best, a, st, sm) if k < P.ANCHOR_ROWS - 1 else (storm, 1.0, 0.0, 0.0))
     return rows
 
 
@@ -395,9 +400,9 @@ def with_table(stations, magic=P.ANCHOR_MAGIC):
     buf = bytearray(16 << 20)
     o = P.ANCHOR_TABLE
     struct.pack_into("<4I", buf, o, magic, len(stations), P.ANCHOR_STATIONS, 0)
-    for i, ((lat, lon), wt, layers, ceiling) in enumerate(stations):
+    for i, ((lat, lon), wt, layers, ceiling, *storm) in enumerate(stations):
         struct.pack_into("<4f", buf, o + 16 + 16 * i, *unit(lat, lon), wt)
-        for k, row in enumerate(anchor_rows(layers, ceiling)):
+        for k, row in enumerate(anchor_rows(layers, ceiling, *storm)):
             struct.pack_into("<4f", buf, o + 16 + 16 * P.ANCHOR_STATIONS + 16 * (P.ANCHOR_ROWS * i + k), *row)
     return buf
 
@@ -632,6 +637,392 @@ def check_specks(stock_p, patched_p, values, noise, t1_name, h_name, lut, tex, c
           f"volume vs model {worst:.1e}" + ("" if generator_model is not None else " (no model)"))
 
 
+class RainTex(Tex):
+    """A rain map (mm/h) with convective areas and gaps a few tens of km across."""
+
+    def sample(self, *c, lod=0.0):
+        u, v = c[0], c[1]
+        r = f32(max(0.0, 40.0 + 45.0 * math.sin(40.0 * u + 1.3 + self.reg) * math.cos(37.0 * v + 0.4)))
+        return (r, r, r, r)
+
+
+def mix32(a):
+    """patch_dxil.apply_cb_towers' integer hash finish (wrapping 32-bit)."""
+    a ^= a >> 15
+    a = (a * P.CB_HASH[2]) & M32
+    a ^= a >> 12
+    a = (a * P.CB_HASH[3]) & M32
+    return a ^ (a >> 15)
+
+
+def towers_ref(p, uv, rows, du, dv, lerp, terrain, rain, wind, msfs=None, now=0.0, stations=()):
+    """The storm cells' (x, y) per slice, the nearest-to-threshold margin, the number of cells and
+    the stratiform shares, float64, from the column's planet coordinates p, map coordinates uv,
+    the planet rows' X and Z coefficients rows[i] = (cx, cz), the map's per-metre coefficients du,
+    dv, the rain blend, the terrain, the wind (P[5].xy), MSFS's own shape per slice, msfs =
+    (s_k after the specks, N_k) (None: no MSFS cloud, N 0.5), the time (Global[0].y) and the stations'
+    storm evidence [(unit vector, weight x evidence)]; rain(u, v) samples the two keyframes. Also the
+    anvils' (level, cover) and the towers' (mark, base) for the renderer."""
+    s_fin, noise = msfs if msfs is not None else ([-1.0] * P.WEATHER_SLICES, [0.5] * P.WEATHER_SLICES)
+    n = math.sqrt(sum(c * c for c in p))
+    u = [c / n for c in p]
+    lat = math.degrees(math.asin(max(-1.0, min(1.0, u[2]))))
+    lon = math.degrees(math.atan2(p[1], p[0]))
+    trop = P.tropopause_m(lat)
+    # the base: MSFS's lowest cloud in the column within range of the terrain
+    base = terrain + P.CB_BASE_AGL_M
+    for k in reversed(range(P.WEATHER_SLICES)):
+        if s_fin[k] > 0 and P.slice_bottom(k) - terrain < P.CB_BASE_RANGE_M:
+            base = P.slice_bottom(k)
+    base = max(base, terrain + P.CB_BASE_MIN_M)
+    v = math.hypot(*wind)
+    wd = (1.0, 0.0) if v * v < 1e-4 else (wind[0] / v, wind[1] / v)
+    s = min(v / P.CB_WIND_FULL, 1.0)
+    dlat = P.CB_CELL_KM / P.EARTH_KM_PER_DEG
+    ri = lat / dlat
+    i0 = math.floor(ri)
+    margin = min(ri - i0, 1 - (ri - i0))
+    towers, anvils, marks = [], [], []
+    for row in (i0 - 1, i0, i0 + 1):
+        dlon = dlat / max(math.cos(math.radians((row + 0.5) * dlat)), 0.1)
+        rj = lon / dlon
+        j0 = math.floor(rj)
+        margin = min(margin, rj - j0, 1 - (rj - j0))
+        for col in (j0 - 1, j0, j0 + 1):
+            # the cell's own offset in time, then its current generation's hash
+            a0 = ((row * P.CB_HASH[0]) + (col * P.CB_HASH[1])) & M32
+            offset = (mix32(a0 ^ P.CB_SALT_TIME) & 0xFFFF) / 65536
+            tc = now + offset * P.CB_PERIOD_S
+            gen = math.floor(tc / P.CB_PERIOD_S)
+            phase = tc - gen * P.CB_PERIOD_S
+            margin = min(margin, abs(tc / P.CB_PERIOD_S - round(tc / P.CB_PERIOD_S)) * 1e3)  # (a generation's edge)
+            a = (a0 + gen * P.CB_HASH_GEN) & M32
+            h = []
+            for salt in P.CB_SALTS:
+                b = mix32(a ^ (salt & M32))
+                h += [(b & 0xFFFF) / 65536, (b >> 16) / 65536]
+            clat = math.radians((row + P.CB_JITTER[0] + P.CB_JITTER[1] * h[0]) * dlat)
+            clon = math.radians((col + P.CB_JITTER[0] + P.CB_JITTER[1] * h[1]) * dlon)
+            c = (math.cos(clat) * math.cos(clon), math.cos(clat) * math.sin(clon), math.sin(clat))
+            d = [c[k] - u[k] for k in range(3)]
+            R2 = P.EARTH_RADIUS_M ** 2
+            wx = R2 * sum(rows[k][0] * d[k] for k in range(3))
+            wz = R2 * sum(rows[k][1] * d[k] for k in range(3))
+            k2, k3 = rain(uv[0] + du[0] * wx + du[1] * wz, uv[1] + dv[0] * wx + dv[1] * wz)
+            rate = k2 + lerp * (k3 - k2)
+            # the evidence: the stations' reports near its centre, else very heavy rain
+            est = max((se * (1 - smoothstep(math.dist(c, sv) * P.EARTH_RADIUS_M / 1000.0, *P.CB_EVIDENCE_KM))
+                       for sv, se in stations), default=0.0)
+            evidence = max(est, smoothstep(rate, *P.CB_RAIN_EVIDENCE) * P.CB_RAIN_EVIDENCE_MAX)
+            exist = min(max((evidence * P.CB_CHANCE - h[2]) / P.CB_EXIST_SOFT, 0.0), 1.0)
+            stage = phase / (P.CB_LIFE_S[0] + (P.CB_LIFE_S[1] - P.CB_LIFE_S[0]) * h[21])
+            margin = min(margin, abs(evidence * P.CB_CHANCE - h[2]) * 1e3, abs(stage - 1.0) * 1e3,
+                         abs(stage - P.CB_ANVIL_STAGE) * 1e3)
+            if not (exist > 0 and stage < 1.0):
+                continue
+            w = max(smoothstep(rate, *P.CB_RAIN), est * P.CB_EVIDENCE_W)
+            size = h[3] ** P.CB_SIZE_POW
+            radius = (P.CB_RADIUS_M[0] + size * (P.CB_RADIUS_M[1] - P.CB_RADIUS_M[0])) * (0.7 + 0.3 * w)
+            reported = P.CB_VIGOUR_RAIN + (1 - P.CB_VIGOUR_RAIN) * min(max(est * 1.25, 0.0), 1.0)
+            vigour = w * (P.CB_VIGOUR[0] + P.CB_VIGOUR[1] * size) * reported
+            thunder = smoothstep(est, *P.CB_THUNDER)
+            vigour = max(vigour, P.CB_THUNDER_VIGOUR * thunder)
+            # its type: the weights' running sums are the pick's soft edges
+            tw = P.CB_TYPE_W
+            weights = [tw["single"][0] + tw["single"][1] * (1 - s), tw["sheared"][0] + tw["sheared"][1] * s,
+                       tw["multicell"][0] + tw["multicell"][1] * smoothstep(evidence, *P.CB_TYPE_HEAVY),
+                       tw["supercell"] * thunder * smoothstep(s, *P.CB_TYPE_SHEAR) * smoothstep(size, *P.CB_TYPE_BIG)]
+            edges = [sum(weights[:i + 1]) for i in range(len(weights))]
+            pick = h[12] * (edges[-1] + tw["embedded"])
+            steps = [min(max((pick - c) / P.CB_TYPE_SOFT + 0.5, 0.0), 1.0) for c in edges]
+            ty = {k: vals[0] + sum(g * (b - a) for g, a, b in zip(steps, vals, vals[1:]))
+                  for k, vals in P.CB_TYPE_PARAMS.items()}
+            # its lean, and the anvil's and the shelf's largest half-widths within the budget
+            lean = P.CB_TILT_M * s * ty["tilt"]
+            tilt = (lean * wd[0], lean * wd[1])
+            anvil_cap = (P.CB_BUDGET_M - lean) / ((1 + P.CB_ANVIL_DOWN * ty["down"] * s) * P.CB_LOBE_MAX * P.CB_FRINGE)
+            shelf_cap = (P.CB_BUDGET_M - P.CB_SHELF_SHIFT * lean) / ((1 + P.CB_SHELF_DOWN * s)
+                                                                    * (P.CB_LOBE_MAX + P.CB_SHELF_LOBE1))
+            share = (P.CB_TOP_SHARE[0] + vigour * (P.CB_TOP_SHARE[1] - P.CB_TOP_SHARE[0])
+                     + P.CB_TOP_JITTER * (2 * h[20] - 1))
+            level = min(trop * share, P.CB_TOP_MAX_M)
+            span = max(level - base, 1.0)
+            # the life: birth, growth, decay, death (weaker evidence: younger and older at once)
+            birth = smoothstep(stage, 0.0, P.CB_BIRTH) * min(max(exist * 3, 0.0), 1.0)
+            grow = smoothstep(stage, 0.0, P.CB_STAGE[0]) * exist
+            decay = max(smoothstep(stage, P.CB_STAGE[1], 1.0), 1 - exist)
+            death = 1 - smoothstep(stage, P.CB_DEATH, 1.0)
+            full = min(trop * share + vigour * grow * (1 - decay) * P.CB_OVERSHOOT_M * ty["overshoot"],
+                       P.CB_TOP_MAX_M)
+            height = (P.CB_YOUNG_TOP * birth + (1 - P.CB_YOUNG_TOP) * grow) * (1 - P.CB_OLD_SINK * decay) * death
+            top = base + (full - base) * height
+            dome = min(0.3 * (top - base), P.CB_DOME_M)
+            rt0 = max(radius * ty["radius"] * (1 - P.CB_OLD_THIN * decay) * death, 50.0)
+            q = (-wx, -wz)  # the column from the centre
+            # the updraft tower: leaning downwind and widening up to the anvil level, with bulges;
+            # wall cloud
+            wall = P.CB_WALL_M * ty["wall"] * min(max(1 - (math.hypot(*q) / (0.5 * rt0)) ** 2, 0.0), 1.0)
+            bulges = [(n_ang, lam, amp * ty["bulge"], 2 * math.pi * h[13 + j], 2 * math.pi * h[18 + j] if n_ang else 0.0)
+                      for j, (n_ang, lam, amp) in enumerate(P.CB_BULGES)]
+            # the mark for the renderer's sky light: 1 near the axis at half the height, fading out
+            mk = math.hypot(q[0] - 0.5 * tilt[0], q[1] - 0.5 * tilt[1])
+            marks.append(min(max((P.CB_SIDE_REACH * rt0 - mk) / P.CB_SIDE_FADE_M + 1, 0.0), 1.0) * birth)
+
+            def tower(z, q=q, rt0=rt0, span=span, top=top, dome=dome, wall=wall, bulges=bulges, tilt=tilt,
+                      band=4 * P.CB_BAND[0] * ty["bands"]):
+                f = min(max((z - base) / span, 0.0), 1.0)
+                px, pz = q[0] - f * tilt[0], q[1] - f * tilt[1]
+                rk = math.hypot(px, pz)
+                theta = math.atan2(pz, px)
+                bulge = sum(amp * math.sin(2 * math.pi * z / lam + ph)
+                            * (math.cos(n_ang * theta - ps) if n_ang else 1.0)
+                            for n_ang, lam, amp, ph, ps in bulges)
+                bulge += band * f * (1 - f) * math.cos(2 * math.pi * z / P.CB_BAND[1])
+                return min(rt0 * (1 + P.CB_WIDEN * f) * (1 + bulge) - rk, top - dome * (rk / rt0) ** 2 - z,
+                           z - max(base - wall, terrain + P.CB_WALL_MIN_M))
+            parts = [tower]
+            # the flanking line: from upwind (random as the wind falls calm), turned to a random side
+            ang = 2 * math.pi * h[7]
+            b = (s * -wd[0] + (1 - s) * math.cos(ang), s * -wd[1] + (1 - s) * math.sin(ang))
+            bn = math.hypot(*b)
+            b = (b[0] / bn, b[1] / bn)
+            turn = math.radians(P.CB_FLANK_TURN[0] + P.CB_FLANK_TURN[1] * ((2 * h[4]) % 1.0))
+            turn = turn if h[4] < 0.5 else -turn
+            fd = (b[0] * math.cos(turn) - b[1] * math.sin(turn), b[0] * math.sin(turn) + b[1] * math.cos(turn))
+            for i in range(P.CB_FLANK_N):
+                f = (h[5] + P.CB_GOLDEN * i) % 1.0
+                g = (h[6] + P.CB_GOLDEN * i) % 1.0
+                for x in (h[5] + P.CB_GOLDEN * i, h[6] + P.CB_GOLDEN * i):
+                    margin = min(margin, abs((x + 0.5) % 1.0 - 0.5) * 1e3)  # (fract's wrap)
+                jf = 1 + P.CB_FLANK_JITTER * (2 * f - 1)
+                jg = 1 + P.CB_FLANK_JITTER * (2 * g - 1)
+                rho = radius * ty["flank"] * jg * (P.CB_FLANK_FROM[0] + P.CB_FLANK_FROM[1] * i)
+                rt = radius * (0.5 + 0.5 * ty["flank"]) * jf * (P.CB_FLANK_RADIUS[0] + P.CB_FLANK_RADIUS[1] * i)
+                th = span * height * ty["flank_top"] * jf * (P.CB_FLANK_TOP[0] + P.CB_FLANK_TOP[1] * i)
+                ri = math.hypot(q[0] - fd[0] * rho, q[1] - fd[1] * rho)
+                tt = base + th - min(0.3 * th, P.CB_DOME_M) * (ri / rt) ** 2
+                parts.append(lambda z, sd=rt - ri, t=tt: min(sd, t - z, z - base))
+            # the lobed ellipses (anvil, mid-level shelf): the normalised radius over the outline
+            lobe_amp = 0.5 + 0.5 * h[11]
+
+            def lobed_radius(cx, cz, half, down, back, offsets, one=None, q=q, lobe_amp=lobe_amp, h=h):
+                a = (q[0] - cx, q[1] - cz)
+                along = a[0] * wd[0] + a[1] * wd[1]
+                cross = a[1] * wd[0] - a[0] * wd[1]
+                ea = along / (half * (1 + (down if along > 0 else back) * s))
+                ec = cross / half
+                th = math.atan2(ec, ea)
+                m = lobe_amp * sum(amp * math.cos(n * th - (2 * math.pi * h[8 + i] + off))
+                                   for i, ((n, amp), off) in enumerate(zip(P.CB_LOBES, offsets)))
+                if one:
+                    m += one[0] * math.cos(th - one[1])
+                return math.hypot(ea, ec) / (1 + m)
+            # the anvil around the leaning top and its cirrus fringe: none while growing
+            if stage >= P.CB_ANVIL_STAGE:
+                agrow = (smoothstep(stage, P.CB_ANVIL_STAGE, P.CB_ANVIL_STAGE + P.CB_ANVIL_GROW)
+                         * min(max(exist * 2, 0.0), 1.0) * death)
+                ac = min(radius * ty["anvil"] * (P.CB_ANVIL_SCALE[0] + P.CB_ANVIL_SCALE[1] * w)
+                         * (1 + P.CB_OLD_SPREAD * decay), anvil_cap)
+                ac = max(ac * (0.3 + 0.7 * agrow), 500.0)
+                en = lobed_radius(tilt[0], tilt[1], ac, P.CB_ANVIL_DOWN * ty["down"], -P.CB_ANVIL_BACK * ty["back"],
+                                  (0.0, 0.0, 0.0))
+                anvils.append((min(max(ac * (P.CB_FRINGE - en) / P.CB_CIRRUS_EDGE_M, 0.0), 1.0) * agrow, level))
+                thick = ((P.CB_ANVIL_H_M[0] + P.CB_ANVIL_H_M[1] * w) * ty["thick"]
+                         * (1 + P.CB_ANVIL_THICK_JITTER * (2 * h[17] - 1)) * agrow)
+                atop = level - P.CB_ANVIL_DROOP_M * en * en
+                abot = level - thick * (1 - P.CB_ANVIL_THIN * en * en)
+                strat = [(ac * (1 - en), atop, abot), (ac * (P.CB_FRINGE - en), atop, atop - agrow * P.CB_FRINGE_H_M)]
+            else:
+                strat = [(-1e9, -1e9, 0.0), (-1e9, -1e9, 0.0)]
+                anvils.append((0.0, level))
+            # the mid-level shelf, with a one-sided term
+            sh = min(radius * (P.CB_SHELF_SCALE[0] + P.CB_SHELF_SCALE[1] * w), shelf_cap)
+            en = lobed_radius(P.CB_SHELF_SHIFT * tilt[0], P.CB_SHELF_SHIFT * tilt[1], sh, P.CB_SHELF_DOWN, 0.0,
+                              P.CB_SHELF_PHASE, (P.CB_SHELF_LOBE1, 2 * math.pi * h[16]))
+            sthick = ((P.CB_SHELF_H_M[0] + P.CB_SHELF_H_M[1] * w) * ty["shelf"] * smoothstep(w, *P.CB_SHELF_W)
+                      * grow * (1 + P.CB_OLD_DEBRIS * decay) * death)
+            smid = base + ty["shelf_base"] * span + 0.5 * sthick
+            shalf = 0.5 * sthick * (1 - P.CB_SHELF_THIN * en * en)
+            strat.append((sh * (1 - en), smid + shalf, smid - shalf))
+            towers.append((parts, [lambda z, sd=sd, t=t, bo=bo: min(sd, t - z, z - bo) for sd, t, bo in strat]))
+    densities = (P.CB_ANVIL_B, P.CB_FRINGE_B, P.CB_SHELF_B)
+    norm = lambda d: min(max(d / P.CB_EDGE_M, -1.0), 1.0)  # noqa: E731
+    inside = lambda x: min(max(25 * x + 1, 0.0), 1.0)  # noqa: E731
+    out, raw, free = [], [], []
+    for k in range(P.WEATHER_SLICES):
+        hk = 15.625 * (k + 0.5) ** 2
+        xb = norm(max((p(hk) for parts, _ in towers for p in parts), default=-1e9)
+                  + P.CB_NOISE_M * (noise[k] - 0.5) * min(max((hk - base) / P.CB_NOISE_BASE_M, 0.0), 1.0))
+        xs = [norm(max((st[i](hk) for _, st in towers), default=-1e9)) for i in range(len(densities))]
+        b = max([inside(xb) * P.CB_DENSITY_B] + [inside(x) * d for x, d in zip(xs, densities)])
+        out.append((min(max(0.5 + 0.5 * max([xb] + xs), 0.0), 1.0), min(max(0.5 + 0.5 * math.sqrt(b), 0.0), 1.0)))
+        free.append(1 - inside(xb))
+        raw.append(inside(max(xs)) * free[-1])
+    # spread one slice up and down outside the bodies
+    shares = [max(raw[k], max(raw[j] for j in (k - 1, k + 1) if 0 <= j < len(raw)) * free[k])
+              for k in range(len(raw))]
+    # the anvils for the renderer's cirrus: the most-covering cell's (first of equals) level and cover
+    cov, alt = 0.0, None
+    for c, lev in anvils:
+        if alt is None or c > cov:
+            cov, alt = max(cov, c), lev
+    return out, margin, len(towers), shares, (alt, cov), (max(marks, default=0.0), base)
+
+
+def check_towers(stock, patched_p, tex, check):
+    """The cumulonimbus towers (patch_dxil.apply_cb_towers) under a convective rain map: each
+    slice's stored x and y are max(MSFS's, the tower's) against towers_ref (float64)."""
+    ir = P.Ir(stock)
+    planet = P.find_planet_direction(ir)
+    rain = P.find_rain_lookup(ir, stock)
+    _, h_name = P.column_terrain(ir, stock)
+    # MSFS's shape per slice (the patched names: the stock s_k is after the specks, %mod.sp{k}.s0 before)
+    sites = P.coverage_sites(ir, P.find_weather_values(ir))
+
+    def msfs(env):
+        return ([env[sites[k]["shape"]] for k in range(P.WEATHER_SLICES)],
+                [env[f"%mod.sp{k}.s0"] + env[sites[k]["L"]] - 0.25 for k in range(P.WEATHER_SLICES)])
+    orig = {}
+    for line in ir.lines:
+        m = re.match(r"\s+call void @dx\.op\.textureStore\.f32\(i32 67, %dx\.types\.Handle \S+, i32 \S+, i32 \S+, "
+                     r"i32 (\d+), float ([^,]+), float ([^,]+),", line)
+        if m:
+            orig[int(m[1])] = (m[2], m[3])
+    tex_r = {**tex, 2: RainTex(2, tex[2].dims), 3: RainTex(3, tex[3].dims)}
+    on = [0.0] * (P.CLOUD_PARAMS_SIZE // 4)
+    on[0], on[16], on[17] = 1.0, 2.0, 0.33
+    cb = constants(0, cloud=on)
+    G = cb[(0, 1)]
+    rows = [(G[110 + k][0], G[110 + k][2]) for k in range(3)]
+    Pc = cb[(0, 2)]
+    Pc[5][0], Pc[5][1] = 7.0, -4.0  # a wind (world X/Z, m/s): the cells lean and stream
+    G[0][1] = NOW  # (Global[0].y: s since the sim started, for the cells' life cycles)
+    cb_off = constants(P.DEBUG_STORMS_OFF, cloud=on)  # (the add-on's thunderstorms off: C32)
+    cb_off[(0, 2)][5][0], cb_off[(0, 2)][5][1] = 7.0, -4.0
+    cb_off[(0, 1)][0][1] = NOW
+    gated = 0
+    du, dv, lerp = (Pc[0][0], Pc[0][2]), (Pc[2][0], Pc[2][2]), Pc[6][1]
+    worst, columns, slices, skipped, n_towers, worst_share, flat = 0.0, 0, 0, 0, 0, 0.0, 0
+    worst_cov, covered, stored = 0.0, 0, 0
+    worst_mark, marked = 0.0, 0
+    seen = []
+    for tx in range(16, 500, 23):
+        for ty in range(20, 500, 37):
+            m = Machine(patched_p, cb, tex_r, bytearray(16 << 20))
+            out = m.run((tx, ty))
+            if len(out) != 32:
+                continue  # outside the disc
+            p = [m.env[c] for c in planet]
+            uv = (m.env[rain["u_name"]], m.env[rain["v_name"]])
+            seen.append((tx, ty, p))
+            want, margin, nt, shares, anvil, mark = towers_ref(p, uv, rows, du, dv, lerp, m.env[h_name],
+                                                  lambda u, v: (tex_r[2].sample(u, v)[0], tex_r[3].sample(u, v)[0]),
+                                                  (Pc[5][0], Pc[5][1]), msfs(m.env), NOW)
+            if margin < 2e-4:
+                skipped += 1  # (a cell edge or a chance threshold: float32 and float64 may differ)
+                continue
+            columns += 1
+            n_towers += nt
+            if gated < 6 and any(want[k][0] > 0.5 for k in range(P.WEATHER_SLICES)):
+                # with bit 8 the column is MSFS's own, and no stratiform shares
+                gated += 1
+                m_off = Machine(patched_p, cb_off, tex_r, bytearray(16 << 20))
+                out_off = m_off.run((tx, ty))
+                for k in range(P.WEATHER_SLICES):
+                    pre = (m_off.env[orig[k][0]], m_off.env[orig[k][1]])
+                    check(out_off[k][:2] == pre and m_off.env[f"%mod.cb.ty{k}"] == 0.0,
+                          f"({tx}, {ty}) slice {k}: thunderstorms off (bit 8) but {out_off[k][:2]} != {pre}")
+            for k in range(P.WEATHER_SLICES):
+                pre = (m.env[orig[k][0]], m.env[orig[k][1]])
+                exp = (max(pre[0], want[k][0]), max(pre[1], want[k][1]))
+                err = max(abs(out[k][0] - exp[0]), abs(out[k][1] - exp[1]))
+                worst = max(worst, err)
+                slices += want[k][0] > pre[0] + 0.01
+                check(err < 5e-4, f"({tx}, {ty}) slice {k}: towers {out[k][:2]} != {exp} (pre {pre})")
+                got = m.env[f"%mod.cb.ty{k}"]
+                worst_share = max(worst_share, abs(got - shares[k]))
+                flat += shares[k] > 0.5
+                # (the share ramps over 320 m of distance; the cell centres' float32 planet-vector
+                # differences leave ~1 m: 5e-3 is ~1.6 m)
+                check(abs(got - shares[k]) < 5e-3, f"({tx}, {ty}) slice {k}: stratiform share {got} != {shares[k]}")
+            # the anvils for the renderer's cirrus: cover and level, and (first thread of a cell, bit 7)
+            # where the type writer stores them
+            got_alt, got_cov = m.env["%mod.cb.calt"], m.env["%mod.cb.ccov"]
+            worst_cov = max(worst_cov, abs(got_cov - anvil[1]))
+            check(abs(got_cov - anvil[1]) < 5e-3, f"({tx}, {ty}): anvil cover {got_cov} != {anvil[1]}")
+            if anvil[1] > 0.01:
+                check(abs(got_alt - anvil[0]) < 1.0, f"({tx}, {ty}): anvil level {got_alt} != {anvil[0]}")
+            covered += anvil[1] > 0.5
+            # the towers' mark and the base, for the renderer's sky light
+            got_mark = m.env["%mod.cb.mark"]
+            worst_mark = max(worst_mark, abs(got_mark - mark[0]))
+            check(abs(got_mark - mark[0]) < 5e-3, f"({tx}, {ty}): tower mark {got_mark} != {mark[0]}")
+            check(abs(m.env["%mod.cb.mbase"] - mark[1]) < 1.0, f"({tx}, {ty}): base {m.env['%mod.cb.mbase']} != {mark[1]}")
+            marked += mark[0] > 0.5
+            if stored < 3 and tx % 4 == 0 and ty % 4 == 0 and anvil[1] > 0.05:
+                stored += 1
+                cb_ty = constants(P.DEBUG_BUFFER_TYPES, cloud=on)
+                cb_ty[(0, 2)][5][0], cb_ty[(0, 2)][5][1] = 7.0, -4.0
+                cb_ty[(0, 1)][0][1] = NOW
+                m_ty = Machine(patched_p, cb_ty, tex_r, bytearray(20 << 20))
+                m_ty.run((tx, ty))
+                a = P.ANVIL_REGION + 8 * ((ty // 4) * P.TYPES_N + tx // 4)
+                check(struct.unpack_from("<2f", m_ty.buf, a) == (m_ty.env["%mod.cb.calt"], m_ty.env["%mod.cb.ccov"]),
+                      f"({tx}, {ty}): the anvil grid holds {struct.unpack_from('<2f', m_ty.buf, a)}")
+                a = P.TOWER_REGION + 8 * ((ty // 4) * P.TYPES_N + tx // 4)
+                check(struct.unpack_from("<2f", m_ty.buf, a) == (m_ty.env["%mod.cb.mark"], m_ty.env["%mod.cb.mbase"]),
+                      f"({tx}, {ty}): the tower grid holds {struct.unpack_from('<2f', m_ty.buf, a)}")
+    check(slices > 0, "towers: no slice of the mock weather got a tower")
+    check(covered > 0 and stored > 0, f"towers: anvil cover in {covered} columns, {stored} stored in the grid")
+    check(marked > 0, "towers: no column marked for the sky light")
+    # with the stations' storm evidence (bit 6 and the table): thunder, CB and TCU reports at three
+    # of the columns above
+    picks = [seen[len(seen) // 4][2], seen[len(seen) // 2][2], seen[3 * len(seen) // 4][2]]
+    stations = [(tuple(np.array(v) / np.linalg.norm(v)), wt * ev)
+                for v, wt, ev in zip(picks, (1.0, 1.0, 0.6), (1.0, 0.7, 0.35))]
+    table = bytearray(16 << 20)
+    o = P.ANCHOR_TABLE
+    struct.pack_into("<4I", table, o, P.ANCHOR_MAGIC, 3, P.ANCHOR_STATIONS, 0)
+    for i, (v, wt, ev) in enumerate(zip(picks, (1.0, 1.0, 0.6), (1.0, 0.7, 0.35))):
+        struct.pack_into("<4f", table, o + 16 + 16 * i, *(np.array(v) / np.linalg.norm(v)), wt)
+        row = o + 16 + 16 * P.ANCHOR_STATIONS + 16 * (P.ANCHOR_ROWS * i + P.ANCHOR_ROWS - 1)
+        struct.pack_into("<4f", table, row, ev, 1.0, 0.0, 0.0)
+    cb_st = constants(P.DEBUG_BUFFER_16MB, cloud=on)
+    cb_st[(0, 2)][5][0], cb_st[(0, 2)][5][1] = 7.0, -4.0
+    cb_st[(0, 1)][0][1] = NOW
+    reported, worst_st = 0, 0.0
+    for tx, ty, _ in seen[::2]:
+        m = Machine(patched_p, cb_st, tex_r, bytearray(table))
+        out = m.run((tx, ty))
+        p = [m.env[c] for c in planet]
+        uv = (m.env[rain["u_name"]], m.env[rain["v_name"]])
+        st = [(sv, float(np.float32(se))) for sv, se in stations]
+        want, margin, nt, _, _, _ = towers_ref(p, uv, rows, du, dv, lerp, m.env[h_name],
+                                            lambda u, v: (tex_r[2].sample(u, v)[0], tex_r[3].sample(u, v)[0]),
+                                            (Pc[5][0], Pc[5][1]), msfs(m.env), NOW, st)
+        if margin < 2e-4:
+            continue
+        _, _, nt0, _, _, _ = towers_ref(p, uv, rows, du, dv, lerp, m.env[h_name],
+                                     lambda u, v: (tex_r[2].sample(u, v)[0], tex_r[3].sample(u, v)[0]),
+                                     (Pc[5][0], Pc[5][1]), msfs(m.env), NOW)
+        reported += nt > nt0
+        for k in range(P.WEATHER_SLICES):
+            pre = (m.env[orig[k][0]], m.env[orig[k][1]])
+            exp = (max(pre[0], want[k][0]), max(pre[1], want[k][1]))
+            err = max(abs(out[k][0] - exp[0]), abs(out[k][1] - exp[1]))
+            worst_st = max(worst_st, err)
+            check(err < 5e-4, f"stations: ({tx}, {ty}) slice {k}: towers {out[k][:2]} != {exp} (pre {pre})")
+    check(reported > 0, "towers: the stations' reports added no cell")
+    print(f"towers with stations' reports: {len(seen[::2])} columns, {reported} with more cells than from the "
+          f"rain alone; max error {worst_st:.1e}")
+    check(flat > 0, "towers: no stratiform (anvil, fringe, shelf) slice in the mock weather")
+    check(gated > 0, "towers: the thunderstorms-off flag (bit 8) wasn't checked")
+    print(f"towers: {columns} columns ({skipped} skipped at thresholds), {n_towers} tower candidates present, "
+          f"{slices} slices raised, {flat} stratiform, anvil cover in {covered} columns ({stored} stored), "
+          f"{marked} marked; max error {worst:.1e}, shares {worst_share:.1e}, anvil cover {worst_cov:.1e}, "
+          f"marks {worst_mark:.1e}")
+
+
 def check_layers(dxc, index, check):
     base = P.CLOUD_GEN_REGION
     lo = N // 2 - P.CG_VOL_N // 2
@@ -849,6 +1240,7 @@ def main():
     check_types_table(check)
     check_types(stock_p, patched_p, values, h_name, table, TEX_ANCHOR, check)
     check_specks(stock_p, patched_p, values, noise, t1_name, h_name, lut, TEX_ANCHOR, check)
+    check_towers(stock, patched_p, TEX_ANCHOR, check)
     # the cloud constants as the shader saw them, in the header
     cap = Machine(patched_p, constants(1 | P.DEBUG_BUFFER_16MB, cloud=anchor_cloud()), TEX, bytearray(table))
     cap.run((0, 0))

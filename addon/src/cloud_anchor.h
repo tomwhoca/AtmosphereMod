@@ -87,6 +87,23 @@ inline bool slice_in(const Layer &l, int k)
     return overlap / std::min(std::max<double>(l.top_m - l.base_m, 1.0), hi - lo) >= 0.5;
 }
 
+// The storm cells' evidence (patch_dxil.py apply_cb_towers): how clearly the
+// METAR shows a thunderstorm near the station, in the row the generator's
+// anchoring doesn't read (the last), as (evidence, 1, 0, 0) so it crossfades
+// with the METAR. Thunder at the station, in its vicinity, a CB or TCU layer;
+// a CB or TCU layer by its cover (storm_cover): FEW CB 0.5, SCT 0.6, BKN/OVC
+// 0.7 (FEW CB is one or two cells around the station, not a field of them).
+// The generator lifts thunder's cells (above kStormCb) toward the tropopause.
+constexpr size_t kStormRow = kSlices - 1;
+constexpr float kStormThunder = 1.0f, kStormVicinity = 0.8f, kStormCb = 0.7f, kStormTcu = 0.35f;
+
+// A CB/TCU layer's evidence scale by its cover (MetarCloudLayerCoverage: 3 FEW .. 6 OVC).
+inline float storm_cover(int cover)
+{
+    return cover <= 3 ? 5.0f / 7.0f : cover == 4 ? 6.0f / 7.0f : 1.0f;
+}
+static_assert(kStormRow >= static_cast<size_t>(kWeatherSlices));
+
 struct Anchor
 {
     bool valid = false;
@@ -94,15 +111,17 @@ struct Anchor
     float ceiling_m = 0.0f;  // MSL: above it MSFS's own map is kept
     std::vector<Layer> layers;
     std::string station;
+    float storm = 0.0f;  // the storm cells' evidence (kStormRow), also without a cloud group
 
     // Each slice takes the largest C of the layers in it, 0 between layers
     // below the ceiling; a deck's top slice is capped at kDeckTopC.
     Rows rows() const
     {
         Rows out = {};
+        out[kStormRow] = { storm, 1.0f, 0.0f, 0.0f };
         if (!valid)
             return out;
-        for (int k = 0; k < static_cast<int>(kSlices); ++k)
+        for (int k = 0; k < kWeatherSlices; ++k)  // (row kStormRow: the storm evidence, above)
         {
             const double centre = 15.625 * (k + 0.5) * (k + 0.5);
             float best = 0.0f, deck = 0.0f, smooth = 0.0f;
@@ -141,7 +160,13 @@ struct Anchor
             out += line;
         }
         snprintf(line, sizeof(line), "; MSFS's own above %.0f m MSL", ceiling_m);
-        return out + line;
+        out += line;
+        if (storm > 0.0f)
+        {
+            snprintf(line, sizeof(line), "; storm evidence %.2f", storm);
+            out += line;
+        }
+        return out;
     }
 };
 
@@ -153,6 +178,14 @@ inline Anchor from_metar(const haze::Metar &m, double lat_deg, double lon_deg, d
     a.lat_deg = lat_deg;
     a.lon_deg = lon_deg;
     a.elevation_m = elevation_m;
+    if (m.valid)
+    {
+        float layer = 0.0f;  // the most covering CB / TCU layer's
+        for (const haze::CloudLayer &cl : m.layers)
+            if ((cl.type == 1 || cl.type == 0) && cl.cover >= 3)
+                layer = std::max(layer, (cl.type == 1 ? kStormCb : kStormTcu) * storm_cover(cl.cover));
+        a.storm = m.thunder ? kStormThunder : m.thunder_vicinity ? kStormVicinity : layer;
+    }
     if (!m.valid || !m.clouds_reported)
         return a;  // no cloud group: nothing to anchor to
     const double spread = std::isfinite(m.temp_c) && std::isfinite(m.dew_c) ? m.temp_c - m.dew_c : 5.0;

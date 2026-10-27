@@ -99,10 +99,12 @@ struct ModParams
     float tunables[12] = {};  // T0..T11
 };
 static_assert(sizeof(ModParams) == 64);
-// Cloud tunables C0..C31 (tunables.ini), compute only: 32 root constants at
-// b1 space50, read by the patched ch_volumetric_clouds_render
-// (tools/patch_dxil.py, cloud_prologue_lines).
-constexpr uint32_t kCloudTunableCount = 32;
+// Cloud tunables C0..C32 (tunables.ini). C0..C31, compute only: 32 root
+// constants at b1 space50, read by the patched ch_volumetric_clouds_render
+// (tools/patch_dxil.py, cloud_prologue_lines). C32 (thunderstorms) goes to the
+// shaders as ModParams' DebugCapture bit 8 (push_mod_args).
+constexpr uint32_t kCloudTunableCount = 33;
+constexpr uint32_t kCloudRootConstants = 32;
 constexpr uint32_t kDebugMagic = 0x4F4D5441;  // 'ATMO'
 constexpr uint32_t kDebugBufferSize = 20 * 1024 * 1024;  // bits 6 and 7 below: the weather volume, cloud types
 // Regions: uint4(stamp, register count, 0, 0) then float4 registers.
@@ -198,8 +200,12 @@ static_assert(kCloudGenRegion + kCloudGenBytes <= kDebugBufferSize);
 constexpr uint32_t kCloudTypesRegion = 0x1000000;
 constexpr uint32_t kCloudTypesMagic = 0x45505954;  // 'TYPE'
 constexpr uint32_t kCloudTypesBytes = 16 + 4 * 128 * 128 * 32;
+// ... followed by the storm cells' anvils on the same grid (float2: level, cover), for the
+// renderer's cirrus (tools/patch_dxil.py ANVIL_REGION), and their towers' marks (float2: mark,
+// base), for its sky light (TOWER_REGION); captures append both to <id>_types.bin.
+constexpr uint32_t kCloudAnvilBytes = 2 * 8 * 128 * 128;
 static_assert(kCloudGenRegion + kCloudGenBytes <= kCloudTypesRegion);
-static_assert(kCloudTypesRegion + kCloudTypesBytes <= kDebugBufferSize);
+static_assert(kCloudTypesRegion + kCloudTypesBytes + kCloudAnvilBytes <= kDebugBufferSize);
 
 // Registers the radar replacement dumps into region C, if it is installed.
 // Rows 16-19 are uint4 texture sizes.
@@ -339,8 +345,10 @@ std::array<float, kTunableCount> g_tunables = {};            // tunables.ini
 std::array<float, kTunableCount> g_effective_tunables = {};  // with the weather feed blended in (T13)
 std::array<float, kTunableCount> g_radar_tunables = {};      // tunables.ini R0..R13
 std::array<float, kTunableCount> g_effective_radar_tunables = {};  // pushed on radar draws: R4 = 0 -> METAR freezing level
-std::array<float, kCloudTunableCount> g_cloud_tunables = {};       // tunables.ini C0..C31
+std::array<float, kCloudTunableCount> g_cloud_tunables = {};       // tunables.ini C0..C32
 std::array<float, kCloudTunableCount> g_effective_cloud_tunables = {};  // pushed: C13-C15 = the aircraft (SimConnect)
+// C32 <= 0: no thunderstorm cells (DebugCapture bit 8 to the cloud generator)
+std::atomic<bool> g_storms_off{true};
 constexpr float kFallbackFreezingLevel = 3000.0f;  // m, R4 = 0 before the first METAR
 // Ozone for the fitted sky colours (T8): T14 (tunables.ini only; the shaders
 // get the scale) > 0 fixes the column in DU, 0 takes the climatology at the
@@ -898,7 +906,7 @@ bool on_create_pipeline_layout(device *, uint32_t &param_count, pipeline_layout_
         constant_range cloud = {};
         cloud.dx_register_index = 1;
         cloud.dx_register_space = kModSpace;
-        cloud.count = kCloudTunableCount;
+        cloud.count = kCloudRootConstants;
         cloud.visibility = shader_stage::all;
         extended.emplace_back(cloud);
 
@@ -983,6 +991,10 @@ void push_mod_args(command_list *cmd_list, const TrackedPipeline &info, const st
     if (g_debug_view.handle != 0)
         p.debug_capture |=
             4 | 8 | 16 | 64 | 128 | ((uint32_t(g_frame.load(std::memory_order_relaxed)) & 0xFFFF) << 16);
+    // bit 8: no thunderstorm cells (C32 <= 0); the cloud generator's stay off.
+    // Inverted so that shaders under an add-on without C32 keep them.
+    if (g_storms_off.load(std::memory_order_relaxed))
+        p.debug_capture |= 256;
     // bit 5: MSFS's TLAS is bound (t0 space50): ch_deferred_shadows traces the
     // aircraft into the shadow window, for Raytraced Shadows
     const uint64_t tlas = g_tlas_va.load(std::memory_order_relaxed);
@@ -1227,7 +1239,7 @@ void write_cloud_capture(std::ofstream &file, const uint8_t *data, const fs::pat
     {
         const fs::path path = dir / (std::to_string(g_capture_id) + "_types.bin");
         std::ofstream bin(path, std::ios::binary);
-        bin.write(reinterpret_cast<const char *>(data + kCloudTypesRegion), kCloudTypesBytes);
+        bin.write(reinterpret_cast<const char *>(data + kCloudTypesRegion), kCloudTypesBytes + kCloudAnvilBytes);
         snprintf(line, sizeof(line), "\nCloud types: %s (%u x %u threads, frame %u)\n",
                  path.filename().string().c_str(), types[2], types[2], types[1]);
     }
@@ -1960,7 +1972,7 @@ void before_dispatch(command_list *cmd_list, const std::string &size)
         }
         push_mod_args(cmd_list, info, tunables);
         if (info.cloud_param != UINT32_MAX)
-            cmd_list->push_constants(shader_stage::all_compute, info.layout, info.cloud_param, 0, kCloudTunableCount,
+            cmd_list->push_constants(shader_stage::all_compute, info.layout, info.cloud_param, 0, kCloudRootConstants,
                                      cloud.data());
         if (g_auto_capture.exchange(false))
             g_auto_capture_due = true;  // first replaced dispatch: capture once automatically
@@ -2171,6 +2183,7 @@ void update_effective_tunables()
     cloud[15] = aircraft.valid ? (aircraft.cockpit ? aircraft.span_m : -aircraft.span_m) : 0.0f;
     // METAR anchoring: C20 (strength) and C21 (radius) are the ini's; the
     // stations go to the generator as a table (upload_anchor_table).
+    g_storms_off.store(!(cloud[32] > 0.0f), std::memory_order_relaxed);
 
     const std::unique_lock lock(g_mutex);
     g_effective_tunables = effective;

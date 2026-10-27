@@ -254,6 +254,32 @@ int scenario()
     const anchor::Anchor ovc = anchor::from_metar(cb, 55.618, 12.656, 3.0, 12.0);
     check(ovc.layers.size() == 1 && near(ovc.ceiling_m, ovc.layers[0].top_m, 1.0), "OVC010CB: " + ovc.describe());
 
+    // the storm cells' evidence, in the row the anchoring doesn't read: thunder, VCTS, CB, TCU, none
+    printf("storm evidence\n");
+    const auto evidence = [](const haze::Metar &m) {
+        return anchor::from_metar(m, 55.618, 12.656, 3.0, 12.0).rows()[anchor::kStormRow];
+    };
+    check(evidence(cb) == anchor::Row{ anchor::kStormCb, 1.0f, 0.0f, 0.0f }, "OVC010CB: CB evidence");
+    haze::Metar ts = metar("EKCH", { { 1000.0, 5, -1 } });
+    ts.thunder = true;
+    check(evidence(ts)[0] == anchor::kStormThunder, "TS at the station");
+    ts.thunder = false;
+    ts.thunder_vicinity = true;
+    check(evidence(ts)[0] == anchor::kStormVicinity, "VCTS");
+    ts.thunder_vicinity = false;
+    ts.layers = { { 3000.0, 4, 0 } };
+    check(near(evidence(ts)[0], anchor::kStormTcu * 6.0f / 7.0f), "SCT030TCU: 0.30");
+    ts.layers = { { 1500.0, 3, 1 } };
+    check(near(evidence(ts)[0], 0.5), "FEW015CB: 0.5 (one or two cells)");
+    ts.layers = { { 1500.0, 4, 1 }, { 3000.0, 5, 0 } };
+    check(near(evidence(ts)[0], 0.6), "SCT015CB BKN030TCU: the CB's 0.6 (more than the TCU's 0.35)");
+    ts.layers = { { 3000.0, 4, -1 } };
+    check(evidence(ts) == anchor::Row{ 0.0f, 1.0f, 0.0f, 0.0f }, "no storm: 0");
+    ts.clouds_reported = false;
+    ts.layers.clear();
+    ts.thunder = true;
+    check(evidence(ts)[0] == anchor::kStormThunder, "TS without a cloud group still counts");
+
     printf(g_fails ? "%d check(s) failed\n" : "all checks passed\n", g_fails);
     return g_fails ? 1 : 0;
 }

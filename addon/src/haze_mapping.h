@@ -69,6 +69,7 @@ struct Metar
     double vis_m = NAN;           // NAN when not reported
     bool vis_open = false;        // 9999 / 10SM / CAVOK: "at least"
     bool mist = false, fog = false, precip = false, thunder = false;
+    bool thunder_vicinity = false;  // VCTS (not counted as thunder at the station)
     bool haze = false, smoke = false, dust = false, ash = false;
     double low_layer_ft = NAN;    // base of the lowest FEW/SCT/BKN layer below 10,000 ft
     std::vector<CloudLayer> layers;
@@ -159,7 +160,11 @@ inline Metar parse_metar_json(const std::string &json)
     {
         const std::string obj = it->str();
         if (obj.find("\"vicinity\":true") != std::string::npos)
+        {
+            if (obj.find("\"ts\":true") != std::string::npos)
+                m.thunder_vicinity = true;  // VCTS: the storm cells' evidence (cloud_anchor.h)
             continue;  // VC: near, not at, the station
+        }
         if (obj.find("\"ts\":true") != std::string::npos)
             m.thunder = m.precip = true;
         const std::string list = match(obj, "\"phenom\":\\[([0-9,]*)\\]");
