@@ -88,7 +88,8 @@ def reference(u, v, depth_m, tgrey, g, a, t, samples=P.CLOUD_AP_SAMPLES, newton=
     cam = np.array([g[132][0] * 1e-3, R + max(0.0, (g[132][1] + g[117][1]) * 1e-3), g[132][2] * 1e-3])
     ref = mix * np.clip(t[8], 0, 1)
     ray = a[1][:3] + (np.array(P.REFERENCE_RAYLEIGH) - a[1][:3]) * ref
-    ozo = a[0][:3] + (np.array(P.REFERENCE_OZONE) - a[0][:3]) * ref
+    ozone_scale = t[13] if t[13] > 0 else 1.0  # (ModParams header word 3)
+    ozo = a[0][:3] + (np.array(P.REFERENCE_OZONE) * ozone_scale - a[0][:3]) * ref
     spec = (np.exp2(np.clip(t[10], 0, 3) * np.array(P.AEROSOL_SPECTRAL_LOG2)) - 1) * mix + 1
     mie = a[3][:3] * spec
     brk = mix * t[6] * a[2][1] * np.array(P.BROWN_HAZE_TINT)
@@ -155,7 +156,11 @@ def main():
     g = np.fromfile(out / "cb_global.bin", "<f4").reshape(-1, 4)
     a = np.fromfile(out / "cb_atmo.bin", "<f4").reshape(-1, 4)
     mod = np.fromfile(out / "mod_params.bin", "<f4").reshape(-1, 4)
-    t = np.concatenate([mod[1:4].ravel(), mod[0, 2:4]])  # T0..T11, T12, T13
+    t_lab = np.concatenate([mod[1:4].ravel(), mod[0, 2:4]])  # T0..T11, T12, T13: as atmolab ran
+    # The IR check also covers the fitted sky colours (T8) and the ozone scale
+    # (header word 3, where atmolab writes T13).
+    mod[3, 0], mod[0, 3] = 1.0, 1.3
+    t = np.concatenate([mod[1:4].ravel(), mod[0, 2:4]])  # T0..T11, T12, ozone scale
 
     # Rays through froxel centres (with the volume's jitter) and depths at slice centres.
     jit = a[12][:2]
@@ -172,9 +177,12 @@ def main():
     cbuffers = {"global": g.astype(F), "atmo": a.astype(F), "b0 space50": mod.astype(F)}
     run_ir(P.prologue_lines() + em.lines, env, cbuffers)
     ir_out = np.stack([env[o] for o in outs], -1)
-    ref_out, trans = reference(u.astype(np.float64), v.astype(np.float64), depth.astype(np.float64),
-                               tgrey.astype(np.float64), g.astype(np.float64), a.astype(np.float64),
-                               t.astype(np.float64))
+    ref_out, _ = reference(u.astype(np.float64), v.astype(np.float64), depth.astype(np.float64),
+                           tgrey.astype(np.float64), g.astype(np.float64), a.astype(np.float64),
+                           t.astype(np.float64))
+    _, trans = reference(u.astype(np.float64), v.astype(np.float64), depth.astype(np.float64),
+                         tgrey.astype(np.float64), g.astype(np.float64), a.astype(np.float64),
+                         t_lab.astype(np.float64))  # (the geometry check: atmolab's own volume)
     err = np.abs(ir_out - ref_out)
     worst = np.unravel_index(err.argmax(), err.shape)
     print(f"tunables T0..T13: {np.round(t, 3).tolist()}")

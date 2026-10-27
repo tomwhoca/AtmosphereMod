@@ -475,8 +475,8 @@ def types_ref(c, terrain, ice=P.OPTICAL_ICE_DEFAULT_M):
         broken = smoothstep(cover[k], *P.TYPES_BROKEN)
         low = 1 - smoothstep(above, *P.TYPES_LOW_BASE)
         mid = (1 - low) * (1 - smoothstep(base[k], ice - P.TYPES_ICE_BLEND_M, ice))
-        st = low * broken * (1 - smoothstep(above, *P.TYPES_ST_BASE)) * (1 - smoothstep(depth, *P.TYPES_ST_DEPTH))
-        sc = low * broken * (1 - smoothstep(depth, *P.TYPES_SC_DEPTH)) - st
+        st = low * (1 - smoothstep(above, *P.TYPES_ST_BASE)) * (1 - smoothstep(depth, *P.TYPES_ST_DEPTH))
+        sc = broken * (low * (1 - smoothstep(depth, *P.TYPES_SC_DEPTH)) - st)
         mid_nd = mid * (1 - smoothstep(depth, *P.TYPES_DEEP))
         as_ = mid_nd * broken * smoothstep(depth, *P.TYPES_AS_DEPTH)
         weights.append((sc, st, mid_nd - as_, as_) if inside[k] else (0.0,) * 4)
@@ -503,7 +503,9 @@ def check_types_table(check):
     cases = [("OVC stratus 140-560 m", column(1.0, range(3, 6)), "St"),
              ("BKN stratocumulus 1-1.6 km", column(0.58, range(8, 10)), "Sc"),
              ("SCT cumulus 1-1.9 km", column(0.38, range(8, 11)), "Cu"),
-             ("FEW thin cumulus 400-770 m", column(0.21, range(5, 7)), "Cu"),
+             ("FEW stratus fractus 400-770 m", column(0.21, range(5, 7)), "St"),
+             ("SCT stratus fractus 250-560 m", column(0.38, range(4, 6)), "St"),
+             ("FEW cumulus 770-1410 m", column(0.21, range(7, 9)), "Cu"),
              ("BKN towering cumulus 1-6 km", column(0.58, range(8, 19)), "Cu"),
              ("BKN altostratus 3.5-4.5 km", column(0.6, range(15, 17)), "As"),
              ("SCT altocumulus 3.5-4.5 km", column(0.38, range(15, 17)), "Ac"),
@@ -583,6 +585,51 @@ def check_types(stock_p, patched_p, values, h_name, table, tex, check):
         m = Machine(patched_p, constants(f, cloud=anchor_cloud()), tex, bytearray(big))
         m.run(tid)
         check(not any(m.buf[P.TYPES_REGION:]), f"{tid} flags {f:#x}: wrote to the cloud types grid")
+
+
+def check_specks(stock_p, patched_p, values, noise, t1_name, h_name, lut, tex, check):
+    """Speck suppression (patch_dxil.apply_speck_suppression): a weather map
+    with clear slices, sub-okta ones and a layer, the low coverage curve (so
+    the mock noise grazes the threshold in clear slices). With C16 off the
+    volume is stock; with it on, slices below SPECK_C[0] hold no coverage
+    (x <= 0.49) and the whole column matches the model with the lift."""
+    profile = [0.0] * P.WEATHER_SLICES
+    profile[7], profile[12], profile[16] = 0.1, 0.2, 0.06
+    for k in (9, 10, 11):
+        profile[k] = 0.5
+    dims = tex[5].dims
+    tex_s = {**tex, 5: ProfileTex(5, dims, profile), 6: ProfileTex(6, dims, profile)}
+    on = [0.0] * (P.CLOUD_PARAMS_SIZE // 4)
+    on[0], on[16], on[17] = 1.0, 2.0, 0.33
+    off = list(on)
+    off[16] = 0.0
+    lift = [P.SPECK_LIFT * (1 - smoothstep(c, *P.SPECK_C)) for c in profile]
+    stock_specks = removed = 0
+    worst = 0.0
+    for tid in [(256, 256), (250, 262), (230, 270), (300, 220), (128, 400), (40, 300), (400, 128), (180, 190),
+                (330, 310), (270, 130)]:
+        ref_m = Machine(stock_p, constants(0, cloud=off), tex_s, bytearray(16 << 20))
+        ref = ref_m.run(tid)
+        got_off = Machine(patched_p, constants(0, cloud=off), tex_s, bytearray(16 << 20)).run(tid)
+        check(got_off == ref, f"{tid}: specks: C16 = 0 but the volume differs from stock")
+        m = Machine(patched_p, constants(0, cloud=on), tex_s, bytearray(16 << 20))
+        out = m.run(tid)
+        c = [m.env[values[k]] for k in range(P.WEATHER_SLICES)]
+        check(all(abs(a - b) < 1e-6 for a, b in zip(c, profile)), f"{tid}: specks: weather values {c}")
+        for k in range(P.WEATHER_SLICES):
+            if profile[k] <= P.SPECK_C[0]:
+                stock_specks += ref[k][0] > 0.49
+                removed += ref[k][0] > 0.49 and out[k][0] <= 0.49
+                check(out[k][0] <= 0.49, f"{tid} slice {k}: a speck survived (x {out[k][0]:.3f}, C {profile[k]})")
+        if generator_model is not None:
+            n4 = [tuple(ref_m.env[noise[k]][:4]) for k in range(P.WEATHER_SLICES)]
+            res = generator_model.column(profile, n4, lut, ref_m.env[t1_name], ref_m.env[h_name], 0.0, lift=lift)
+            err = max(max(abs(out[k][0] - res[k][0]), abs(out[k][1] - res[k][1])) for k in range(P.WEATHER_SLICES))
+            worst = max(worst, err)
+            check(err < 1e-4, f"{tid}: specks: the volume (x, y) differs from the model by {err:.1e}")
+    check(stock_specks > 0, "specks: the mock weather made no specks to remove")
+    print(f"specks: {stock_specks} stock speck slices below C {P.SPECK_C[0]} in 10 columns, {removed} removed; "
+          f"volume vs model {worst:.1e}" + ("" if generator_model is not None else " (no model)"))
 
 
 def check_layers(dxc, index, check):
@@ -801,6 +848,7 @@ def main():
             check(got == ref, f"{tid}: anchoring off ({what}) but the volume differs from stock")
     check_types_table(check)
     check_types(stock_p, patched_p, values, h_name, table, TEX_ANCHOR, check)
+    check_specks(stock_p, patched_p, values, noise, t1_name, h_name, lut, TEX_ANCHOR, check)
     # the cloud constants as the shader saw them, in the header
     cap = Machine(patched_p, constants(1 | P.DEBUG_BUFFER_16MB, cloud=anchor_cloud()), TEX, bytearray(table))
     cap.run((0, 0))

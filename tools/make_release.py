@@ -98,6 +98,13 @@ LICENSE-LLVM.txt applies to these files:
 
 {llvm}
 
+Ozone climatology (monthly total ozone columns by latitude, compiled into
+AtmosphereMod.addon64)
+J.P.F. Fortuin and H. Kelder, 1998: "An ozone climatology based on ozonesonde
+and satellite measurements", J. Geophys. Res. 103, 31709-31734,
+doi:10.1029/1998JD200008. Total columns as published by KNMI's TEMIS:
+https://www.temis.nl/data/fortuin.html
+
 Microsoft Flight Simulator 2024
 - None of the game's files are included. The installer extracts and patches
   the shaders of the user's own installation, on the user's PC.

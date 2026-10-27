@@ -34,6 +34,7 @@
 #include <d3d12.h>
 
 #include "cloud_stations.h"
+#include "ozone_climatology.h"
 #include "settings_bridge.h"
 #include "weather_feed.h"
 
@@ -94,7 +95,7 @@ struct ModParams
 {
     uint32_t debug_capture = 0;  // bit 0: capture armed; bit 1: radar draw (R0..R13 below); bit 2: 16 KB debug buffer (compute)
     uint32_t frame = 0;
-    float extra[2] = {};      // T12, T13
+    float extra[2] = {};      // T12 and the ozone scale (push_mod_args; radar draws: R12, R13)
     float tunables[12] = {};  // T0..T11
 };
 static_assert(sizeof(ModParams) == 64);
@@ -341,6 +342,11 @@ std::array<float, kTunableCount> g_effective_radar_tunables = {};  // pushed on 
 std::array<float, kCloudTunableCount> g_cloud_tunables = {};       // tunables.ini C0..C31
 std::array<float, kCloudTunableCount> g_effective_cloud_tunables = {};  // pushed: C13-C15 = the aircraft (SimConnect)
 constexpr float kFallbackFreezingLevel = 3000.0f;  // m, R4 = 0 before the first METAR
+// Ozone for the fitted sky colours (T8): T14 (tunables.ini only; the shaders
+// get the scale) > 0 fixes the column in DU, 0 takes the climatology at the
+// aircraft. The shaders scale their 300 DU fit by column / 300 (ModParams.extra[1]).
+float g_ozone_setting = 0.0f;
+std::atomic<float> g_ozone_scale{1.0f};
 
 std::mutex g_seen_mutex;  // guards the log-once sets below
 std::unordered_set<uint32_t> g_seen_shaders;
@@ -678,6 +684,7 @@ void reload(device *dev)
     const auto tunables = load_tunables();
     const auto radar_tunables = load_tunables('R');
     const auto cloud_tunables = load_tunables<kCloudTunableCount>('C');
+    const float ozone_setting = load_tunables<kTunableCount + 1>()[kTunableCount];  // T14
     struct Job
     {
         uint64_t handle;
@@ -693,6 +700,7 @@ void reload(device *dev)
         g_tunables = tunables;
         g_radar_tunables = radar_tunables;
         g_cloud_tunables = cloud_tunables;
+        g_ozone_setting = ozone_setting;
         for (const auto &[handle, info] : g_pipelines)
         {
             if (info.graphics)
@@ -923,6 +931,8 @@ void push_mod_args(command_list *cmd_list, const TrackedPipeline &info, const st
     ModParams p;
     std::copy(tunables.begin(), tunables.begin() + 12, p.tunables);
     std::copy(tunables.begin() + 12, tunables.end(), p.extra);
+    if (!info.radar)
+        p.extra[1] = g_ozone_scale.load(std::memory_order_relaxed);  // (T13 is the add-on's own)
     if (info.graphics)
     {
         // The constants go through ReShade, which makes info.layout the bound
@@ -2129,13 +2139,20 @@ void update_effective_tunables()
     last = now;
     std::array<float, kTunableCount> ini, radar;
     std::array<float, kCloudTunableCount> cloud;
+    float ozone_setting;
     {
         const std::shared_lock lock(g_mutex);
         ini = g_tunables;
         radar = g_radar_tunables;
         cloud = g_cloud_tunables;
+        ozone_setting = g_ozone_setting;
     }
     const auto effective = weather::apply(ini, dt);
+    // Ozone: T14's fixed column, else the climatology (300 DU until the feed has the aircraft).
+    const float du = ozone_setting > 0.0f ? ozone_setting : weather::ozone_du();
+    g_ozone_scale.store(std::clamp((std::isfinite(du) ? du : static_cast<float>(ozone::kReferenceDu)) /
+                                       static_cast<float>(ozone::kReferenceDu), 0.25f, 2.0f),
+                        std::memory_order_relaxed);
     if (radar[4] <= 0.0f)  // R4 = 0: freezing level from the METAR temperature
     {
         const float level = weather::freezing_level_m();
@@ -2306,6 +2323,7 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE re
     load_names();
     g_replacements = load_replacements();
     g_tunables = load_tunables();
+    g_ozone_setting = load_tunables<kTunableCount + 1>()[kTunableCount];  // T14
     g_effective_tunables = g_tunables;
     g_radar_tunables = load_tunables('R');
     g_cloud_tunables = load_tunables<kCloudTunableCount>('C');

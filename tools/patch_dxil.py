@@ -12,7 +12,7 @@ terrain, ch_sky's cubemap):
   2. find the inline medium by its data flow (the SkyAtmosphere cbuffer loads
      feeding exp(), the HG phase from MiePhaseG) and splice in the same maths
      as our medium model: Mie density and colour (Angstrom),
-     reference Rayleigh/ozone, brown-haze absorption, HG g and backscatter lobe.
+     fitted Rayleigh/ozone, brown-haze absorption, HG g and backscatter lobe.
      The cloud renderer instead gets per-colour haze (T11), a forward lobe in
      its sun/moon phase, tunable multiple scattering, the build-up of bounced
      light, crisper edges, a glory, the aircraft's shadow, optical thickness
@@ -47,8 +47,16 @@ from disasm import find_dxc  # noqa: E402
 from dxil_assemble import AssemblyError, Assembler  # noqa: E402
 
 # Our medium model's constants (the developer's HLSL replicas use the same).
-REFERENCE_RAYLEIGH = (5.802e-3, 13.558e-3, 33.1e-3)
-REFERENCE_OZONE = (0.650e-3, 1.881e-3, 0.085e-3)
+# Sky colours (T8): Rayleigh scattering at sea level and ozone absorption at the
+# layer's peak (1/km), per colour channel. Fitted so that MSFS's 3-channel sky
+# model (Hillaire's, with its multiple-scattering LUT) matches the same model
+# at 95 wavelengths: Bodhaine's Rayleigh optical depth, 300 DU of ozone
+# (Serdyuchenko), continental haze, the ASTM G-173 sun, CIE 1931 to sRGB.
+# MSFS's own values are ARPC's per-channel averages of the same spectra
+# (6.566 / 12.291 / 29.413, ozone 2.291 / 1.541 / 0). The ozone is scaled to
+# the add-on's column (T14 or the climatology) / 300 DU in prologue_lines.
+REFERENCE_RAYLEIGH = (5.944e-3, 12.374e-3, 29.451e-3)
+REFERENCE_OZONE = (2.830e-3, 1.623e-3, 0.033e-3)
 BROWN_HAZE_TINT = (0.15, 0.3, 0.6)
 BACKSCATTER_G = -0.4
 AEROSOL_SPECTRAL_LOG2 = (-0.30610, 0.0, 0.32193)
@@ -182,6 +190,15 @@ def prologue_lines() -> list[str]:
         prologue.append(f"  %mod.r{r} = call {t} @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %mod.ah, i32 {r + 1})")
     for n in range(12):
         prologue.append(f"  %mod.T{n} = extractvalue {t} %mod.r{n // 4}, {n % 4}")
+    # The ozone scale (header word 3, the add-on's column / 300 DU; 1 when 0):
+    # the fitted ozone (T8) times it.
+    prologue += [
+        f"  %mod.oz.r = call {t} @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %mod.ah, i32 0)",
+        f"  %mod.oz.s0 = extractvalue {t} %mod.oz.r, 3",
+        "  %mod.oz.on = fcmp fast ogt float %mod.oz.s0, 0.000000e+00",
+        "  %mod.oz.s = select i1 %mod.oz.on, float %mod.oz.s0, float 1.000000e+00",
+    ]
+    prologue += [f"  %mod.ozr{c} = fmul fast float %mod.oz.s, {f32(REFERENCE_OZONE[c])}" for c in range(3)]
     milli = f32(0.001)
     prologue += [
         "  %mod.mix = call float @dx.op.unary.f32(i32 7, float %mod.T0)",
@@ -764,14 +781,16 @@ def patch_medium(text: str, no_phase: bool = False, white_balance: bool = False,
             f"  {p}dmm = call float @dx.op.tertiary.f32(i32 46, float {p}dmm1, float %mod.mix, float {p}dms)",
             f"  {old} = select i1 %mod.off, float {p}dms, float {p}dmm",
         ]))
-        # Rayleigh and ozone coefficients, lerped toward the reference by mix * T8
-        for key, ref, tag in (("ray_p", REFERENCE_RAYLEIGH, "ray"), ("ozo_p", REFERENCE_OZONE, "ozo")):
+        # Rayleigh and ozone coefficients, lerped toward the fit by mix * T8
+        # (the ozone's scaled to the column, %mod.ozr)
+        for key, ref, tag in (("ray_p", [f32(v) for v in REFERENCE_RAYLEIGH], "ray"),
+                              ("ozo_p", [f"%mod.ozr{c}" for c in range(3)], "ozo")):
             for c, (prod, coeff) in site[key].items():
                 i = ir.defs[prod]
                 new = f"{p}{tag}{c}"
                 lhs, rhs = ir.lines[i].split(" = ", 1)
                 edits.append((i, [
-                    f"  {new}d = fsub fast float {f32(ref[c])}, {coeff}",
+                    f"  {new}d = fsub fast float {ref[c]}, {coeff}",
                     f"  {new} = call float @dx.op.tertiary.f32(i32 46, float {new}d, float %mod.ref, float {coeff})",
                     lhs + " = " + re.sub(re.escape(coeff) + r"\b", new, rhs),
                 ]))
@@ -1130,7 +1149,7 @@ def emit_cloud_haze_colour(em: Emitter, u, v, depth_m, tgrey, global_binding, at
     c6x, c6y, c6z = (em.ext(a[6], k) for k in range(3))
     c7x, c7y = (em.ext(a[7], k) for k in range(2))
     ray = [em.mad(em.sub(REFERENCE_RAYLEIGH[k], c1[k]), "%mod.ref", c1[k]) for k in range(3)]
-    ozo = [em.mad(em.sub(REFERENCE_OZONE[k], c0[k]), "%mod.ref", c0[k]) for k in range(3)]
+    ozo = [em.mad(em.sub(f"%mod.ozr{k}", c0[k]), "%mod.ref", c0[k]) for k in range(3)]
     mie = [em.mul(c3[k], f"%mod.spec{k}") for k in range(3)]
     brown = em.mul("%mod.brown", c2g)
     brk = [em.mul(brown, BROWN_HAZE_TINT[k]) for k in range(3)]
@@ -3316,10 +3335,12 @@ assert CLOUD_GEN_REGION + CG_END <= 16 << 20
 # cover (the run's largest value), each test a smoothstep (the TYPES_ pairs):
 #   low = 1 - S(base, LOW_BASE), mid = (1 - low) (1 - S(base MSL, C18 - ICE_BLEND, C18)),
 #   broken = S(cover, BROKEN), deep = S(depth, DEEP);
-#   St = low broken (1 - S(base, ST_BASE)) (1 - S(depth, ST_DEPTH)),
-#   Sc = low broken (1 - S(depth, SC_DEPTH)) - St,
+#   St = low (1 - S(base, ST_BASE)) (1 - S(depth, ST_DEPTH)) at any cover
+#        (broken: a stratus deck; FEW/SCT: stratus fractus, the ragged scraps
+#        of a low deck, not cumulus),
+#   Sc = broken (low (1 - S(depth, SC_DEPTH)) - St),
 #   As = mid (1 - deep) broken S(depth, AS_DEPTH), Ac = mid (1 - deep) - As.
-# Scattered low cloud is cumulus. A slice just outside a layer takes its
+# Other scattered low cloud is cumulus. A slice just outside a layer takes its
 # neighbour's weights (below first), as the renderer's filtering reaches it.
 # The renderer reads the grid in its view march (apply_cloud_types).
 TYPES_REGION = 0x1000000
@@ -3543,11 +3564,11 @@ def find_planet_direction(ir: Ir):
     return None
 
 
-def find_deck_sites(ir: Ir, values: dict) -> dict:
-    """Per slice k, the sites the deck weights change: the slice's coverage
-    threshold L_k (from the coverage-curve lookup of C_k), the dome taper T_k
-    computed from it (every slice but the first), and the parameter t_k that
-    selects the noise channel. Each is found by the constants checked below."""
+def coverage_sites(ir: Ir, values: dict) -> dict:
+    """Per slice k: the coverage threshold L_k = 1.3 sat(LUT(C_k)) (from the
+    coverage-curve lookup of C_k), the shape term s_k = N_k + 0.25 - L_k and,
+    every slice but the first, the dome taper T_k computed from (1.25 - L_k).
+    Each is found by the constants checked below."""
     def users_of(v, pred):
         return [n for n, (kind, a, b) in ir.binops.items() if v in (a, b) and pred(kind, a, b)]
 
@@ -3572,6 +3593,18 @@ def find_deck_sites(ir: Ir, values: dict) -> dict:
             site["taper"] = T[0]
         shape = users_of(L, lambda kind, a, b: kind == "fsub" and b == L and a != "1.250000e+00")
         need(len(shape) == 1, f"slice {k}: no shape term")
+        site["shape"] = shape[0]
+        sites[k] = site
+    need(sum("taper" in s for s in sites.values()) >= WEATHER_SLICES - 1, "dome tapers missing")
+    return sites
+
+
+def find_deck_sites(ir: Ir, values: dict) -> dict:
+    """Per slice k, the sites the deck weights change: the coverage sites
+    (coverage_sites: L_k, s_k, the dome taper T_k) and the parameter t_k that
+    selects the noise channel, found from s_k."""
+    sites = coverage_sites(ir, values)
+    for k, site in sites.items():
         found = []
 
         def walk(v, depth):
@@ -3589,12 +3622,44 @@ def find_deck_sites(ir: Ir, values: dict) -> dict:
             for o in (a, b):
                 if o.startswith("%"):
                     walk(o, depth + 1)
-        walk(ir.binops[shape[0]][1], 0)
+        walk(ir.binops[site["shape"]][1], 0)
         need(len(set(found)) == 1, f"slice {k}: noise-channel parameter {set(found)}")
         site["t"] = found[0]
-        sites[k] = site
-    need(sum("taper" in s for s in sites.values()) >= WEATHER_SLICES - 1, "dome tapers missing")
     return sites
+
+
+# Specks. Where a slice's weather value C is below about one okta, MSFS's
+# noise still grazes the coverage threshold here and there (s_k just above 0
+# at the noise's peaks), even under a clear METAR: single-texel traces with the
+# bare height profile's density, ~1e-4/m near the ground, invisible in stock.
+# The optical thickness (C16, C17: (sigma / 0.01)^(1/3)) turns each into a
+# solid white puff. So while it is on, s_k is lowered by SPECK_LIFT below
+# SPECK_C (smoothstep in C): X_k <= -0.15, beyond the renderer's erosion band
+# (s > -0.075), so no noise brings it back (notes/cloud-shapes.md 4i).
+SPECK_C = (0.08, 0.15)  # C: 1 okta is ~0.17 (notes 4d)
+SPECK_LIFT = 0.3
+
+
+def apply_speck_suppression(ir: Ir, values: dict) -> str:
+    """ch_cloudDensity, live-weather family: lower the shape term s_k of
+    slices whose (anchored) weather value is below SPECK_C, while the optical
+    thickness is on (C16 > 0, C0 > 0: %mod.cooff false); exactly stock
+    otherwise. Lowering s (not raising L) leaves the dome taper (1.25 - L)
+    alone, so it can only take cloud away."""
+    sites = coverage_sites(ir, values)
+    edits = []
+    for k, site in sites.items():
+        s = site["shape"]
+        j = ir.defs[s]
+        em = Emitter(f"sp{k}.")
+        s0 = f"%mod.sp{k}.s0"
+        w = em.sub(1.0, smoothstep(em, values[k], *SPECK_C))
+        s1 = em.sub(s0, em.mul(w, SPECK_LIFT))
+        edits.append((j, [ir.lines[j].replace(f"{s} = ", f"{s0} = ", 1), *em.lines,
+                          f"  {s} = select i1 %mod.cooff, float {s0}, float {s1}"]))
+    for i, new_lines in sorted(edits, key=lambda e: -e[0]):
+        ir.lines[i:i + 1] = new_lines
+    return f"specks: {len(sites)} shape terms lowered below C {SPECK_C[1]} (with C16)"
 
 
 def apply_metar_anchor(ir: Ir) -> str:
@@ -3895,12 +3960,11 @@ def cloud_types_lines(values: dict | None, tx: str, ty: str, terrain: str) -> li
         high = em.mul(em.mul(ice, ice), em.mad(ice, -2.0, 3.0))
         mid = em.mul(em.sub(1.0, low), em.sub(1.0, high))
         deep = smoothstep(em, depth, *TYPES_DEEP)
-        lowb = em.mul(low, broken)
         st_base = em.sub(1.0, smoothstep(em, above, *TYPES_ST_BASE))
         st_thin = em.sub(1.0, smoothstep(em, depth, *TYPES_ST_DEPTH))
         sc_thin = em.sub(1.0, smoothstep(em, depth, *TYPES_SC_DEPTH))
-        st = em.mul(em.mul(lowb, st_base), st_thin)
-        sc = em.sub(em.mul(lowb, sc_thin), st)
+        st = em.mul(em.mul(low, st_base), st_thin)  # (any cover: FEW/SCT are fractus)
+        sc = em.mul(broken, em.sub(em.mul(low, sc_thin), st))
         mid_nd = em.mul(mid, em.sub(1.0, deep))
         as_ = em.mul(em.mul(mid_nd, broken), smoothstep(em, depth, *TYPES_AS_DEPTH))
         ac = em.sub(mid_nd, as_)
@@ -3935,6 +3999,8 @@ def patch_cloud_gen_capture(text: str) -> tuple[str, str]:
     if all(srv_shapes(text).get(reg) == sh for reg, sh in CG_LAYOUTS["weather map"]["shapes"].items()):
         values = find_weather_values(ir)  # (the anchoring keeps their names)
         anchor = apply_metar_anchor(ir)
+        ir.reindex()
+        anchor += "; " + apply_speck_suppression(ir, values)  # (from the anchored values)
         ir.reindex()
     tids = re.findall(r"^\s+(%[\w.]+) = call i32 @dx\.op\.threadId\.i32\(i32 93, i32 ([01])\)", text, re.M)
     tid = {int(c): n for n, c in tids}

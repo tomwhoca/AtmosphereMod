@@ -42,12 +42,13 @@ ATMO = np.array([
     [100, 40449600, 41731600, 1132.25439],
     [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]], dtype=np.float64)
 
-# T0..T11 and Extra (T12, T13); T0 = 0 is the stock check.
+# T0..T11, then the ozone scale (ModParams header word 3; 0 = 1); T0 = 0 is the stock check.
 TUNABLE_SETS = [
-    [0, 1.5, 0.15, 4, 0.6, 2.5, 0.05, 0.1, 1, 0.66, 1.3, 1],
-    [1, 1.5, 0.15, 4, 0.6, 2.5, 0.05, 0.1, 1, 0.66, 1.3, 1],
-    [1, 5.4, 0.3, 12, 1.2, 3.0, 0.4, 0.3, 0, 0.0, 0.3, 1],
-    [0.4, 0.8, 0.05, 2, 0.1, 1.5, 0.0, 0.0, 0.5, 0.75, 2.0, 0],
+    [0, 1.5, 0.15, 4, 0.6, 2.5, 0.05, 0.1, 1, 0.66, 1.3, 1, 1.4],
+    [1, 1.5, 0.15, 4, 0.6, 2.5, 0.05, 0.1, 1, 0.66, 1.3, 1, 0.0],
+    [1, 5.4, 0.3, 12, 1.2, 3.0, 0.4, 0.3, 0, 0.0, 0.3, 1, 1.0],
+    [0.4, 0.8, 0.05, 2, 0.1, 1.5, 0.0, 0.0, 0.5, 0.75, 2.0, 0, 0.8],
+    [1, 1.5, 0.15, 4, 0.6, 2.5, 0.05, 0.1, 1, 0.66, 1.3, 1, 1.45],
 ]
 
 
@@ -232,11 +233,12 @@ def reference(t, h0, h1, h, cos_theta, atmo):
     dens_mie = stock_mie if mix <= 0 else stock_mie + (bl + ft * np.exp(-h / fts) - stock_mie) * mix
     dens_ray = np.exp(h * c[5, 3])
     reference_mix = mix * refsky
+    ozone_scale = t[12] if t[12] > 0 else 1.0
     spectral = (np.exp2(ang * np.array(P.AEROSOL_SPECTRAL_LOG2)) - 1) * mix + 1
     out = {"mie": dens_mie}
     for k in range(3):
         rayleigh = c[1, k] + (P.REFERENCE_RAYLEIGH[k] - c[1, k]) * reference_mix
-        ozone = c[0, k] + (P.REFERENCE_OZONE[k] - c[0, k]) * reference_mix
+        ozone = c[0, k] + (P.REFERENCE_OZONE[k] * ozone_scale - c[0, k]) * reference_mix
         tent = np.where(h < c[6, 0], c[6, 2] * h + c[6, 1], c[7, 1] * h + c[7, 0])
         out[f"ray{k}"] = dens_ray * rayleigh
         out[f"mies{k}"] = dens_mie * c[2, k] * spectral[k]
@@ -291,7 +293,8 @@ def check(entry: str, crc: str, stock: str, rng, args: dict) -> list[str]:
     radius = F(ATMO[2, 3])
     for tun in TUNABLE_SETS:
         mod = np.zeros((4, 4))
-        mod[1:4] = np.array(tun, dtype=np.float64).reshape(3, 4)
+        mod[1:4] = np.array(tun[:12], dtype=np.float64).reshape(3, 4)
+        mod[0, 3] = tun[12]
         cbs = {208: ATMO, 64: mod}
         for s, site in enumerate(sites):
             t0n, t1n, origin, direction, _ = site["segment"]

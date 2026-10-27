@@ -18,11 +18,14 @@ rendering, and consists of several components:
   The mod replaces it with a layered haze, coloured by the kind of particles
   in it and set from the weather. It applies the same haze to the sky, the
   terrain and the clouds.
-- **Sky colours.** MSFS colours its sky with its own scattering values, whose
-  "ozone" absorbs mostly red light. Real ozone absorbs in the green and
-  orange, which is what makes the deep blue sky overhead and the blue and
-  purple of dusk. The mod uses real-world values, plus a daylight white
-  balance so that sunlight still reads as white.
+- **Sky colours.** A sim renders light in red, green and blue only, so it
+  needs one value per colour for how strongly the air scatters sunlight and
+  ozone absorbs it. MSFS takes them from ARPC, which averages the measured
+  spectra over each colour. The mod's values are fitted so that the sim's sky
+  matches the same sky computed across the whole spectrum. That is closest to
+  real at low sun and dusk, when ozone keeps the sky overhead blue; the amount
+  of ozone follows the season and latitude. A daylight white balance makes
+  sunlight read as white.
 - **Cloud lighting.** MSFS lights its volumetric clouds with a mild forward
   scattering and simple stand-ins for the light bounced inside them, which
   gives evenly lit, "cotton-ball" clouds. Silver linings are weak, and there
@@ -285,13 +288,32 @@ What it can't do:
 ### Sky colours
 
 What it can do:
-- **Real-world scattering** (`T8 = 1`): the Rayleigh and ozone values of the
-  published reference models (Bruneton, Hillaire), so the sky is deeper blue
-  and dusk turns blue and purple as it does outside.
+- **Sky colours fitted to the full spectrum** (`T8 = 1`):
+  - The sim's sky model works in red, green and blue. It needs one value
+    per colour for how strongly the air scatters sunlight (Rayleigh) and how
+    strongly ozone absorbs it.
+  - MSFS uses ARPC's values (`T8 = 0`), which average the measured spectra
+    over each colour.
+  - The mod's values are fitted so that the sim's model in three colours
+    matches the same model computed at 95 wavelengths. That model uses the
+    measured sunlight, air and 300 Dobson units of ozone, and is checked in
+    clean and hazy air.
+  - The difference shows at low sun and dusk. Ozone keeps the sky overhead
+    blue as the sun sets, and a low sun is the right shade of orange.
+  - Versions up to 0.3.0 used the textbook values of Bruneton and Hillaire
+    here. Those turned dusk pink-purple and a low sun too orange.
+- **Ozone by season and place** (`T14`):
+  - The amount of ozone sets how blue the sky stays at dusk. It ranges from
+    about 260 Dobson units in the tropics to about 440 in Arctic spring.
+  - The mod takes it from a climatology of balloon and satellite
+    measurements (Fortuin & Kelder, 1998, published by KNMI's TEMIS), at
+    your aircraft's latitude and the sim's date.
+  - `T14` can fix it instead (300 is the global average). It needs no
+    internet connection and applies with `T8 = 1`.
 - **A daylight white balance** (`C22`):
-  - Sunlight is slightly warm on its own. Eyes and cameras adapt to that,
-    but the sim shows it against a fixed white. With real-world sky colours,
-    cloud interiors then look beige-pink.
+  - Sunlight is slightly warm on its own. MSFS uses its real colour, from
+    the measured solar spectrum. Eyes and cameras adapt to that, but the sim
+    shows it against a fixed white, so sunlit clouds look cream.
   - The white balance makes sunlight read as white, as you'd see it.
   - It shifts the sky, the clouds and the sunlit terrain alike.
 
@@ -299,6 +321,8 @@ What it can't do:
 - The brightness and colour of the sun and moon themselves, the stars and the
   night-time light pollution stay the sim's.
 - It doesn't change the sim's exposure or the image's overall colour grading.
+- The ozone is a monthly average for your latitude. Day-to-day changes in
+  the real amount, typically 10–15 %, aren't included.
 
 ### Cloud lighting
 
@@ -336,8 +360,10 @@ What it can do:
   water, spread more evenly, and have softer edges.
   - MSFS's weather has no cloud types, so the mod infers them from each
     layer's height, depth and cover. Thin broken or overcast decks become
-    stratocumulus, stratus, altocumulus or altostratus. Scattered low clouds
-    and deep clouds stay cumulus, and cirrus keeps its own look.
+    stratocumulus, stratus, altocumulus or altostratus. A few scattered
+    clouds below about 500–750 m above the ground are stratus fractus, the
+    ragged scraps of a low deck, and are drawn like stratus. Other scattered
+    low clouds and deep clouds stay cumulus, and cirrus keeps its own look.
   - Each stratiform type gets its own share of the solid-cloud thickness
     (`C24`–`C27`: 60, 50, 40 and 30 % by default) and the sim's soft edges.
     Stratus and stratocumulus decks stay grey and solid from below, as real
@@ -521,7 +547,8 @@ ones you're most likely to touch:
 | `T0` | atmosphere: 0 = stock, 1 = the mod |
 | `T13` | haze from the sim's METARs (1), or the fixed values `T1`–`T6` (0) |
 | `T3`, `T4` | haze in the boundary layer and above it (when `T13` = 0) |
-| `T8` | sky colours: 0 = the sim's, 1 = real-world physics |
+| `T8` | sky colours: 0 = the sim's (ARPC), 1 = fitted to the full spectrum |
+| `T14` | ozone in Dobson units: 0 = by season and latitude, or a fixed amount |
 | `C22` | daylight white balance (0 = off, 1 = on) |
 | `C0` | cloud lighting: 0 = stock, 1 = the mod |
 | `C1`, `C2` | silver lining: how tight around the sun, how strong |

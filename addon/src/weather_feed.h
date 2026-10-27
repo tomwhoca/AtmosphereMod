@@ -55,6 +55,11 @@ AircraftShadow aircraft_shadow();
 // METAR with a temperature arrives. Any thread.
 float freezing_level_m();
 
+// Total ozone (Dobson units) over the aircraft, from the climatology
+// (ozone_climatology.h) at its latitude and the sim's date. NAN until the feed
+// has the aircraft. Any thread.
+float ozone_du();
+
 // The latest METAR's haze in a line, for the EFB app's settings ("KIND:
 // continental haze, visibility ~68 km, humidity 46%"); empty until a METAR
 // arrives. Any thread.

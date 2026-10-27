@@ -2,6 +2,7 @@
 
 #include "cloud_stations.h"
 #include "haze_mapping.h"
+#include "ozone_climatology.h"
 #include "settings_bridge.h"
 
 #include <windows.h>
@@ -152,6 +153,8 @@ RadarKnobs g_logged_knobs = { -1.0, -1.0, -1.0, -1.0 };
 AircraftShadow g_shadow;
 double g_logged_camera = -1.0;
 ULONGLONG g_shadow_logged = 0;
+double g_ozone_du = NAN;  // the climatology at the aircraft (ozone_climatology.h)
+double g_logged_ozone_du = NAN;
 
 // Present thread only.
 std::array<float, std::size(kDriven)> g_smoothed = {};
@@ -216,6 +219,12 @@ void update_shadow(const ShadowVars &v)
     g_shadow.heading_from_sun = static_cast<float>(relative);
     g_shadow.bank = static_cast<float>(-v.bank_rad);  // to right wing down positive
     g_shadow.span_m = static_cast<float>(v.span_ft * 0.3048);
+    g_ozone_du = ozone::column_du(v.lat, v.day_of_year);
+    if (!(std::abs(g_ozone_du - g_logged_ozone_du) < 5.0))
+    {
+        g_logged_ozone_du = g_ozone_du;
+        log("ozone: %.0f DU (climatology at latitude %.1f, day %.0f of the year)", g_ozone_du, v.lat, v.day_of_year);
+    }
     const double camera = v.camera_state * 100.0 + v.view_type;
     if (camera != g_logged_camera)
     {
@@ -794,6 +803,12 @@ float freezing_level_m()
 {
     const std::lock_guard lock(g_mutex);
     return static_cast<float>(freezing_level_locked());
+}
+
+float ozone_du()
+{
+    const std::lock_guard lock(g_mutex);
+    return static_cast<float>(g_ozone_du);
 }
 
 std::string summary()
