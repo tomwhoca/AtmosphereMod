@@ -35,8 +35,9 @@ rendering, and consists of several components:
 - **Cloud forming** (very experimental). This is just the beginning of
   experimenting with cloud shapes. MSFS's live-weather clouds are far thinner
   than real ones, puffy all over, and only loosely follow the real weather
-  reports. The mod makes clouds more solid with flat bases, and pulls the
-  clouds near weather stations toward the layers their METARs report.
+  reports. The mod makes clouds more solid with flat bases, pulls the clouds
+  near weather stations toward the layers their METARs report, and can grow
+  thunderstorms where the reports show them.
 - **METAR passing.** MSFS 2024 gives the METARs of its live weather only to
   JavaScript running inside the sim, not to add-ons like this one. A small
   EFB app, included with the mod, fetches them and passes them on. They drive
@@ -392,6 +393,26 @@ What it can do:
     and stations ahead of you are looked up before you get there.
   - **Gradual changes:** a new station fades in over 3 minutes, and a new
     report crossfades over 5 minutes.
+- **Thunderstorms** (`C32`, live weather, experimental, off by default). MSFS's
+  live weather has no thunderstorm clouds: its heaviest rain falls from the
+  same flat-topped deck as the drier cloud around it. With this on, the mod
+  grows cumulonimbus where something shows a storm:
+  - **Where:** only near a METAR station that reports thunder (TS, VCTS) or a
+    CB or TCU layer, or under very heavy rain in the sim's weather (40 mm/h
+    and more, smaller storms). Elsewhere there are none.
+  - **What:** towers from the cloud base up toward the tropopause, leaning
+    with the wind, with an overshooting top, flanking turrets, a wall cloud and
+    an anvil of thin ice spreading downwind, frayed by the sim's own cirrus.
+  - **Five types:** single cells, sheared storms, multicells, supercells and
+    storms embedded in a cloud deck, chosen by the wind, how strongly the
+    reports show a storm, and the cell's size. Supercells need reported
+    thunder, strong wind and a big cell, so they are rare.
+  - **A life cycle:** each storm lives 45–80 minutes. It grows from towering
+    cumulus, matures and dissipates, and the next one forms elsewhere. Most
+    are small; the biggest are the rarest.
+  - **Lit like real towers:** MSFS darkens a cloud by everything above it, which
+    would leave a tall tower grey at any sun angle. The mod gives the towers'
+    sides the sky light they would get in the open.
 
 What it can't do:
 - **Cloud type and depth aren't reported.** A METAR gives only each layer's
@@ -405,6 +426,10 @@ What it can't do:
   as Active Sky) keep their own cloud layers.
 - **Experimental.** Shapes and transitions can look wrong in some weather.
   `C20 = 0` switches the anchoring off.
+- **Thunderstorms are visual only.** The aircraft doesn't feel them (no
+  turbulence, updrafts or downdrafts), there is no lightning of their own, and
+  the weather radar shows the sim's own rain. Over oceans and remote areas
+  without stations they form only under very heavy rain.
 
 ### METAR passing
 
@@ -536,7 +561,8 @@ The main settings are in the **AtmosphereMod app on your EFB tablet**, as
 switches and sliders in four tabs: Haze, Sky & light, Cloud lighting and Clouds.
 Changes apply at once and are saved to `tunables.ini`. While the haze comes
 from the METAR, the manual haze sliders are greyed out and show what the METAR
-set. The app's "Reload tunables.ini" button does what Ctrl+Shift+F10 does.
+set. Hover over a setting's name for an explanation of what it does. The app's
+"Reload tunables.ini" button does what Ctrl+Shift+F10 does.
 
 Every setting, including the ones the app doesn't show, is in `tunables.ini`,
 where each one is explained; edits there take effect with Ctrl+Shift+F10. The
@@ -560,6 +586,7 @@ ones you're most likely to touch:
 | `C23` | cloud types: 0 = every cloud like cumulus, 1 = softer stratiform decks |
 | `C24`–`C27` | thickness of stratocumulus, stratus, altocumulus and altostratus (share of `C16`) |
 | `C28` | smooth, flat cloud bases (0 = the sim's puffs) |
+| `C32` | thunderstorms (experimental): 0 = off, 1 = on |
 
 ## Uninstalling
 
@@ -570,9 +597,9 @@ and your `tunables.ini`). ReShade itself stays installed.
 
 ## Known limitations
 
-- METAR anchoring and cloud types work with live weather only. Weather presets
-  and third-party weather engines keep their own cloud layers, drawn like
-  cumulus.
+- METAR anchoring, cloud types and thunderstorms work with live weather only.
+  Weather presets and third-party weather engines keep their own cloud layers,
+  drawn like cumulus.
 - After a sim update, parts of the mod fall back to stock until it is
   re-patched.
 - DirectX 12 only. The performance cost hasn't been measured on other systems
