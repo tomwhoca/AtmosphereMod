@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 # The version ReShade shows, and the release's (tools/make_release.py).
-project(AtmosphereMod VERSION 0.3.0 LANGUAGES CXX RC)
+project(AtmosphereMod VERSION 0.4.0 LANGUAGES CXX RC)
 
 configure_file(src/version.rc.in ${CMAKE_CURRENT_BINARY_DIR}/version.rc @ONLY)
 add_library(AtmosphereMod SHARED src/atmosphere_mod.cpp src/weather_feed.cpp src/settings_bridge.cpp
