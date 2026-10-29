@@ -51,6 +51,7 @@ int main()
                   m.layers[1].type == 1,
               "EDDK: FEW///CB at 3280 ft, estimated");
         check(m.low_layer_ft == 3280.0, "EDDK: the haze's lowest layer is the estimated base, not 0");
+        check(m.report_min == 25 * 1440 + 11 * 60 + 50, "EDDK: report time 251150Z");
         const anchor::Anchor a = anchor::from_metar(m, 50.866, 7.143, 77.0, 14.0);
         bool cb_ok = false;
         for (const anchor::Layer &l : a.layers)

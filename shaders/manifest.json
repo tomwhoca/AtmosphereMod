@@ -32,33 +32,50 @@
       "entry": "ch_multi_scatt",
       "crcs": "all",
       "args": {
-        "no_phase": true
+        "no_phase": true,
+        "quadratic": true,
+        "ms_rows": "write"
       },
-      "note": "the multiple-scattering LUT: our medium"
+      "note": "the multiple-scattering LUT: our medium; its 20 march segments spaced quadratically and its rows quadratic in height, so that a dense haze keeps its own colour (dust, smoke)"
     },
     {
       "entry": "ch_sky_view",
       "crcs": "all",
-      "note": "the sky-view LUT: our medium and aerosol phase"
+      "note": "the sky-view LUT: our medium and aerosol phase; the haze field: each march sample's haze from the METAR stations around (HAZE_ROWS); reads the multiple-scattering LUT's quadratic rows; its 40 march segments spaced quadratically",
+      "args": {
+        "field": true,
+        "ms_rows": "read",
+        "quadratic": true
+      }
     },
     {
       "entry": "ch_camera_volume",
       "crcs": "all",
       "args": {
         "far_slice": true,
-        "dump": "camera"
+        "dump": "camera",
+        "field": true,
+        "ms_rows": "read"
       },
-      "note": "the aerial-perspective volume: our medium and aerosol phase, the far-slice stretch (T12); on capture: dumps its constants (region B)"
+      "note": "the aerial-perspective volume: our medium and aerosol phase, the far-slice stretch (T12); on capture: dumps its constants (region B); the haze field: each march sample's haze from the METAR stations around (HAZE_ROWS); reads the multiple-scattering LUT's quadratic rows"
     },
     {
       "entry": "ph_globalCloudAtmospherics",
       "crcs": "all",
-      "note": "the far cloud layer's atmosphere map: our medium and aerosol phase"
+      "note": "the far cloud layer's atmosphere map: our medium and aerosol phase; the haze field: each march sample's haze from the METAR stations around (HAZE_ROWS); reads the multiple-scattering LUT's quadratic rows",
+      "args": {
+        "field": true,
+        "ms_rows": "read"
+      }
     },
     {
       "entry": "ps_deferredRendering",
       "crcs": "all",
-      "note": "per-pixel aerial perspective on deferred surfaces (terrain, buildings)"
+      "note": "per-pixel aerial perspective on deferred surfaces (terrain, buildings); the haze field: each march sample's haze from the METAR stations around (HAZE_ROWS); reads the multiple-scattering LUT's quadratic rows",
+      "args": {
+        "field": true,
+        "ms_rows": "read"
+      }
     },
     {
       "entry": "ch_volumetric_clouds_render",
@@ -99,7 +116,11 @@
     {
       "entry": "ch_sky",
       "crcs": "all",
-      "note": "environment cubemap: inline aerial perspective on its terrain and clouds, which feeds the sky-light SH (cloud and scene ambient) and reflections"
+      "note": "environment cubemap: inline aerial perspective on its terrain and clouds, which feeds the sky-light SH (cloud and scene ambient) and reflections; the haze field: each march sample's haze from the METAR stations around (HAZE_ROWS); reads the multiple-scattering LUT's quadratic rows",
+      "args": {
+        "field": true,
+        "ms_rows": "read"
+      }
     }
   ]
 }

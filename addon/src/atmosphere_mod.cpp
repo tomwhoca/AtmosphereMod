@@ -355,6 +355,12 @@ constexpr float kFallbackFreezingLevel = 3000.0f;  // m, R4 = 0 before the first
 // aircraft. The shaders scale their 300 DU fit by column / 300 (ModParams.extra[1]).
 float g_ozone_setting = 0.0f;
 std::atomic<float> g_ozone_scale{1.0f};
+// The haze field: T15 (tunables.ini only, on unless 0) has the weather feed
+// write the stations' haze into the station table, and g_haze_rows says the
+// table on the GPU has them: the patched atmosphere passes then read them
+// (DebugCapture bit 9, push_mod_args).
+constexpr uint32_t kHazeFieldBit = 512;
+std::atomic<bool> g_haze_rows{false};
 
 std::mutex g_seen_mutex;  // guards the log-once sets below
 std::unordered_set<uint32_t> g_seen_shaders;
@@ -564,6 +570,23 @@ std::array<float, N> load_tunables(char prefix = 'T')
     return result;
 }
 
+// One tunable that an older tunables.ini may not have yet: `fallback` then.
+float load_tunable(char prefix, unsigned want, float fallback)
+{
+    std::ifstream file(tunables_path());
+    std::string line;
+    const std::string format = std::string(" ") + prefix + "%u = %f";
+    float result = fallback;
+    while (std::getline(file, line))
+    {
+        unsigned index;
+        float value;
+        if (sscanf_s(line.c_str(), format.c_str(), &index, &value) == 2 && index == want)
+            result = value;
+    }
+    return result;
+}
+
 pipeline create_replacement(device *dev, pipeline_layout layout, const std::vector<uint8_t> &code, uint32_t crc)
 {
     shader_desc cs = {};
@@ -693,6 +716,7 @@ void reload(device *dev)
     const auto radar_tunables = load_tunables('R');
     const auto cloud_tunables = load_tunables<kCloudTunableCount>('C');
     const float ozone_setting = load_tunables<kTunableCount + 1>()[kTunableCount];  // T14
+    weather::set_haze_field(load_tunable('T', 15, 1.0f) > 0.0f);
     struct Job
     {
         uint64_t handle;
@@ -952,6 +976,10 @@ void push_mod_args(command_list *cmd_list, const TrackedPipeline &info, const st
         p.debug_capture = can_capture && g_capture.load(std::memory_order_acquire) == Capture::armed;
         if (info.radar)
             p.debug_capture |= 2;  // R0..R13 in the tunables (the replica runs its model only then)
+        // bit 6: the debug buffer (20 MB) is bound; bit 9: its station table has
+        // the haze rows (the patched ps_deferredRendering reads them then)
+        if (can_capture)
+            p.debug_capture |= 64 | (g_haze_rows.load(std::memory_order_relaxed) ? kHazeFieldBit : 0);
         p.frame = g_capture_stamp.load(std::memory_order_relaxed);
         cmd_list->push_constants(shader_stage::all_graphics, info.layout, info.mod_param, 0, sizeof(p) / 4, &p);
         if (can_capture)
@@ -991,6 +1019,9 @@ void push_mod_args(command_list *cmd_list, const TrackedPipeline &info, const st
     if (g_debug_view.handle != 0)
         p.debug_capture |=
             4 | 8 | 16 | 64 | 128 | ((uint32_t(g_frame.load(std::memory_order_relaxed)) & 0xFFFF) << 16);
+    // bit 9: the station table has the haze rows (the haze field: patch_dxil.py HAZE_ROWS)
+    if (g_debug_view.handle != 0 && g_haze_rows.load(std::memory_order_relaxed))
+        p.debug_capture |= kHazeFieldBit;
     // bit 8: no thunderstorm cells (C32 <= 0); the cloud generator's stay off.
     // Inverted so that shaders under an add-on without C32 keep them.
     if (g_storms_off.load(std::memory_order_relaxed))
@@ -1582,6 +1613,9 @@ void upload_anchor_table(effect_runtime *runtime, uint64_t frame)
     g_anchor_uploaded = table;
     g_anchor_uploaded_at = frame;
     ++g_anchor_uploads;
+    uint32_t haze_word;
+    std::memcpy(&haze_word, table.data() + 12, 4);
+    g_haze_rows.store(haze_word == anchor::kHazeMagic, std::memory_order_relaxed);
 }
 
 void request_capture(uint64_t frame)
@@ -2337,6 +2371,7 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE re
     g_replacements = load_replacements();
     g_tunables = load_tunables();
     g_ozone_setting = load_tunables<kTunableCount + 1>()[kTunableCount];  // T14
+    weather::set_haze_field(load_tunable('T', 15, 1.0f) > 0.0f);
     g_effective_tunables = g_tunables;
     g_radar_tunables = load_tunables('R');
     g_cloud_tunables = load_tunables<kCloudTunableCount>('C');

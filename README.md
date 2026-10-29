@@ -259,13 +259,32 @@ What it can do:
     `T6`).
   - Its glare: the forward-scattering glow toward the sun (`T9`), plus a weak
     glow away from it (`T7`).
-- **Haze from the weather** (`T13 = 1`). These come from the METAR nearest
-  the aircraft, and changes are smoothed over about 30 seconds:
+- **Haze from the weather** (`T13 = 1`). Each METAR station's report sets
+  the haze around it:
   - the visibility;
   - the humidity, from the temperature and dew point;
   - weather codes such as mist (BR), haze (HZ), smoke (FU) and dust (DU).
 
-  Together they set the amount of haze, the layer's top and its type.
+  Together they set the amount of haze, the layer's top (above the station's
+  elevation) and its type.
+- **Haze from all the stations around** (`T15 = 1`, experimental). The mod
+  keeps up to eight stations around the aircraft: the nearest, the ones
+  ahead, beside and behind it, and the ones it has passed. Every part of the
+  view gets the haze of the stations nearest to it, weighted by distance:
+  - A hazy valley ahead looks hazier than the clear coast behind you.
+  - Flying from one station's area to the next, the haze changes gradually.
+    The whole view no longer switches at once when the nearest station
+    changes.
+  - A station's new report fades in over five minutes.
+  - Stations whose METAR gives no visibility don't count for the haze, and a
+    report hours older than the others (a station that stopped reporting) is
+    ignored.
+  - "10 km or more" (9999, CAVOK) next to a station reporting less is taken
+    as just over 10 km. Far from such stations it's estimated from the air
+    mass and humidity.
+
+  With `T15 = 0`, the nearest METAR alone sets the haze everywhere, smoothed
+  over about 30 seconds.
 - **The same haze everywhere.** It applies to:
   - the sky;
   - the terrain and buildings;
@@ -280,9 +299,11 @@ What it can't do:
 - **Fog and mist layers.** The sim draws low fog and mist as a separate
   system, which the mod leaves alone. In fog or very low visibility, most of
   what you see is still MSFS's own fog.
-- **Changes across the landscape.** The haze varies with height only. It
-  can't show a smog plume over one city or haze in one valley; it follows the
-  nearest METAR.
+- **Detail between stations.** The haze changes only as much as the
+  stations' reports do. It can't show a smog plume over one city that no
+  station reports, or haze that stays in one valley.
+- **The sun's light through the haze** is still worked out from the haze at
+  the aircraft, wherever it shines. So is the haze colour of distant clouds.
 - **Without METARs.** If the EFB app isn't installed, or the sim gives no
   METARs, the fixed values `T1`–`T6` are used.
 
@@ -450,9 +471,10 @@ add-on outside the sim can't read them directly.
 
 **Which METARs.**
 - Every minute: the METAR nearest the aircraft, for the haze and the clouds.
-- Every 15 seconds, in turn: one more, nearest a point ahead of or beside the
-  aircraft (50 and 110 km ahead, 60 km to either side), so the cloud
-  anchoring knows the stations ahead.
+- Every 15 seconds, in turn: one more, nearest a point around the aircraft
+  (50 and 110 km ahead, 60 km to either side, 80 km behind to either side and
+  70 km behind). The cloud anchoring then knows the stations ahead, and the
+  haze has stations all around.
 - For each new station, the add-on asks SimConnect for the station's position
   and elevation.
 
@@ -575,6 +597,7 @@ ones you're most likely to touch:
 | `T3`, `T4` | haze in the boundary layer and above it (when `T13` = 0) |
 | `T8` | sky colours: 0 = the sim's (ARPC), 1 = fitted to the full spectrum |
 | `T14` | ozone in Dobson units: 0 = by season and latitude, or a fixed amount |
+| `T15` | haze from all the stations around (1), or from the nearest METAR only (0) |
 | `C22` | daylight white balance (0 = off, 1 = on) |
 | `C0` | cloud lighting: 0 = stock, 1 = the mod |
 | `C1`, `C2` | silver lining: how tight around the sun, how strong |

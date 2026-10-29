@@ -80,11 +80,13 @@ const char *const kMetarEvent = "AtmosphereMod.Metar";
 const char *const kRequestEvent = "AtmosphereMod.Request";
 
 // The METAR anchoring's survey (cloud_stations.h): besides the aircraft's
-// nearest station (every minute), the stations nearest points ahead and to the
-// sides of it, one every 15 s in turn, so stations are blended in before the
-// aircraft gets to them. Bearings relative to the heading.
-constexpr struct { double bearing_deg, km; } kSurveyPoints[] = { { 0.0, 50.0 }, { 0.0, 110.0 }, { -60.0, 60.0 },
-                                                                  { 60.0, 60.0 } };
+// nearest station (every minute), the stations nearest points ahead, to the
+// sides and behind it, one every 15 s in turn, so stations are blended in
+// before the aircraft gets to them, and the haze has stations all around
+// (behind, too, at the start of a flight). Bearings relative to the heading.
+constexpr struct { double bearing_deg, km; } kSurveyPoints[] = { { 0.0, 50.0 },    { 0.0, 110.0 }, { -60.0, 60.0 },
+                                                                  { 60.0, 60.0 },  { -125.0, 80.0 },
+                                                                  { 125.0, 80.0 }, { 180.0, 70.0 } };
 constexpr ULONGLONG kSurveyIntervalMs = 15000;
 
 // Order of kAircraftVars.
@@ -155,6 +157,13 @@ double g_logged_camera = -1.0;
 ULONGLONG g_shadow_logged = 0;
 double g_ozone_du = NAN;  // the climatology at the aircraft (ozone_climatology.h)
 double g_logged_ozone_du = NAN;
+anchor::HazeBlend g_haze_blend;  // tunables.ini's haze and T13 (apply), for the table's haze rows
+bool g_have_blend = false;
+size_t g_haze_stations = 0;      // stations the aircraft's haze came from (0: the nearest METAR's)
+int g_newest_report = -1;        // the newest METAR's report_min (haze_mapping.h), for stale reports
+std::string g_stale_logged;      // the last stale report logged
+
+std::atomic<bool> g_haze_field{true};  // T15
 
 // Present thread only.
 std::array<float, std::size(kDriven)> g_smoothed = {};
@@ -244,24 +253,44 @@ void update_shadow(const ShadowVars &v)
     }
 }
 
-std::array<float, std::size(kDriven)> to_array(const haze::Tunables &t)
-{
-    return { t.bl_top_km, t.bl_edge_km, t.bl_haze, t.ft_haze, t.ft_scale_km, t.brown, t.g, t.angstrom };
-}
+static_assert(std::tuple_size_v<anchor::Haze> == std::size(kDriven));
 
-// Caller holds g_mutex.
+// Caller holds g_mutex. The aircraft's haze: with the haze field, the
+// stations' around it by distance (cloud_stations.h haze_at), else (and
+// until a station counts) the nearest METAR's, at the terrain under it.
 std::string recompute()
 {
     const haze::Tunables t = haze::derive(g_inputs);
-    g_target = to_array(t);
+    g_target = anchor::haze_values(t);
+    g_haze_stations = 0;
+    anchor::Haze field = {};
+    if (g_haze_field && g_have_ground)
+        g_haze_stations = g_stations.haze_at(g_last_lat, g_last_lon, now_s(), field);
+    if (g_haze_stations > 0)
+        g_target = field;
     g_have_target = true;
     // (haze::AirMass order)
     static const char *const kinds[] = { "continental haze", "haze (HZ)", "smoke (FU)", "dust", "volcanic ash" };
+    // the surface aerosol: haze_mapping.h's T3 + T4 = sigma / kStockMieExtinction
+    const double sigma = g_haze_stations > 0 ? (field[2] + field[3]) * haze::kStockMieExtinction : t.sigma;
+    char from[64] = "";
+    if (g_haze_stations > 1)
+        snprintf(from, sizeof(from), " (+%zu)", g_haze_stations - 1);
     char summary[160];
-    snprintf(summary, sizeof(summary), "%s: %s, visibility ~%.0f km, humidity %.0f%%", g_inputs.metar.icao.c_str(),
-             kinds[static_cast<int>(t.air)], 3.0 / (t.sigma + haze::kRayleigh550), 100.0 * t.rh);
+    snprintf(summary, sizeof(summary), "%s%s: %s, visibility ~%.0f km, humidity %.0f%%", g_inputs.metar.icao.c_str(),
+             from, kinds[static_cast<int>(t.air)], 3.0 / (sigma + haze::kRayleigh550), 100.0 * t.rh);
     g_summary = summary;
-    return haze::describe(g_inputs, t);
+    std::string line = haze::describe(g_inputs, t);
+    if (g_haze_stations > 0)
+    {
+        char tail[192];
+        snprintf(tail, sizeof(tail), " | haze field from %zu station%s: T1 %.2f T2 %.2f T3 %.1f T4 %.1f T5 %.1f T6 %.2f "
+                 "T9 %.2f T10 %.2f (vis ~%.0f km)", g_haze_stations, g_haze_stations == 1 ? "" : "s", field[0],
+                 field[1], field[2], field[3], field[4], field[5], field[6], field[7],
+                 3.0 / (sigma + haze::kRayleigh550));
+        line += tail;
+    }
+    return line;
 }
 
 // Caller holds g_mutex. NAN without a METAR temperature. Without the station's
@@ -490,6 +519,7 @@ bool dispatch(HANDLE sim, std::string &partial, std::string &last_metar, ULONGLO
                     log("the aircraft moved %.1f, %.1f deg at once: cloud anchor stations cleared", v.lat - g_last_lat,
                         v.lon - g_last_lon);
                     g_stations.restart();
+                    g_newest_report = -1;
                     g_jumped = true;
                 }
                 const double before = g_inputs.ground_km;
@@ -604,6 +634,21 @@ bool dispatch(HANDLE sim, std::string &partial, std::string &last_metar, ULONGLO
                     metar.request_lat, metar.request_lon);
                 break;
             }
+            // A report much older than the newest one: a station that stopped reporting.
+            if (metar.report_min >= 0)
+            {
+                if (g_newest_report < 0 || haze::report_minutes_older(g_newest_report, metar.report_min) > 0)
+                    g_newest_report = metar.report_min;
+                const int age = haze::report_minutes_older(metar.report_min, g_newest_report);
+                if (age > haze::kStaleReportMin)
+                {
+                    if (metar.raw != g_stale_logged)
+                        log("METAR %s is %d h older than the newest report: stale, ignored | %s", metar.icao.c_str(),
+                            age / 60, metar.raw.c_str());
+                    g_stale_logged = metar.raw;
+                    break;
+                }
+            }
             if (surveyed(metar))  // only for the cloud anchoring
             {
                 anchor_metar(sim, metar, metar.request_lat, metar.request_lon, false);
@@ -690,6 +735,7 @@ void run_loop()
             g_station.clear();  // request the elevation again on this connection
             g_have_knobs = false;
             g_stations.restart();
+            g_newest_report = -1;
         }
         // The radar panel knobs (sent when they change) and which aircraft is loaded.
         for (const char *var : kRadarKnobVars)
@@ -794,9 +840,18 @@ size_t cloud_anchor_table(std::array<uint8_t, kAnchorTableBytes> &out)
 {
     const std::lock_guard lock(g_mutex);
     const double now = now_s();
-    g_stations.tick(g_have_ground ? g_last_lat : NAN, g_have_ground ? g_last_lon : NAN, now);
-    g_stations.table(now, out.data());
+    g_stations.tick(g_have_ground ? g_last_lat : NAN, g_have_ground ? g_last_lon : NAN, now,
+                    g_have_ground ? g_inputs.local_hour : NAN, g_newest_report);
+    // (the haze rows only once the add-on's own values are the weather's too)
+    g_stations.table(now, out.data(), g_haze_field && g_have_blend && g_have_target ? &g_haze_blend : nullptr);
     return g_stations.in_use();
+}
+
+void set_haze_field(bool on)
+{
+    if (g_haze_field.exchange(on) != on)
+        log(on ? "haze field on (T15): the haze from all the stations around"
+               : "haze field off (T15 = 0): the haze from the nearest METAR only");
 }
 
 float freezing_level_m()
@@ -822,6 +877,10 @@ std::array<float, kTunableCount> apply(const std::array<float, kTunableCount> &i
     std::array<float, std::size(kDriven)> target;
     {
         const std::lock_guard lock(g_mutex);
+        for (size_t i = 0; i < std::size(kDriven); ++i)
+            g_haze_blend.ini[i] = ini[kDriven[i]];
+        g_haze_blend.mix = std::clamp(ini[13], 0.0f, 1.0f);
+        g_have_blend = true;
         if (!g_have_target)
             return ini;
         target = g_target;

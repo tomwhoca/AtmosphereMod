@@ -75,6 +75,7 @@ struct Metar
     std::vector<CloudLayer> layers;
     bool cavok = false;
     double request_lat = NAN, request_lon = NAN;  // where the EFB app asked for it (the aircraft then)
+    int report_min = -1;          // the report's DDHHMMZ as day * 1440 + minutes; -1 unknown
     // The sky is described: layers, CAVOK, or SKC/CLR/NSC/NCD (not with VV,
     // an obscured sky). NSC/NCD/CAVOK: nothing significant below 5,000 ft.
     bool clouds_reported = false, no_significant_cloud = false;
@@ -125,6 +126,24 @@ inline double smoothstep(double a, double b, double x)
 }
 } // namespace detail
 
+// A report more than this older than the newest one the sim has given is
+// stale: a station that stopped reporting (LIRT gave an 8-day-old SPECI with
+// no visibility or sky near LIMS, 2026-10-29). Relative to the newest report,
+// not the clock, so a sim set to another time keeps its METARs.
+constexpr int kStaleReportMin = 180;
+
+// How many minutes report `older` is older than report `newer` (report_min,
+// the same or the previous month; negative: it's newer). Across a month's end
+// the previous month counts as 28 days, the shortest, so a report is never
+// called older than it is.
+inline int report_minutes_older(int older, int newer)
+{
+    int d = newer - older;
+    if (d < -15 * 1440)
+        d += 28 * 1440;
+    return d;
+}
+
 // Parses the EFB app's message: {"time":..., "metar":{...}} or "metar":null.
 inline Metar parse_metar_json(const std::string &json)
 {
@@ -137,6 +156,11 @@ inline Metar parse_metar_json(const std::string &json)
     m.request_lat = number(json, "^\\{\"time\":\"[^\"]*\",\"lat\":(-?[0-9.]+)");
     m.request_lon = number(json, "^\\{\"time\":\"[^\"]*\",\"lat\":-?[0-9.]+,\"lon\":(-?[0-9.]+)");
     m.raw = match(json, "\"metarString\":\"([^\"]*)\"");
+    {
+        std::smatch t;
+        if (std::regex_search(m.raw, t, std::regex("(?:^|\\s)[A-Z][A-Z0-9]{3} ([0-3][0-9])([0-2][0-9])([0-5][0-9])Z\\b")))
+            m.report_min = std::stoi(t[1]) * 1440 + std::stoi(t[2]) * 60 + std::stoi(t[3]);
+    }
     m.temp_c = number(json, "\"temp\":(-?[0-9.]+)");
     m.dew_c = number(json, "\"dew\":(-?[0-9.]+)");
     // (the sim marks a value not reported with INT_MIN, -2147483648)

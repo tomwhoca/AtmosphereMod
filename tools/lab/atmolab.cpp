@@ -7,6 +7,8 @@
 //            game) instead of feeding every pass the stock inputs
 //   also: --pitch DEG (camera), --apdist M (aerial-perspective range)
 //
+// ATMOLAB_OFF=layer,shadow,glow,cover: neutralise those synthetic inputs (cover: the regional
+// cloud-cover dimming).
 // ATMOLAB_PATCHED=DIR: for passes with DIR/<crc>.cso (stock DXIL patched by
 // tools/patch_dxil.py), run that in place of stock, with our inputs and
 // tunables, so it is compared against "ours" (with ATMOLAB_OURS=build/replicas:
@@ -518,6 +520,10 @@ int main(int argc, char **argv)
     light[12] = light[13] = light[14] = 0.02f;                         // moon illuminance
     for (int c = 0; c < 4; ++c) light[20 + c * 5] = 1.0f;              // cloud-cover matrix = identity
     light[36] = 10000.0f; light[37] = 50000.0f;                        // cloud-cover fade 10-50 km
+    // ATMOLAB_OFF=cover: no regional cloud-cover dimming. (Its shadow covers 10 km around the
+    // origin, where a dense haze gets nearly all its light: it darkened and greyed those tests.)
+    if (const char *o = getenv("ATMOLAB_OFF"); o && strstr(o, "cover"))
+        light[37] = 0.0f;
 
     auto cb_global = upload_buffer(lab, global.data(), global.size() * 4);
     auto cb_atmo = upload_buffer(lab, atmo.data(), atmo.size() * 4);

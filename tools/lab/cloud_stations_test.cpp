@@ -283,11 +283,203 @@ int scenario()
     printf(g_fails ? "%d check(s) failed\n" : "all checks passed\n", g_fails);
     return g_fails ? 1 : 0;
 }
+
+// An open-ended visibility's haze pulled toward kOpenVisKm by `pull` (cloud_stations.h
+// effective_haze), for the expectations.
+anchor::Haze open_pulled(anchor::Haze h, double pull)
+{
+    const double k = haze::kStockMieExtinction;
+    const auto sigma_at = [](double km) { return 3.0 / km - haze::kRayleigh550; };
+    const double own = std::min((h[2] + h[3]) * k, sigma_at(anchor::kOpenMinVisKm));
+    const double sigma = own + std::max(sigma_at(anchor::kOpenVisKm) - own, 0.0) * pull;
+    h[2] = static_cast<float>(std::max(sigma / k - h[3], 0.0));
+    return h;
+}
+
+// Visibility (km) from a haze row's T3 and T4, as haze_mapping.h defines it.
+double row_vis_km(const std::array<float, 8> &r)
+{
+    return 3.0 / ((r[1] + r[2]) * haze::kStockMieExtinction + haze::kRayleigh550);
+}
+
+// The haze from the stations: the table's haze rows (blended into the ini's by
+// T13), their crossfade between METARs, the time of day, and haze_at's weighting.
+int haze_scenario()
+{
+    using anchor::Haze, anchor::kCrossfadeS, anchor::kHazeOffset, anchor::kHazeRowBytes;
+    anchor::StationSet set([](const std::string &line) { printf("  log: %s\n", line.c_str()); });
+    Table t;
+    const double lat = 55.618, lon = 12.656;
+    const auto haze_row = [&t](size_t i) {
+        std::array<float, 8> r;
+        std::memcpy(r.data(), t.bytes.data() + kHazeOffset + kHazeRowBytes * i, sizeof(r));
+        return r;
+    };
+    const auto derived = [](const haze::Metar &m, double elevation_m, double hour) {
+        haze::Inputs in;
+        in.metar = m;
+        in.ground_km = elevation_m * 0.001;
+        in.local_hour = hour;
+        return anchor::haze_values(haze::derive(in));
+    };
+    printf("haze rows\n");
+    haze::Metar clear = metar("EKCH", { { 4000.0, 3, -1 } });
+    clear.vis_m = 10000.0;
+    clear.vis_open = true;
+    haze::Metar hazy = metar("ESMS", { { 4000.0, 3, -1 } });
+    hazy.vis_m = 4000.0;
+    hazy.haze = true;
+    set.on_metar(clear, lat, lon, true, 3.0, 12.0, lat, lon, 0.0);
+    set.on_position("EKCH", 55.618, 12.656, 3.0, 0.5);
+    set.on_metar(hazy, 55.5, 13.3, false, 0.0, 12.0, lat, lon, 1.0);
+    set.on_position("ESMS", 55.529, 13.371, 69.0, 1.5);
+    set.tick(lat, lon, 2.0);
+    anchor::HazeBlend blend;
+    blend.ini = { 1.5f, 0.15f, 4.0f, 0.6f, 2.5f, 0.05f, 0.7f, 1.3f };
+    blend.mix = 1.0f;
+    set.table(2.0, t.bytes.data());
+    check(t.word(3) == 0, "no haze rows without a blend");
+    set.table(2.0, t.bytes.data(), &blend);
+    check(t.word(3) == anchor::kHazeMagic, "the haze rows' magic");
+    // EKCH's 9999 is open-ended and ESMS (4 km) 46 km away: pulled toward 12 km (kOpenVisKm)
+    const Haze esms = derived(hazy, 69.0, 12.0);
+    const double ekch_esms_km = anchor::distance_km(55.618, 12.656, 55.529, 13.371);
+    const Haze ekch = open_pulled(derived(clear, 3.0, 12.0), std::exp(-std::pow(ekch_esms_km / anchor::kOpenPullKm, 2)));
+    const auto row_of = [](const Haze &h) { return std::array<float, 8>{ h[0], h[2], h[3], h[4], h[5], h[7], 1, 0 }; };
+    // (the rows went through the blend with mix 1: ini + (h - ini) * 1, within float rounding)
+    const auto same = [](const std::array<float, 8> &a, const std::array<float, 8> &b) {
+        for (size_t k = 0; k < a.size(); ++k)
+            if (!near(a[k], b[k], 1e-5 * (1.0 + std::abs(b[k]))))
+                return false;
+        return true;
+    };
+    check(same(haze_row(0), row_of(ekch)) && same(haze_row(1), row_of(esms)), "the rows: each station's haze at its elevation");
+    check(near(haze_row(1)[0] - haze_row(0)[0], 0.066, 1e-4),
+          "ESMS's top 66 m above EKCH's, as its elevation: " + std::to_string(haze_row(1)[0]));
+    check(esms[2] > 2.0f * ekch[2], "4 km HZ is hazier than 9999: T3 " + std::to_string(esms[2]) + " vs " +
+                                       std::to_string(ekch[2]));
+    blend.mix = 0.25f;
+    set.table(2.0, t.bytes.data(), &blend);
+    check(near(haze_row(1)[1], blend.ini[2] + (esms[2] - blend.ini[2]) * 0.25f, 1e-4) &&
+              near(haze_row(1)[5], blend.ini[7] + (esms[7] - blend.ini[7]) * 0.25f, 1e-5),
+          "blended into the ini's by T13");
+    blend.mix = 1.0f;
+
+    printf("haze at a point\n");
+    Haze h = {};
+    check(set.haze_at(55.618, 12.656, 2.0, h) == 2, "two stations count");
+    const double d1 = anchor::distance_km(55.618, 12.656, 55.529, 13.371), c2 = anchor::kHazeIdwKm * anchor::kHazeIdwKm;
+    const double b0 = 1.0 / c2, b1 = 1.0 / (d1 * d1 + c2);
+    check(near(h[2], (b0 * ekch[2] + b1 * esms[2]) / (b0 + b1), 1e-4), "at EKCH: inverse distance");
+    check(std::abs(h[2] - ekch[2]) < 0.1 * std::abs(esms[2] - ekch[2]), "at EKCH mostly EKCH's");
+    Haze mid = {};
+    set.haze_at(0.5 * (55.618 + 55.529), 0.5 * (12.656 + 13.371), 2.0, mid);
+    check(near(mid[2], 0.5 * (ekch[2] + esms[2]), 0.01 * (esms[2] - ekch[2])),
+          "half way: half each " + std::to_string(mid[2]));
+
+    printf("haze crossfade\n");
+    haze::Metar hazier = hazy;
+    hazier.vis_m = 2500.0;
+    const Haze esms2 = derived(hazier, 69.0, 12.0);
+    set.on_metar(hazier, 55.5, 13.3, false, 0.0, 12.0, lat, lon, 100.0);
+    set.table(100.0, t.bytes.data(), &blend);
+    check(same(haze_row(1), row_of(esms)), "the old haze at the start of the crossfade");
+    set.table(100.0 + kCrossfadeS / 2, t.bytes.data(), &blend);
+    check(near(haze_row(1)[1], 0.5 * (esms[2] + esms2[2]), 1e-3), "half way: " + std::to_string(haze_row(1)[1]));
+    set.table(100.0 + kCrossfadeS, t.bytes.data(), &blend);
+    check(same(haze_row(1), row_of(esms2)), "the new haze after it");
+
+    printf("time of day\n");
+    set.tick(lat, lon, 1000.0, 12.1);
+    set.table(1000.0, t.bytes.data(), &blend);
+    check(same(haze_row(1), row_of(esms2)), "under kHazeHourStep: unchanged");
+    set.tick(lat, lon, 1000.0, 22.0);
+    set.table(1000.0 + kCrossfadeS, t.bytes.data(), &blend);
+    const Haze night = derived(hazier, 69.0, 22.0);
+    check(same(haze_row(1), row_of(night)) && night[0] < esms2[0], "at night: the night's lower top " +
+                                                                    std::to_string(haze_row(1)[0]));
+
+    printf("no visibility\n");
+    haze::Metar blind = metar("LIRT", {});  // (an AUTO report with //// for visibility)
+    blind.raw = "SPECI LIRT 211356Z AUTO 27016G26KT 240V310 //// // ///////// 11/10 Q1015";
+    blind.clouds_reported = false;
+    set.on_metar(blind, 55.7, 12.5, false, 0.0, 22.0, lat, lon, 1100.0);
+    set.on_position("LIRT", 55.7, 12.5, 10.0, 1100.5);
+    set.tick(lat, lon, 1101.0, 22.0);
+    set.table(1101.0 + anchor::kFadeInS, t.bytes.data(), &blend);
+    check(t.weight(2) == 1.0f && haze_row(2)[6] == 0.0f && haze_row(1)[6] == 1.0f,
+          "a station without visibility: in the table for its clouds, not for the haze");
+    check(set.haze_at(55.7, 12.5, 1101.0 + anchor::kFadeInS, h) == 2, "... and haze_at leaves it out");
+
+    printf("stale report\n");
+    haze::Metar fresh = hazier;
+    check(fresh.report_min < 0, "the test's METARs have no report time");
+    blind.report_min = 21 * 1440 + 13 * 60 + 56;
+    set.on_metar(blind, 55.7, 12.5, false, 0.0, 22.0, lat, lon, 1500.0);
+    const int newest = 29 * 1440 + 14 * 60 + 20;
+    check(haze::report_minutes_older(blind.report_min, newest) / 60 == 192, "8 days old");
+    check(haze::report_minutes_older(30 * 1440 + 23 * 60, 1 * 1440 + 60) < 0 &&
+              haze::report_minutes_older(21 * 1440, 1 * 1440) > 7 * 1440,
+          "across a month's end: 2 h old isn't stale, 8+ days is");
+    set.tick(lat, lon, 1500.0, 22.0, newest);
+    set.table(1500.0 + anchor::kRoomFadeS / 2, t.bytes.data(), &blend);
+    check(near(t.weight(2), 0.5), "fading out: " + std::to_string(t.weight(2)));
+    set.tick(lat, lon, 1500.0 + anchor::kRoomFadeS + 1.0, 22.0, newest);
+    check(set.in_use() == 2, "then gone");
+    set.tick(lat, lon, 1600.0, 22.0, newest);
+    check(set.in_use() == 2, "the stations without a report time stay");
+
+    printf("open-ended visibility\n");
+    {
+        anchor::StationSet open_set([](const std::string &) {});
+        haze::Metar sbeg = metar("SBEG", { { 2500.0, 3, -1 } }), sbmn = metar("SBMN", { { 2500.0, 3, -1 } });
+        sbeg.temp_c = sbmn.temp_c = 32.0;
+        sbeg.dew_c = sbmn.dew_c = 25.0;
+        sbeg.vis_m = 9000.0;
+        sbmn.vis_m = 10000.0;
+        sbmn.vis_open = true;
+        const double alat = -3.04, alon = -60.05;
+        open_set.on_metar(sbeg, -3.041, -60.051, true, 89.0, 12.0, alat, alon, 0.0);
+        open_set.on_position("SBEG", -3.041, -60.051, 89.0, 0.5);
+        open_set.on_metar(sbmn, -3.146, -59.985, false, 0.0, 12.0, alat, alon, 1.0);
+        open_set.on_position("SBMN", -3.146, -59.985, 76.0, 1.5);
+        open_set.tick(alat, alon, 2.0);
+        open_set.table(2.0, t.bytes.data(), &blend);
+        const double own = row_vis_km(row_of(derived(sbmn, 76.0, 12.0)));
+        const double pulled = row_vis_km(haze_row(1));
+        const double d = anchor::distance_km(-3.041, -60.051, -3.146, -59.985);
+        const double want = row_vis_km(row_of(open_pulled(derived(sbmn, 76.0, 12.0),
+                                                          std::exp(-std::pow(d / anchor::kOpenPullKm, 2)))));
+        check(own > 40.0 && pulled > 10.0 && pulled < 13.0 && near(pulled, want, 1e-3 * want),
+              "9999 13 km from 9000: ~12 km (own estimate " + std::to_string(own) + ", now " + std::to_string(pulled) + ")");
+        check(same(haze_row(0), row_of(derived(sbeg, 89.0, 12.0))), "the 9000 station is as reported");
+        // the hazier station 300 km away: the open report keeps its own estimate, at most 10 km's haze
+        open_set.on_position("SBEG", -5.7, -60.05, 89.0, 3.0);
+        open_set.table(3.0, t.bytes.data(), &blend);
+        check(near(row_vis_km(haze_row(1)), own, 0.01 * own), "far from the hazier station: its own " +
+                                                                  std::to_string(row_vis_km(haze_row(1))));
+        // a hazier station that's 9999 too doesn't pull
+        open_set.on_position("SBEG", -3.041, -60.051, 89.0, 4.0);
+        haze::Metar sbeg2 = sbeg;
+        sbeg2.vis_m = 10000.0;
+        sbeg2.vis_open = true;
+        open_set.on_metar(sbeg2, -3.041, -60.051, true, 89.0, 12.0, alat, alon, 5.0);
+        open_set.table(5.0 + kCrossfadeS, t.bytes.data(), &blend);
+        check(near(row_vis_km(haze_row(1)), own, 0.01 * own), "next to another 9999: its own " +
+                                                                  std::to_string(row_vis_km(haze_row(1))));
+    }
+
+    set.restart();
+    check(set.haze_at(lat, lon, 2000.0, h) == 0, "no stations: none");
+    printf(g_fails ? "%d check(s) failed\n" : "all checks passed\n", g_fails);
+    return g_fails ? 1 : 0;
+}
 } // namespace
 
 int main(int argc, char **argv)
 {
     if (argc > 1 && std::strcmp(argv[1], "--rows") == 0)
         return rows();
-    return scenario();
+    const int clouds = scenario();
+    return haze_scenario() | clouds;
 }

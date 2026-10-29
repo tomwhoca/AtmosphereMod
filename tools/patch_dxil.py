@@ -390,10 +390,10 @@ def finish(ir: Ir, cloud: bool = False, debug_uav: bool = False) -> str:
         extra.append(f"declare float @dx.op.tertiary.f32(i32, float, float, float) {attrs['dx.op.unary.f32']}")
     if debug_uav:
         store_attr = next((a for op, a in attrs.items() if "Store" in op), None)
-        need(store_attr, "no store declaration to borrow attributes from")
         for kind, ty in (("i32", "i32"), ("f32", "float")):
             # (the validator rejects unused declarations)
             if f"dx.op.rawBufferStore.{kind}" not in attrs and f"@dx.op.rawBufferStore.{kind}(" in text:
+                need(store_attr, "no store declaration to borrow attributes from")
                 extra.append(f"declare void @dx.op.rawBufferStore.{kind}(i32, %dx.types.Handle, i32, i32, {ty}, {ty}, "
                              f"{ty}, {ty}, i8, i32) {store_attr}")
     ray_query = "@dx.op.rayQuery_TraceRayInline(" in text
@@ -588,11 +588,12 @@ def trace_segment(ir: Ir, height: str):
     return t0, ir.binops[dt][1], origin, direction, radius
 
 
-def emit_boundary_layer_average(em: "Emitter", segment, midpoint_bl: str) -> str:
+def emit_boundary_layer_average(em: "Emitter", segment, midpoint_bl: str, top: str = "%mod.T1",
+                                amount: str = "%mod.T3") -> str:
     """Boundary-layer density averaged over the march segment, as
     in our medium model: (F(h1) - F(h0)) / (h1 - h0)
     for F the layer's antiderivative over height; the midpoint value when the
-    segment is nearly level."""
+    segment is nearly level. top, amount: T1 and T3 (the haze field's, there)."""
     t0, t1, origin, direction, radius = segment
 
     def height(t):
@@ -600,28 +601,135 @@ def emit_boundary_layer_average(em: "Emitter", segment, midpoint_bl: str) -> str
         return em.sub(em.sqrt(em.mad(q[2], q[2], em.mad(q[1], q[1], em.mul(q[0], q[0])))), radius)
 
     h0, h1 = height(t0), height(t1)
-    return emit_boundary_layer_between(em, h0, emit_boundary_layer_terms(em, h0),
-                                       h1, emit_boundary_layer_terms(em, h1), midpoint_bl)
+    return emit_boundary_layer_between(em, h0, emit_boundary_layer_terms(em, h0, top),
+                                       h1, emit_boundary_layer_terms(em, h1, top), midpoint_bl, amount)
 
 
-def emit_boundary_layer_terms(em: "Emitter", h: str) -> tuple[str, str]:
+def emit_boundary_layer_terms(em: "Emitter", h: str, top: str = "%mod.T1") -> tuple[str, str]:
     """The parts of F(h) = T3 * (min(h, T1) - edge * tail) at one height:
     (min(h, T1), tail) with tail = ln(1 + e^-|x|) = SoftplusTail(x), x = (h - T1) / edge."""
-    x = em.mul(em.sub(h, "%mod.T1"), "%mod.ied")
+    x = em.mul(em.sub(h, top), "%mod.ied")
     log2_tail = em.unary(23, em.add(em.exp2(em.mul(em.unary(6, x), -LOG2E_F)), 1.0))  # log2(1 + e^-|x|)
-    return em.min(h, "%mod.T1"), em.mul(log2_tail, 0.6931471805599453)
+    return em.min(h, top), em.mul(log2_tail, 0.6931471805599453)
 
 
-def emit_boundary_layer_between(em: "Emitter", h0: str, terms0, h1: str, terms1, midpoint_bl: str) -> str:
+def emit_boundary_layer_between(em: "Emitter", h0: str, terms0, h1: str, terms1, midpoint_bl: str,
+                                amount: str = "%mod.T3") -> str:
     """(F(h1) - F(h0)) / (h1 - h0), or the midpoint value when the segment is
     nearly level; the difference grouped as BoundaryLayerIntegralBetween in
     the model, so that nothing cancels."""
     dh = em.sub(h1, h0)
     sloped = em.cmp("ogt", em.unary(6, dh), 0.01)
     below = em.sub(terms1[0], terms0[0])
-    difference = em.mul("%mod.T3", em.sub(below, em.mul("%mod.edge", em.sub(terms1[1], terms0[1]))))
+    difference = em.mul(amount, em.sub(below, em.mul("%mod.edge", em.sub(terms1[1], terms0[1]))))
     average = em.div(difference, em.select(sloped, dh, 1.0))
     return em.select(sloped, average, midpoint_bl)
+
+
+# The medium's per-flight values from the prologue that the haze field replaces at a march sample.
+HAZE_GLOBALS = {"T1": "%mod.T1", "T3": "%mod.T3", "T4": "%mod.T4", "ftk": "%mod.ftk", "brown": "%mod.brown",
+                "spec0": "%mod.spec0", "spec1": "%mod.spec1", "spec2": "%mod.spec2"}
+
+
+def emit_haze_field(em: "Emitter", segment, glob_binding: str) -> dict:
+    """The haze field (HAZE_ROWS) at the march segment's midpoint: HAZE_GLOBALS' values from the
+    stations' rows by inverse distance, the prologue's where no station counts. The sample's
+    planet direction: MSFS's planet rows (Global[110..112]) take a world offset from the camera
+    (m) to the unit sphere, the camera's direction in .w; the offset is t * direction (km; the
+    march starts at the camera below the atmosphere's top). Only in the guarded block of
+    guard_block: the table's loads need the buffer bound."""
+    t0, t1, _, direction, _ = segment
+    glob = em.handle(glob_binding, 4800)
+    rows = [em.load(glob, 110 + r) for r in range(3)]
+    tm = em.mul(em.add(t0, t1), 500.0)  # the midpoint, m
+    p = []
+    for r in range(3):
+        c = [em.ext(rows[r], k) for k in range(4)]
+        along = em.mad(direction[2], c[2], em.mad(direction[1], c[1], em.mul(direction[0], c[0])))
+        p.append(em.mad(along, tm, c[3]))
+    inv = em.unary(25, em.mad(p[2], p[2], em.mad(p[1], p[1], em.mul(p[0], p[0]))))  # rsqrt
+    p = [em.mul(x, inv) for x in p]
+    bind = em.new(f"call %dx.types.Handle @dx.op.createHandleFromBinding(i32 217, %dx.types.ResBind "
+                  f"{{ i32 0, i32 0, i32 {MOD_SPACE}, i8 1 }}, i32 0, i1 false)")
+    uav = em.new(f"call %dx.types.Handle @dx.op.annotateHandle(i32 216, %dx.types.Handle {bind}, "
+                 "%dx.types.ResourceProperties { i32 4107, i32 0 })")
+    rr = "%dx.types.ResRet.f32"
+
+    def raw(offset):
+        r = em.new(f"call {rr} @dx.op.rawBufferLoad.f32(i32 139, %dx.types.Handle {uav}, i32 {offset}, "
+                   "i32 undef, i8 15, i32 4)")
+        return [em.new(f"extractvalue {rr} {r}, {k}") for k in range(4)]
+
+    soft = (HAZE_IDW_KM * 1000.0 / EARTH_RADIUS_M) ** 2  # (d / R)^2 on the unit sphere
+    sums, total = [None] * 6, None
+    for i in range(ANCHOR_STATIONS):
+        s = raw(ANCHOR_TABLE + 16 + 16 * i)
+        second = raw(HAZE_ROWS + HAZE_ROW_BYTES * i + 16)
+        values = raw(HAZE_ROWS + HAZE_ROW_BYTES * i) + second[:2]
+        d = [em.sub(p[k], s[k]) for k in range(3)]
+        b = em.div(em.mul(s[3], second[2]), em.add(em.mad(d[2], d[2], em.mad(d[1], d[1], em.mul(d[0], d[0]))), soft))
+        sums = [em.mul(b, v) if acc is None else em.mad(b, v, acc) for acc, v in zip(sums, values)]
+        total = b if total is None else em.add(total, b)
+    counts = em.cmp("ogt", total, 0.0)
+    inv_total = em.div(1.0, em.select(counts, total, 1.0))
+    t1_, t3, t4, t5, t6, t10 = (em.mul(x, inv_total) for x in sums)
+    ae = em.min(em.max(t10, 0.0), 3.0)
+    field = {"T1": t1_, "T3": t3, "T4": t4, "ftk": em.div(NEG_LOG2E, em.max(t5, 0.001)),
+             "brown": em.mul("%mod.mix", t6)}
+    for c in range(3):
+        field[f"spec{c}"] = em.mad(em.sub(em.exp2(em.mul(ae, AEROSOL_SPECTRAL_LOG2[c])), 1.0), "%mod.mix", 1.0)
+    return {k: em.select(counts, v, HAZE_GLOBALS[k]) for k, v in field.items()}
+
+
+def guard_block(ir: Ir, at: int, cond: str, body: list[str], outputs: dict, tag: str) -> tuple[list, dict, list]:
+    """Splits the block holding line `at` just before it, so that `body` runs only where cond
+    holds: outputs {name: (value from body, value otherwise)} come out of a join block's phis.
+    Returns the lines to put before line `at`, the joined names, and the edits of the phis in
+    the block's successors (its tail, with the terminator, is now the join block)."""
+    j = at
+    while not ir.lines[j].startswith("; <label>:"):
+        j -= 1
+        need(j > 0 and not ir.lines[j].startswith("define "), f"line {at}: in the entry block")
+    head = "%" + re.match(r"; <label>:(\d+)", ir.lines[j])[1]
+    k = at
+    while not re.match(r"\s+(br|ret|switch) ", ir.lines[k]):
+        k += 1
+    go, join = f"%mod.{tag}.go", f"%mod.{tag}.join"
+    lines = [f"  br i1 {cond}, label {go}, label {join}", "", f"{go[1:]}:", *body, f"  br label {join}", "",
+             f"{join[1:]}:"]
+    names = {}
+    for n, (a, b) in outputs.items():
+        names[n] = f"%mod.{tag}.{n}"
+        lines.append(f"  {names[n]} = phi float [ {a}, {go} ], [ {b}, {head} ]")
+    edits = []
+    for label in sorted(set(re.findall(r"label (%\d+)", ir.lines[k]))):
+        top = [i for i, l in enumerate(ir.lines) if re.match(rf"; <label>:{label[1:]}\b", l)]
+        need(len(top) == 1, f"no block {label}")
+        i = top[0] + 1
+        while re.match(rf"\s+{V} = phi ", ir.lines[i]):
+            new = re.sub(rf"\[ ([^\[\]]+?), {re.escape(head)} \]", rf"[ \1, {join} ]", ir.lines[i])
+            if new != ir.lines[i]:
+                edits.append((i, [new]))
+            i += 1
+    return lines, names, edits
+
+
+def haze_field_lines(ir: Ir, at: int, site: dict, tag: str) -> tuple[list, dict, list]:
+    """The haze field at a march site (emit_haze_field), guarded by DebugCapture bits 6 and 9 and
+    the model on, before line `at` (guard_block): (lines, HAZE_GLOBALS' names there, edits)."""
+    glob = {b for b, size in ir.cbs.values() if size == 4800}
+    need(len(glob) == 1, f"{len(glob)} Global (4800 B) cbuffer bindings")
+    em = Emitter(f"{tag}.")
+    flags = em.new(f"bitcast float {em.ext(em.load('%mod.ah', 0), 0)} to i32")
+    want = DEBUG_BUFFER_16MB | DEBUG_HAZE_FIELD
+    bits = em.new(f"icmp eq i32 {em.new(f'and i32 {flags}, {want}')}, {want}")
+    cond = em.new(f"and i1 {bits}, {em.new('xor i1 %mod.off, true')}")
+    pre = em.lines
+    body = Emitter(f"{tag}.f")
+    field = emit_haze_field(body, site["segment"], glob.pop())
+    lines, names, edits = guard_block(ir, at, cond, body.lines,
+                                      {k: (field[k], HAZE_GLOBALS[k]) for k in HAZE_GLOBALS}, tag)
+    return pre + lines, names, edits
 
 
 def find_medium(ir: Ir, no_phase: bool = False):
@@ -734,8 +842,124 @@ def find_medium(ir: Ir, no_phase: bool = False):
     return sites, phases
 
 
+def quadratic_march_edits(ir: Ir, segment) -> tuple[list, tuple]:
+    """A march with N evenly spaced segments, t0 = tMax / N * s and t1 = min(tMax / N * (s + 1),
+    tMax), respaced quadratically: t = tMax (s / N)^2, so its first segments resolve the haze
+    near the start instead of spanning ~50 km of it (the multiple-scattering LUT's 20 segments
+    reach the top of the atmosphere). Stock with the model off. Returns the edits and the
+    segment with the new ends (%mod.q.t0, %mod.q.t1)."""
+    t0, t1, origin, direction, radius = segment
+    k0 = ir.binops.get(t0)
+    need(k0 and k0[0] == "fmul", f"{t0}: t0 is not a product")
+    step = next((a for a in k0[1:] if a in ir.binops and ir.binops[a][0] == "fmul"
+                 and any(not x.startswith("%") for x in ir.binops[a][1:])), None)
+    need(step, f"{t0}: no tMax / N factor")
+    s0 = [a for a in k0[1:] if a != step][0]
+    inv_n = next(x for x in ir.binops[step][1:] if not x.startswith("%"))
+    t_max = next(x for x in ir.binops[step][1:] if x.startswith("%"))
+    need(t1 in ir.defs and re.search(rf"@dx\.op\.binary\.f32\(i32 36, float (%[\w.]+), float {re.escape(t_max)}\)",
+                                     ir.lines[ir.defs[t1]]), f"{t1}: not min(..., tMax)")
+    end = re.search(r"@dx\.op\.binary\.f32\(i32 36, float (%[\w.]+),", ir.lines[ir.defs[t1]])[1]
+    k1 = ir.binops.get(end)
+    need(k1 and k1[0] == "fmul" and step in k1[1:], f"{end}: t1 is not tMax / N * (s + 1)")
+    s1 = [a for a in k1[1:] if a != step][0]
+    lines = [
+        f"  %mod.q.u0 = fmul fast float {s0}, {inv_n}",
+        f"  %mod.q.u1 = fmul fast float {s1}, {inv_n}",
+        f"  %mod.q.a0 = fmul fast float {t0}, %mod.q.u0",
+        f"  %mod.q.b1 = fmul fast float {end}, %mod.q.u1",
+        f"  %mod.q.a1 = call float @dx.op.binary.f32(i32 36, float %mod.q.b1, float {t_max})",
+        f"  %mod.q.t0 = select i1 %mod.off, float {t0}, float %mod.q.a0",
+        f"  %mod.q.t1 = select i1 %mod.off, float {t1}, float %mod.q.a1",
+    ]
+    at = ir.defs[t1]
+    need(ir.defs[t0] < at, "t0 after t1")
+    edits = [(at, [ir.lines[at]] + lines)]
+    for name, new in ((t0, "%mod.q.t0"), (t1, "%mod.q.t1")):
+        for i in ir.users(name):
+            need(i > at, f"{name} used before t1 is defined")
+            if i not in [e[0] for e in edits]:
+                edits.append((i, [re.sub(re.escape(name) + r"(?![\w.])", new, ir.lines[i])]))
+            else:  # (a line using both)
+                j = [e[0] for e in edits].index(i)
+                edits[j] = (i, [re.sub(re.escape(name) + r"(?![\w.])", new, edits[j][1][0])])
+    return edits, ("%mod.q.t0", "%mod.q.t1", origin, direction, radius)
+
+
+# The multiple-scattering LUT's height rows. MSFS's (Hillaire's) 32 rows are linear in height,
+# 3.2 km apart, row 0 at 1 km (kPlanetRadiusOffset added in uv): a boundary layer of 1-2 km lies
+# between row 0 and row 1 (4.2 km, above it), so the light inside a dense haze was a blend
+# with the bluish light above it, and dust and smoke looked grey (notes/weather-feed.md, haze
+# colour). Ours: row k at H (k / 31)^2 + MS_ROWS_FLOOR_KM (0, 0.1, 0.4, 0.9, 1.7, 2.6 km ...),
+# read back at v = sqrt(h / H). Only the five passes that read the LUT (all 8,350 stock shaders
+# scanned) and the one that writes it change, all with the model mix.
+MS_LUT_SUBUV = "0x3FEF07C200000000"  # 32 / 33: FromUnitToSubUvs for the 32-texel LUT (used to find it)
+MS_ROWS_FLOOR_KM = 0.01
+
+
+def ms_rows_read_edits(ir: Ir) -> list:
+    """The LUT's lookups, v = (sat((|p| - R) / H) + 1/64) * 32/33 with H = AtmosphereHeight (c8.x):
+    the height fraction f becomes sqrt(f) (MS_LUT_SUBUV, above), with the model on."""
+    edits = []
+    for name, (kind, a, b) in ir.binops.items():
+        if kind != "fmul" or MS_LUT_SUBUV not in (a, b):
+            continue
+        add = a if b == MS_LUT_SUBUV else b
+        k = ir.binops.get(add)
+        if not k or k[0] != "fadd" or "1.562500e-02" not in k[1:]:
+            continue
+        f = [x for x in k[1:] if x != "1.562500e-02"][0]
+        if f not in ir.unary or ir.unary[f][0] != OP_SATURATE:
+            continue
+        q = ir.binops.get(ir.unary[f][1])
+        if not q or q[0] != "fdiv" or ir.atmo(q[2]) != (8, 0):
+            continue  # (the sun-zenith coordinate)
+        n = len(edits)
+        i = ir.defs[add]
+        edits.append((i, [f"  %mod.mr{n}.s = call float @dx.op.unary.f32(i32 24, float {f})",
+                          f"  %mod.mr{n}.f = select i1 %mod.off, float {f}, float %mod.mr{n}.s",
+                          re.sub(re.escape(f) + r"(?![\w.])", f"%mod.mr{n}.f", ir.lines[i], count=1)]))
+    need(edits, "no multiple-scattering LUT lookup")
+    return edits
+
+
+def ms_rows_write_edit(ir: Ir, segment) -> tuple:
+    """ch_multi_scatt: the texel's height, R + sat(y / 31 + 0.01) (H - 0.01) (the march's origin),
+    becomes R + H (y / 31)^2 + MS_ROWS_FLOOR_KM, with the model on."""
+    origin = [o for o in segment[2] if isinstance(o, str)]
+    need(len(origin) == 1, "the LUT's origin is not on one axis")
+    vh = origin[0]
+    kind, a, b = ir.binops.get(vh, (None, None, None))
+    need(kind == "fadd", f"{vh}: the height is not R + ...")
+    prod, radius = (a, b) if a in ir.binops else (b, a)
+    need(ir.atmo(radius) == (2, 3), f"{vh}: no BottomRadius")
+    k = ir.binops.get(prod)
+    need(k and k[0] == "fmul", f"{prod}: not (H - offset) * sat(...)")
+    sat = [x for x in k[1:] if x in ir.unary and ir.unary[x][0] == OP_SATURATE]
+    span = [x for x in k[1:] if x not in sat]
+    need(len(sat) == 1 and span, f"{prod}: no saturated coordinate")
+    ks = ir.binops.get(span[0])
+    need(ks and ks[0] == "fadd" and any(ir.atmo(x) == (8, 0) for x in ks[1:]), f"{span[0]}: not H - offset")
+    height = [x for x in ks[1:] if ir.atmo(x) == (8, 0)][0]
+    coord = ir.unary[sat[0]][1]
+    off = [x for x in ir.binops.get(coord, ("", "", ""))[1:] if not x.startswith("%")]
+    need(len(off) == 1 and abs(literal_value(off[0]) - (0.01 - 0.5 / 31)) < 1e-5,
+         f"{coord}: not y / 31 + 0.5 / 31 - 0.5 / 31 + 0.01")
+    i = ir.defs[vh]
+    old, stock = vh, ir.lines[i].replace(f"{vh} = ", "%mod.mw.stock = ", 1)
+    return (i, [stock,
+                f"  %mod.mw.u0 = fadd fast float {coord}, {f32(-0.01)}",
+                "  %mod.mw.u = call float @dx.op.unary.f32(i32 7, float %mod.mw.u0)",
+                "  %mod.mw.u2 = fmul fast float %mod.mw.u, %mod.mw.u",
+                f"  %mod.mw.h = call float @dx.op.tertiary.f32(i32 46, float %mod.mw.u2, float {height}, "
+                f"float {f32(MS_ROWS_FLOOR_KM)})",
+                f"  %mod.mw.r = fadd fast float %mod.mw.h, {radius}",
+                f"  {old} = select i1 %mod.off, float %mod.mw.stock, float %mod.mw.r"])
+
+
 def patch_medium(text: str, no_phase: bool = False, white_balance: bool = False, far_slice: bool = False,
-                 dump: str | None = None) -> tuple[str, str]:
+                 dump: str | None = None, field: bool = False, quadratic: bool = False,
+                 ms_rows: str | None = None) -> tuple[str, str]:
     """Our medium (MediumSample in the model) in a pass's inline atmosphere
     march, and its HG phases (T9, the backscatter lobe). Options for the sky
     passes we patch instead of replacing:
@@ -745,12 +969,33 @@ def patch_medium(text: str, no_phase: bool = False, white_balance: bool = False,
                      the transmittance LUT; see SUN_WHITE_BALANCE);
       far_slice      the camera volume's far-slice stretch (T12, apply_far_slice);
       dump           a capture dump on thread 0: "sky_atmosphere" (region A)
-                     or "camera" (region B), as the add-on reads them."""
+                     or "camera" (region B), as the add-on reads them;
+      field          the haze field (HAZE_ROWS) at every march sample: the
+                     passes that march from the camera;
+      quadratic      the march's evenly spaced segments respaced quadratically
+                     (quadratic_march_edits; the multiple-scattering LUT);
+      ms_rows        the multiple-scattering LUT's rows quadratic in height
+                     (MS_LUT_SUBUV): "write" (the LUT) or "read" (its readers)."""
     ir = Ir(text)
     sites, phases = find_medium(ir, no_phase)
+    if field:  # (guard_block splits each site's block as the stock IR has it)
+        heads = [max(j for j in range(ir.defs[site["mie"]]) if ir.lines[j].startswith("; <label>:"))
+                 for site in sites]
+        need(len(set(heads)) == len(heads), "two march sites in one block")
 
     # ---- rewrite. Work from the bottom up so line indices stay valid.
     edits = []  # (line index, replacement lines)
+    if ms_rows == "write":
+        need(len(sites) == 1, f"ms_rows: {len(sites)} march sites")
+        edits.append(ms_rows_write_edit(ir, sites[0]["segment"]))
+    elif ms_rows == "read":
+        edits += ms_rows_read_edits(ir)
+    else:
+        need(ms_rows is None, f"ms_rows: {ms_rows}?")
+    if quadratic:
+        need(len(sites) == 1, f"quadratic: {len(sites)} march sites")
+        q_edits, sites[0]["segment"] = quadratic_march_edits(ir, sites[0]["segment"])
+        edits += q_edits
 
     def rename_def(line_index, new_name):
         line = ir.lines[line_index]
@@ -763,19 +1008,25 @@ def patch_medium(text: str, no_phase: bool = False, white_balance: bool = False,
         i = ir.defs[site["mie"]]
         old, stock_line = rename_def(i, p + "dms")
         h = site["h"]
+        # the haze field's values at this sample, else the prologue's
+        hz, pre = HAZE_GLOBALS, []
+        if field:
+            pre, hz, phi_edits = haze_field_lines(ir, i, site, f"hz{s}")
+            edits += phi_edits
+        site["hz"] = hz
         em = Emitter(f"s{s}a")
-        site["bla"] = emit_boundary_layer_average(em, site["segment"], f"{p}bl")
-        edits.append((i, [
+        site["bla"] = emit_boundary_layer_average(em, site["segment"], f"{p}bl", hz["T1"], hz["T3"])
+        edits.append((i, pre + [
             stock_line,
-            f"  {p}blx0 = fsub fast float {h}, %mod.T1",
+            f"  {p}blx0 = fsub fast float {h}, {hz['T1']}",
             f"  {p}blx = fmul fast float {p}blx0, %mod.blk",
             f"  {p}ble = call float @dx.op.unary.f32(i32 21, float {p}blx)",
             f"  {p}bld = fadd fast float {p}ble, 1.000000e+00",
-            f"  {p}bl = fdiv fast float %mod.T3, {p}bld",
+            f"  {p}bl = fdiv fast float {hz['T3']}, {p}bld",
             *em.lines,
-            f"  {p}ftx = fmul fast float {h}, %mod.ftk",
+            f"  {p}ftx = fmul fast float {h}, {hz['ftk']}",
             f"  {p}fte = call float @dx.op.unary.f32(i32 21, float {p}ftx)",
-            f"  {p}ft = fmul fast float %mod.T4, {p}fte",
+            f"  {p}ft = fmul fast float {hz['T4']}, {p}fte",
             f"  {p}dmm0 = fadd fast float {site['bla']}, {p}ft",
             f"  {p}dmm1 = fsub fast float {p}dmm0, {p}dms",
             f"  {p}dmm = call float @dx.op.tertiary.f32(i32 46, float {p}dmm1, float %mod.mix, float {p}dms)",
@@ -802,7 +1053,7 @@ def patch_medium(text: str, no_phase: bool = False, white_balance: bool = False,
                 new = f"{p}{tag}{c}"
                 lhs, rhs = ir.lines[i].split(" = ", 1)
                 edits.append((i, [
-                    f"  {new} = fmul fast float {coeff}, %mod.spec{c}",
+                    f"  {new} = fmul fast float {coeff}, {hz[f'spec{c}']}",
                     lhs + " = " + re.sub(re.escape(coeff) + r"\b", new, rhs),
                 ]))
         # Brown-haze absorption added to the extinction, scaled by MieScattering.g
@@ -819,7 +1070,7 @@ def patch_medium(text: str, no_phase: bool = False, white_balance: bool = False,
         for c in range(3):
             i = ir.defs[site["ext"][c]]
             old, sum_line = rename_def(i, f"{p}ext{c}")
-            pre = load + [f"  {p}bw0 = fmul fast float %mod.brown, {site['bla']}",
+            pre = load + [f"  {p}bw0 = fmul fast float {hz['brown']}, {site['bla']}",
                           f"  {p}bw1 = fmul fast float {p}bw0, {c2g}"] if i == first else []
             edits.append((i, pre + [
                 sum_line,
@@ -866,13 +1117,21 @@ def patch_medium(text: str, no_phase: bool = False, white_balance: bool = False,
     if far_slice:
         edits += far_slice_edits(ir)
         extras.append("far-slice stretch")
+    if field:
+        extras.append("haze field")
+    if quadratic:
+        extras.append("quadratic march")
+    if ms_rows:
+        n = sum(1 for _, lines in edits for l in lines if "%mod.mr" in l and "= select" in l)
+        extras.append(f"multiple-scattering rows ({ms_rows}{f', {n} lookups' if ms_rows == 'read' else ''})")
+    need(len({i for i, _ in edits}) == len(edits), "two edits of one line")
     for i, new_lines in sorted(edits, key=lambda e: -e[0]):
         ir.lines[i:i + 1] = new_lines
     if dump:
         append_sky_dump(ir, dump)
         extras.append(f"{dump} dump")
 
-    text = finish(ir, cloud=white_balance, debug_uav=bool(dump))
+    text = finish(ir, cloud=white_balance, debug_uav=bool(dump) or field)
 
     summary = (f"{len(sites)} medium site(s), {len(phases)} HG phase(s); "
                f"height {', '.join(s['h'] for s in sites)}" + (f"; {', '.join(extras)}" if extras else ""))
@@ -3884,6 +4143,22 @@ ANCHOR_MAGIC = 0x52484341  # 'ACHR'
 ANCHOR_TABLE = CLOUD_GEN_REGION + CG_ANCHOR
 ANCHOR_IDW_KM = 5.0
 assert 16 + 16 * ANCHOR_STATIONS * (1 + ANCHOR_ROWS) <= CG_END - CG_ANCHOR
+# The haze field (addon/src/cloud_stations.h): after the stations' rows, per station two float4,
+# (T1 boundary-layer top km MSL, T3, T4, T5 km) and (T6, T10, counts, 0): the station's haze
+# (haze_mapping.h, at its elevation), blended into tunables.ini's by T13 and crossfaded between
+# METARs; counts 0 leaves it out (its METAR has no visibility). While the GPU's table has them
+# the add-on sets DebugCapture bit 9 (DEBUG_HAZE_FIELD,
+# with bit 6: the buffer bound). The patched atmosphere passes (manifest "field") then take T1,
+# T3-T6 and T10 at each march sample from the stations by inverse distance,
+# b_i = weight_i counts_i / (d_i^2 + HAZE_IDW_KM^2), d_i on the sphere from the sample's planet direction
+# (emit_haze_field); elsewhere, and in the LUT passes, the ModParams values: the add-on's same
+# weighting at the aircraft.
+HAZE_ROWS = ANCHOR_TABLE + 16 + 16 * ANCHOR_STATIONS * (1 + ANCHOR_ROWS)
+HAZE_ROW_BYTES = 32
+HAZE_MAGIC = 0x455A4148  # 'HAZE': header word 3 while the add-on writes the rows (cloud_stations.h)
+HAZE_IDW_KM = 10.0  # (cloud_stations.h kHazeIdwKm: 15 diluted a station's own report ~18 % at the station)
+DEBUG_HAZE_FIELD = 512
+assert HAZE_ROWS + HAZE_ROW_BYTES * ANCHOR_STATIONS <= CLOUD_GEN_REGION + CG_END
 ANCHOR_RADIUS_DEFAULT_M = 20000.0
 # decks: the share of MSFS's dome taper removed (1 = a geometrically flat top) and
 # how far toward the smooth noise channel smooth decks go (1 = the smooth channel only)

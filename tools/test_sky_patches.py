@@ -8,7 +8,11 @@ in the DXIL interpreter, on the transmittance LUT and the camera volume:
   and User registers) from the camera volume;
 - the daylight white balance (C22 = 1) scales the transmittance by exactly
   SUN_WHITE_BALANCE;
-- the far-slice stretch (T12 = 1) changes only the last slice.
+- the far-slice stretch (T12 = 1) changes only the last slice;
+- the haze field (DebugCapture bits 6 and 9, a station table): stations all
+  with the same haze give the camera volume of that haze as plain tunables,
+  and with the stations' weights 0 the tunables' own; stations with
+  different haze give something in between.
 
 The model's numbers themselves are checked on the GPU by atmolab.
 
@@ -26,7 +30,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 import patch_dxil as P  # noqa: E402
 from test_cloud_gen_capture import Machine, Prog, Tex, f32  # noqa: E402
-from test_medium_patch import ATMO  # noqa: E402
+from test_medium_patch import ATMO, PLANET_ROWS  # noqa: E402
 
 STAMP = 0x2345
 # constants from an in-flight capture (FL240): camera Global registers, the
@@ -51,11 +55,14 @@ def bits(u):
     return struct.unpack("<f", struct.pack("<I", u))[0]
 
 
-def constants(flags=0, t0=0.0, t12=0.0, c22=0.0, layout="transmittance"):
+def constants(flags=0, t0=0.0, t12=0.0, c22=0.0, layout="transmittance", haze=None):
     mod = np.zeros((4, 4))
     mod[0] = (bits(flags), bits(STAMP), t12, 0.0)
     tun = MODEL.copy()
     tun[0] = t0
+    if haze is not None:  # (T1, T3, T4, T5, T6, T10)
+        for index, value in zip((1, 3, 4, 5, 6, 10), haze):
+            tun[index] = value
     mod[1:4] = np.array(tun).reshape(3, 4)
     cloud = np.zeros((8, 4))
     cloud.flat[22] = c22
@@ -65,12 +72,36 @@ def constants(flags=0, t0=0.0, t12=0.0, c22=0.0, layout="transmittance"):
     glob = np.zeros((300, 4))
     for r, v in GLOBAL.items():
         glob[r] = v
+    glob[110:113] = PLANET_ROWS
     user = np.zeros((658, 4))
     user[1] = USER1
     light = np.zeros((11, 4))
     for r, v in LIGHT.items():
         light[r] = v
     return {(0, 0): user, (0, 1): glob, (0, 2): atmo, (0, 3): light, (50, 0): mod, (50, 1): cloud}
+
+
+# the haze field's tests: two kinds of haze (T1, T3, T4, T5, T6, T10); MODEL's own
+HAZE_MODEL = tuple(MODEL[i] for i in (1, 3, 4, 5, 6, 10))
+HAZE_OTHER = (2.6, 11.0, 1.4, 3.5, 0.3, 0.4)
+FIELD_FLAGS = P.DEBUG_BUFFER_16MB | P.DEBUG_HAZE_FIELD
+
+
+def field_buffer(stations):
+    """A debug buffer holding the station table's rows the haze field reads:
+    stations [((x km, z km) from the camera, weight, haze)]."""
+    buf = bytearray(P.HAZE_ROWS + P.HAZE_ROW_BYTES * P.ANCHOR_STATIONS)
+    for i, ((x, z), w, haze) in enumerate(stations):
+        u = PLANET_ROWS[:, :3] @ np.array([x * 1000.0, 0.0, z * 1000.0]) + PLANET_ROWS[:, 3]
+        struct.pack_into("<4f", buf, P.ANCHOR_TABLE + 16 + 16 * i, *(u / np.linalg.norm(u)), w)
+        struct.pack_into("<7f", buf, P.HAZE_ROWS + P.HAZE_ROW_BYTES * i, *haze, 1.0)  # (counts)
+    return buf
+
+
+def close(a, b, rel=2e-5):
+    """Equal outputs within float rounding."""
+    return a.keys() == b.keys() and all(abs(x - y) <= rel * max(abs(x), abs(y), 1e-30)
+                                        for k in a for x, y in zip(a[k], b[k]))
 
 
 def same(a, b):
@@ -128,8 +159,10 @@ def main():
     # ---- the camera volume
     tex = {0: Tex(0, (512, 512, 0, 1)), 1: Tex(1, (128, 128, 32, 1)), 2: Tex(2, (64, 64, 64, 1)),
            3: Tex(3, (256, 64, 0, 1)), 4: Tex(4, (32, 32, 0, 1))}
+    spots = [(0.0, 0.0), (30.0, 5.0), (-20.0, 40.0), (70.0, -60.0), (-90.0, -10.0), (10.0, 120.0), (150.0, 0.0),
+             (-5.0, -150.0)]
     for crc, stock in load("ch_camera_volume"):
-        patched, summary = P.patch_medium(stock, far_slice=True, dump="camera")
+        patched, summary = P.patch_medium(stock, far_slice=True, dump="camera", field=True, ms_rows="read")
         print(f"ch_camera_volume {crc}: {summary}")
         sp, pp = Prog(stock), Prog(patched)
         lay = "camera"
@@ -155,7 +188,26 @@ def main():
                 check(not same(stretched, on), f"{crc} {tid}: T12 didn't change the last slice")
             else:
                 check(same(stretched, on), f"{crc} {tid}: T12 changed slice {tid[2]}")
-        print(f"  off = stock, capture dump and far-slice stretch checked at 5 threads")
+            # the haze field
+            def field(stations, flags=FIELD_FLAGS):
+                return Machine(pp, constants(flags=flags, t0=1.0, layout=lay), tex, field_buffer(stations)).run(tid)
+            check(same(field([(xz, 1.0, HAZE_OTHER) for xz in spots], flags=P.DEBUG_BUFFER_16MB), on),
+                  f"{crc} {tid}: the haze field without bit 9 changed the output")
+            check(close(field([(xz, 1.0, HAZE_MODEL) for xz in spots]), on),
+                  f"{crc} {tid}: stations with the tunables' haze changed the output")
+            check(same(field([(xz, 0.0, HAZE_OTHER) for xz in spots]), on),
+                  f"{crc} {tid}: stations that don't count changed the output")
+            other = Machine(pp, constants(t0=1.0, layout=lay, haze=HAZE_OTHER), tex, bytearray(1 << 16)).run(tid)
+            uniform = field([(xz, 1.0, HAZE_OTHER) for xz in spots])
+            check(close(uniform, other), f"{crc} {tid}: stations all with one haze differ from that haze as "
+                                         f"tunables: {uniform} vs {other}")
+            check(not close(other, on), f"{crc} {tid}: the test's two hazes look alike")
+            mixed = field([(xz, 1.0, HAZE_OTHER if i % 2 else HAZE_MODEL) for i, xz in enumerate(spots)])
+            for k in mixed:
+                lo, hi = sorted((on[k][3], other[k][3]))
+                check(lo - 1e-6 <= mixed[k][3] <= hi + 1e-6 and (tid[2] == 0 or not close(mixed, on)),
+                      f"{crc} {tid}: mixed stations' opacity {mixed[k][3]} not between {lo} and {hi}")
+        print(f"  off = stock, capture dump, far-slice stretch and the haze field checked at 5 threads")
     print("all checks passed" if bad == 0 else f"{bad} check(s) failed")
     sys.exit(1 if bad else 0)
 

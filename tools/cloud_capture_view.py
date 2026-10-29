@@ -70,6 +70,10 @@ def load(capture: str) -> dict:
     d["anchor"] = magic == P.ANCHOR_MAGIC
     d["anchor_stations"] = np.frombuffer(raw, np.float32, 4 * ns, P.CG_ANCHOR + 16).reshape(ns, 4)
     d["anchor_rows"] = np.frombuffer(raw, np.float32, 4 * ns * nr, P.CG_ANCHOR + 16 + 16 * ns).reshape(ns, nr, 4)
+    # ... and the haze field's rows (T1, T3, T4, T5, T6, T10, counts, 0) per station, when header word 3 is 'HAZE'
+    haze = P.CG_ANCHOR + (P.HAZE_ROWS - P.ANCHOR_TABLE)
+    d["haze"] = struct.unpack_from("<I", raw, P.CG_ANCHOR + 12)[0] == P.HAZE_MAGIC
+    d["haze_rows"] = np.frombuffer(raw, np.float32, 8 * ns, haze).reshape(ns, 8) if d["haze"] else None
     return d
 
 

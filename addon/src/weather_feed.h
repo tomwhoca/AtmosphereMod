@@ -5,6 +5,10 @@
 // and local time, and maps them to tunables with haze_mapping.h. The add-on
 // blends the result into T1..T6, T9 and T10 by T13 (0 = tunables.ini only,
 // 1 = weather-driven), smoothed over about 30 s so station changes don't jump.
+// With T15 (the haze field, on by default) the values come from all the
+// stations around, weighted by distance from the aircraft, and the stations'
+// own haze goes to the shaders in the station table, so the haze in each part
+// of the view is that of the stations near it (cloud_stations.h).
 
 #pragma once
 
@@ -61,16 +65,23 @@ float freezing_level_m();
 float ozone_du();
 
 // The latest METAR's haze in a line, for the EFB app's settings ("KIND:
-// continental haze, visibility ~68 km, humidity 46%"); empty until a METAR
-// arrives. Any thread.
+// continental haze, visibility ~68 km, humidity 46%"; with the haze field
+// "KIND (+3): ...", the visibility the stations' around the aircraft); empty
+// until a METAR arrives. Any thread.
 std::string summary();
 
 // METAR anchoring of the clouds (cloud_stations.h): the station table the
 // patched ch_cloudDensity reads from the debug buffer (tools/patch_dxil.py
-// ANCHOR_TABLE) as it is now: fades and crossfades advance with time. Returns
-// the stations in use. Any thread (the add-on: once per present).
-constexpr size_t kAnchorTableBytes = 16 + 16 * 8 * 33;
+// ANCHOR_TABLE) as it is now: fades and crossfades advance with time. With the
+// haze field on, the stations' haze rows follow (HAZE_ROWS, header word 3 'HAZE')
+// for the patched atmosphere passes. Returns the stations in use. Any thread
+// (the add-on: once per present, after apply).
+constexpr size_t kAnchorTableBytes = 16 + 16 * 8 * 33 + 32 * 8;
 size_t cloud_anchor_table(std::array<uint8_t, kAnchorTableBytes> &out);
+
+// The haze field (tunables.ini T15, on unless 0): the haze from all the
+// stations around instead of the nearest one's. Any thread.
+void set_haze_field(bool on);
 
 // Present thread: advances the smoothing by dt_seconds and returns `ini` with
 // the weather-driven tunables blended in by ini[13]. Returns `ini` unchanged

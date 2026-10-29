@@ -8,7 +8,14 @@ values (Mie density, the scattering and extinction products, the HG phases)
 with a small float32 interpreter, from random march segments, and compares:
   - with model mix T0 = 0: bit-identical to the stock IR's values;
   - otherwise: with an independent float64 version of our medium model,
-    computed from the same segment.
+    computed from the same segment;
+  - in the passes with the haze field: with the field's DebugCapture bits and
+    a station table (FIELD_STATIONS), with the same model at each sample's
+    haze, weighted from the stations in float64; with the bits and no station
+    counting, as without the field;
+  - the march and LUT changes (check_lut_sampling): the quadratic segments,
+    the multiple-scattering LUT's quadratic rows and their lookups, against
+    their formulas, and stock with T0 = 0.
 The segment (origin, direction, t0, t1) and the ozone tent are the
 interpreter's inputs; everything between them and the checked values is the
 shader's own code, so a wrong match (another value, another segment) fails.
@@ -52,6 +59,51 @@ TUNABLE_SETS = [
 ]
 
 
+# The haze field's test: MSFS's planet rows from a capture near EKCH (world -> unit sphere, the
+# camera's direction in .w) and stations at world offsets (km east-ish, km north-ish) with their
+# weight and haze rows (T1, T3, T4, T5, T6, T10, counts); one with weight 0 and one with counts 0
+# (no visibility in its METAR) must not count.
+PLANET_ROWS = np.array([(1.308447e-07, 8.637934e-08, -5.639204e-12, 0.5522037),
+                        (-1.279492e-08, 1.937121e-08, -1.550573e-07, 0.1238358),
+                        (-8.600219e-08, 1.302749e-07, 2.337183e-08, 0.8272431)])
+FIELD_STATIONS = [((0.0, 0.0), 1.0, (1.2, 6.0, 0.6, 2.5, 0.05, 1.3, 1.0)),
+                  ((40.0, 10.0), 1.0, (2.4, 14.0, 1.2, 4.0, 0.35, 0.3, 1.0)),
+                  ((-30.0, 55.0), 0.4, (0.7, 2.0, 0.3, 2.0, 0.0, 2.0, 1.0)),
+                  ((65.0, -70.0), 1.0, (1.8, 30.0, 1.5, 3.0, 0.5, 0.2, 1.0)),
+                  ((5.0, 5.0), 0.0, (9.0, 99.0, 9.0, 9.0, 9.0, 9.0, 1.0)),
+                  ((-10.0, -8.0), 1.0, (9.0, 99.0, 9.0, 9.0, 9.0, 9.0, 0.0))]
+FIELD_FLAGS = P.DEBUG_BUFFER_16MB | P.DEBUG_HAZE_FIELD
+
+
+def field_buffer(stations):
+    """The debug buffer (float32 words) with the station table's rows the field reads."""
+    words = np.zeros((P.HAZE_ROWS + P.HAZE_ROW_BYTES * P.ANCHOR_STATIONS) // 4, F)
+    for i, ((x, z), w, haze) in enumerate(stations):
+        s = PLANET_ROWS[:, :3] @ np.array([x * 1000.0, 0.0, z * 1000.0]) + PLANET_ROWS[:, 3]
+        o = (P.ANCHOR_TABLE + 16 + 16 * i) // 4
+        words[o:o + 4] = (*(s / np.linalg.norm(s)), w)
+        o = (P.HAZE_ROWS + P.HAZE_ROW_BYTES * i) // 4
+        words[o:o + 7] = haze
+    return words
+
+
+def field_reference(d, tmid, words):
+    """The stations' haze at each sample, float64: (T1, T3, T4, T5, T6, T10) arrays, and whether
+    any station counts there."""
+    p = (d * (tmid * 1000.0)[:, None]) @ PLANET_ROWS[:, :3].T + PLANET_ROWS[:, 3]
+    p /= np.linalg.norm(p, axis=1, keepdims=True)
+    soft = (P.HAZE_IDW_KM * 1000.0 / P.EARTH_RADIUS_M) ** 2
+    acc, total = np.zeros((len(p), 6)), np.zeros(len(p))
+    for i in range(P.ANCHOR_STATIONS):
+        o = (P.ANCHOR_TABLE + 16 + 16 * i) // 4
+        s, w = words[o:o + 3].astype(np.float64), float(words[o + 3])
+        o = (P.HAZE_ROWS + P.HAZE_ROW_BYTES * i) // 4
+        b = w * float(words[o + 6]) / (np.sum((p - s) ** 2, axis=1) + soft)
+        acc += b[:, None] * words[o:o + 6].astype(np.float64)
+        total += b
+    return acc / np.where(total > 0, total, 1.0)[:, None], total > 0
+
+
 # Error floors: the boundary layer's integral above its top cancels to ~1e-7
 # (float32 near T3 * T1); absolute errors that small don't matter.
 FLOOR = {"mie": 1e-5, "mies": 1e-7, "ray": 1e-7, "ozo": 1e-7, "ext": 1e-7, "phase": 1e-6}
@@ -75,6 +127,8 @@ class Evaluator:
         for line in text.splitlines():
             if m := re.match(r"^\s+(%[\w.]+) = (.*?)(\s+;.*)?$", line):
                 self.rhs[m[1]] = m[2]
+        # our guarded blocks (patch_dxil.guard_block): their join phis take the branch's condition
+        self.branches = dict((m[2], m[1]) for m in re.finditer(r"br i1 (%[\w.]+), label (%mod\.[\w.]+\.go), ", text))
         self.cbuffers = cbuffers  # "b<n> space<s>" or size in bytes -> array [regs, 4]
         self.env = dict(seeds)
         # optional mocks: texture(x, y, slice) -> float4 rows (textureLoad), and
@@ -193,6 +247,8 @@ class Evaluator:
                    "une": a != b, "ult": ~(a >= b), "ugt": ~(a <= b)}[m[1]]
         elif m := re.match(r"select i1 (\S+), float (\S+), float (\S+)", rhs):
             out = np.where(v(m[1]), v(m[2]), v(m[3]))
+        elif (m := re.match(r"phi float \[ (\S+), (%mod\.[\w.]+\.go) \], \[ (\S+), %\d+ \]$", rhs))                 and m[2] in self.branches:
+            out = np.where(self(self.branches[m[2]]), v(m[1]), v(m[3]))
         elif m := re.match(r"(and|or) i1 (\S+), (\S+)", rhs):
             out = np.logical_and(v(m[2]), v(m[3])) if m[1] == "and" else np.logical_or(v(m[2]), v(m[3]))
         elif (out := self.integer(rhs)) is not None:
@@ -213,7 +269,7 @@ class Evaluator:
 def reference(t, h0, h1, h, cos_theta, atmo):
     mix = np.clip(t[0], 0, 1)
     top, edge, haze = t[1], max(t[2], 0.001), t[3]
-    ft, fts, brown = t[4], max(t[5], 0.001), t[6]
+    ft, fts, brown = t[4], np.maximum(t[5], 0.001), t[6]
     w, refsky = np.clip(t[7], 0, 1), np.clip(t[8], 0, 1)
     g_ours, ang = np.clip(t[9], 0, 0.95), np.clip(t[10], 0, 3)
     c = atmo
@@ -234,7 +290,7 @@ def reference(t, h0, h1, h, cos_theta, atmo):
     dens_ray = np.exp(h * c[5, 3])
     reference_mix = mix * refsky
     ozone_scale = t[12] if t[12] > 0 else 1.0
-    spectral = (np.exp2(ang * np.array(P.AEROSOL_SPECTRAL_LOG2)) - 1) * mix + 1
+    spectral = [(np.exp2(ang * P.AEROSOL_SPECTRAL_LOG2[k]) - 1) * mix + 1 for k in range(3)]
     out = {"mie": dens_mie}
     for k in range(3):
         rayleigh = c[1, k] + (P.REFERENCE_RAYLEIGH[k] - c[1, k]) * reference_mix
@@ -291,11 +347,20 @@ def check(entry: str, crc: str, stock: str, rng, args: dict) -> list[str]:
     failures = []
     worst = 0.0
     radius = F(ATMO[2, 3])
-    for tun in TUNABLE_SETS:
+    glob = np.zeros((300, 4))
+    glob[110:113] = PLANET_ROWS
+    # the haze field: off (no DebugCapture bits), on with stations, on with none counting
+    scenarios = [None] + (["field", "empty"] if args.get("field") else [])
+    empty = [(xz, 0.0, haze) for xz, _, haze in FIELD_STATIONS]
+    for tun, scenario in ((tun, sc) for tun in TUNABLE_SETS for sc in scenarios):
         mod = np.zeros((4, 4))
         mod[1:4] = np.array(tun[:12], dtype=np.float64).reshape(3, 4)
         mod[0, 3] = tun[12]
-        cbs = {208: ATMO, 64: mod}
+        words = None
+        if scenario:
+            mod[0, 0] = struct.unpack("<f", struct.pack("<I", FIELD_FLAGS))[0]
+            words = field_buffer(FIELD_STATIONS if scenario == "field" else empty)
+        cbs = {208: ATMO, 64: mod, 4800: glob}
         for s, site in enumerate(sites):
             t0n, t1n, origin, direction, _ = site["segment"]
             # (components the shader folded away, or that are literally 0, stay 0)
@@ -303,6 +368,8 @@ def check(entry: str, crc: str, stock: str, rng, args: dict) -> list[str]:
             d_free = [k for k in range(3) if isinstance(direction[k], str)]
             o, d, t0, t1 = segments(rng, SAMPLES, radius, o_free, d_free)
             seeds = {t0n: t0, t1n: t1}
+            if "%mod.q.t0 = " in patched:  # (quadratic: the segment the medium sees, checked in check_lut_sampling)
+                seeds.update({"%mod.q.t0": t0, "%mod.q.t1": t1})
             for k in range(3):
                 if isinstance(origin[k], str):
                     seeds[origin[k]] = o[:, k]
@@ -316,7 +383,7 @@ def check(entry: str, crc: str, stock: str, rng, args: dict) -> list[str]:
             # The shader's heights (|p| - R in float32, ~1e-3 km off near R = 6360
             # km) feed the reference, so that only the maths after them is compared;
             # they're checked against the exact heights separately.
-            bl_heights = re.findall(rf"^\s+%mod\.s{s}a\d+ = fsub fast float (%[\w.]+), %mod\.T1$",
+            bl_heights = re.findall(rf"^\s+%mod\.s{s}a\d+ = fsub fast float (%[\w.]+), %mod\.(?:hz{s}\.)?T1$",
                                     patched, re.M)
             need_names = {"h": site["h"], "h0": bl_heights[0], "h1": bl_heights[1]}
             # The ozone tent's branches join in a phi: seed it from the shader's height.
@@ -336,7 +403,7 @@ def check(entry: str, crc: str, stock: str, rng, args: dict) -> list[str]:
                 names[f"ozo{k}"] = site["ozo_p"][k][0]
                 names[f"ext{k}"] = site["ext"][k]
             try:
-                got = Evaluator(patched, cbs, seeds)
+                got = Evaluator(patched, cbs, seeds, buffer=words)
                 values = {key: got(n) for key, n in names.items()}
                 values.update({f"phase{p}": got(n) for p, (n, _, _) in enumerate(phases)})
                 if tun[0] <= 0:
@@ -348,11 +415,18 @@ def check(entry: str, crc: str, stock: str, rng, args: dict) -> list[str]:
                         if not np.array_equal(values[f"phase{p}"], want(n)):
                             failures.append(f"phase {p}: T0 = 0 differs from stock")
                 heights = {key: got(n).astype(np.float64) for key, n in need_names.items()}
+                at = list(tun)  # the tunables at each sample: the stations' haze where the field counts
+                if scenario == "field" and tun[0] > 0:
+                    haze, counts = field_reference(d64, (t0.astype(np.float64) + t1) * 0.5, words)
+                    if not counts.all():
+                        failures.append(f"site {s}: the test's stations don't count at every sample")
+                    for k, index in enumerate((1, 3, 4, 5, 6, 10)):
+                        at[index] = haze[:, k]
                 for key, value in heights.items():
                     off = float(np.abs(value - exact[key]).max())
                     if off > 2e-3:
                         failures.append(f"site {s} {key}: {off:.1e} km from the segment's exact height")
-                ref = reference(tun, heights["h0"], heights["h1"], heights["h"], cos_theta.astype(np.float64), ATMO)
+                ref = reference(at, heights["h0"], heights["h1"], heights["h"], cos_theta.astype(np.float64), ATMO)
                 for key, value in values.items():
                     r = ref["phase" if key.startswith("phase") else key]
                     err = np.abs(value - r) / (np.abs(r) + FLOOR[key.rstrip("0123456789")])
@@ -363,13 +437,73 @@ def check(entry: str, crc: str, stock: str, rng, args: dict) -> list[str]:
                     # A wrong match is off by O(1).
                     if e > 5e-4 or float(err.max()) > 2e-3:
                         i = int(np.argmax(err))
-                        failures.append(f"site {s} {key} T={tun[:4]}: rel. error p99.9 {e:.2e}, max {err.max():.2e} "
+                        failures.append(f"site {s} {key} T={tun[:4]} {scenario or 'no field'}: rel. error p99.9 "
+                                        f"{e:.2e}, max {err.max():.2e} "
                                         f"(h0 {heights['h0'][i]:.4f} h1 {heights['h1'][i]:.4f}: "
                                         f"{float(value[i]):.6e} vs {float(r[i]):.6e})")
             except Leaf as e:
                 failures.append(f"site {s}: interpreter reached an input it doesn't know: {e}")
+    failures += check_lut_sampling(patched, args, rng)
     status = "FAIL" if failures else "PASS"
     print(f"{status} {entry} {crc}: {summary}; worst p99.9 rel. error {worst:.1e}")
+    return failures
+
+
+def check_lut_sampling(patched: str, args: dict, rng) -> list[str]:
+    """patch_medium's quadratic and ms_rows edits, from their own inputs, with T0 = 1 (the
+    formulas) and T0 = 0 (stock)."""
+    failures = []
+    n = 2048
+    for t0_on in (1.0, 0.0):
+        mod = np.zeros((4, 4))
+        mod[1, 0] = t0_on
+        cbs = {208: ATMO, 64: mod, 4800: np.zeros((300, 4))}
+        H, R = float(ATMO[8, 0]), float(ATMO[2, 3])
+        if args.get("quadratic"):
+            u0 = re.search(r"%mod\.q\.u0 = fmul fast float (%[\w.]+), (\S+)$", patched, re.M)
+            tmax = re.search(r"%mod\.q\.a1 = call float @dx\.op\.binary\.f32\(i32 36, float %mod\.q\.b1, float (%[\w.]+)\)",
+                             patched)[1]
+            k = float(P.literal_value(u0[2]))
+            steps = round(1 / k)
+            s_ = rng.integers(0, steps, n).astype(F)
+            tm = rng.uniform(1.0, 1200.0, n).astype(F)
+            ev = Evaluator(patched, cbs, {u0[1]: s_, tmax: tm})
+            got0, got1 = ev("%mod.q.t0").astype(np.float64), ev("%mod.q.t1").astype(np.float64)
+            s64, t64 = s_.astype(np.float64), tm.astype(np.float64)
+            p = 2 if t0_on else 1
+            want0 = t64 * (s64 / steps) ** p
+            want1 = np.minimum(t64 * ((s64 + 1) / steps) ** p, t64)
+            err = max(np.abs(got0 - want0).max(), np.abs(got1 - want1).max()) / 1200.0
+            if err > 1e-6:
+                failures.append(f"quadratic march (T0 = {t0_on:g}): segment ends off by {err:.1e} of tMax")
+        if args.get("ms_rows") == "write":
+            u = re.search(r"%mod\.mw\.u0 = fadd fast float (%[\w.]+),", patched)[1]
+            y = rng.integers(0, 32, n).astype(F)
+            coord = (y / 31 + 0.01).astype(F)
+            ev = Evaluator(patched, cbs, {u: coord})
+            name = re.search(r"^\s+(%[\w.]+) = select i1 %mod\.off, float %mod\.mw\.stock", patched, re.M)[1]
+            got = ev(name).astype(np.float64) - R
+            y64 = y.astype(np.float64)
+            want = H * (y64 / 31) ** 2 + P.MS_ROWS_FLOOR_KM if t0_on else np.clip(y64 / 31 + 0.01, 0, 1) * (H - 0.01)
+            if np.abs(got - want).max() > 2e-3:  # (float32 next to R = 6360 km)
+                failures.append(f"multiple-scattering rows (T0 = {t0_on:g}): heights off by {np.abs(got - want).max():.1e} km")
+        if args.get("ms_rows") == "read":
+            sites = re.findall(r"^\s+%mod\.mr(\d+)\.s = call float @dx\.op\.unary\.f32\(i32 24, float (%[\w.]+)\)$",
+                               patched, re.M)
+            if not sites:
+                failures.append("multiple-scattering rows: no lookups")
+            for m, sat in sites:
+                frac = rng.uniform(-0.05, 1.05, n).astype(F)
+                ev = Evaluator(patched, cbs, {sat: np.clip(frac, 0, 1).astype(F)})
+                add = re.search(rf"^\s+(%[\w.]+) = fadd fast float %mod\.mr{m}\.f, 1\.562500e-02$", patched, re.M)
+                if not add:
+                    failures.append(f"lookup {m}: its sub-uv sum not found")
+                    continue
+                got = ev(add[1]).astype(np.float64) - 0.015625
+                c = np.clip(frac.astype(np.float64), 0, 1)
+                want = np.sqrt(c) if t0_on else c
+                if np.abs(got - want).max() > 1e-6:
+                    failures.append(f"lookup {m} (T0 = {t0_on:g}): height coordinate off by {np.abs(got - want).max():.1e}")
     return failures
 
 
