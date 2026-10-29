@@ -2035,8 +2035,24 @@ TYPES_BASE_MIX = (0.0, 0.0, 0.5, 1.0)
 TYPES_CU_EDGE_MIN = 1.0
 # ... and how much of MSFS's erosion puffs (its 8 km and 1 km noise octaves, in the view march)
 # each keeps: altostratus and stratus are featureless sheets, stratocumulus has rolls,
-# altocumulus its puffs; cumulus keeps all (so do towers; anvils are altostratus)
-TYPES_PUFF = (0.6, 0.15, 1.0, 0.1)
+# altocumulus its cloudlets (the 8 km octave, TYPES_NOISE) but only some of the 1 km octave's
+# fine puffs on them (smooth like the altostratus, which looked more real than full puffs);
+# cumulus keeps all (so do towers; anvils are altostratus)
+TYPES_PUFF = (0.6, 0.15, 1.0, 0.1)          # the 8 km octave
+TYPES_PUFF_FINE = (0.6, 0.15, 0.4, 0.1)     # the 1 km octave
+# ... and the shape of their 8 km octave: per type (its index in the grid), the octave's own noise
+# looked up again at an integer matrix times its coordinates, and blended in by S w_x. MSFS's
+# noise frame jumps by whole 8 km tiles as the camera moves (Global[51]); integer matrices turn
+# those jumps into whole tiles of the noise, so they stay invisible. With the lookups' lod
+# raised by log2 of the matrix's largest stretch:
+# - altocumulus: 3x finer, so a thin deck breaks into cloudlets of a few hundred metres with
+#   gaps between them, instead of cumulus-sized patches;
+# - stratocumulus: 2:1 stretched along the world's (1, 0, 1) and ~2x finer across it, lumps in
+#   rows (a fixed direction: following the wind would slide the pattern as the wind turns).
+TYPES_NOISE = (
+    (2, ((3, 0, 0), (0, 3, 0), (0, 0, 3)), math.log2(3.0)),
+    (0, ((1, 0, 1), (0, 1, 0), (-2, 0, 2)), math.log2(2.0 * math.sqrt(2.0))),
+)
 
 
 def find_volume_sample(ir: Ir, h: str, before: int) -> tuple:
@@ -2113,8 +2129,11 @@ def apply_cloud_types(ir: Ir) -> str:
         C0 C8 (1 - S) + S w_cu max(C0 C8, C0 TYPES_CU_EDGE_MIN): soft (MSFS's)
         for the stratiform types, crisp for cumulus;
       - puffs: the view march's 8 km and 1 km erosion octaves are scaled by
-        1 - S + S (w_cu + sum w_x p_x) (TYPES_PUFF): smooth stratiform sheets
+        1 - S + S (w_cu + sum w_x p_x) (TYPES_PUFF, TYPES_PUFF_FINE): smooth stratiform sheets
         (and anvils, which the generator types altostratus), billowing cumulus;
+      - noise shape: the 8 km octave's noise is blended toward its own lookups
+        at integer multiples of its coordinates by S w_x (TYPES_NOISE):
+        altocumulus cloudlets, stratocumulus rows;
       - cirrus: the storm cells' anvils (ANVIL_REGION, cover-weighted level):
         where they cover more than CI_MIN_COV, MSFS's cirrus band (User[9].x)
         is centred on their level and its cover is at least theirs;
@@ -2205,15 +2224,18 @@ def apply_cloud_types(ir: Ir) -> str:
         base = em.mul(f"%mod.ty.k{c}b", val) if base is None else em.mad(f"%mod.ty.k{c}b", val, base)
         total = em.mad(val, -scale[c], 1.0 if total is None else total)
     cu = em.max(total, 0.0)
+    # the 8 km octave's own noise by type (TYPES_NOISE): their weights S w_x
+    noise_w = {c: em.mul(em.mul(vals[c], scale[c]), "%mod.ty.S") for c, _, _ in TYPES_NOISE}
     # the puffs (MSFS's 8 km and 1 km erosion octaves) by type: 1 - S + S (cu + sum w_x p_x)
-    puff = cu
-    for c in range(4):
-        puff = em.mad(vals[c], scale[c] * TYPES_PUFF[c], puff)
-    less = em.sub(puff, 1.0)
-    em.lines += [
-        f"  %mod.ty.pf0 = call float @dx.op.tertiary.f32(i32 46, float %mod.ty.S, float {less}, float 1.000000e+00)",
-        "  %mod.ty.pf = select i1 %mod.ty.on, float %mod.ty.pf0, float 1.000000e+00",
-    ]
+    for octave, (pf, factors) in enumerate((("%mod.ty.pf", TYPES_PUFF), ("%mod.ty.pf1", TYPES_PUFF_FINE))):
+        puff = cu
+        for c in range(4):
+            puff = em.mad(vals[c], scale[c] * factors[c], puff)
+        less = em.sub(puff, 1.0)
+        em.lines += [
+            f"  {pf}m = call float @dx.op.tertiary.f32(i32 46, float %mod.ty.S, float {less}, float 1.000000e+00)",
+            f"  {pf} = select i1 %mod.ty.on, float {pf}m, float 1.000000e+00",
+        ]
     em.lines += [
         f"  %mod.ty.T = fadd fast float {thick}, 0.000000e+00",
         f"  %mod.ty.m = fadd fast float {base}, 0.000000e+00",
@@ -2302,13 +2324,44 @@ def apply_cloud_types(ir: Ir) -> str:
     n, name, arg = eight
     edits.append((n, [f"  %mod.ty.e8 = fmul fast float {arg}, 2.500000e-01",
                       f"  {name} = fmul fast float %mod.ty.e8, %mod.ty.pf"]))
+    # ---- the 8 km octave's noise by type: n' = n + sum S w_x (n_x - n), n_x the same lookup at
+    # M_x times its coordinates (TYPES_NOISE); n' feeds the octave and its density factor
+    n1 = [o for o in ir.binops[arg][1:] if o != "-7.500000e-01"][0]
+    m = re.match(rf"\s+{re.escape(n1)} = extractvalue %dx\.types\.ResRet\.f32 (%\d+), 0$", ir.lines[ir.defs[n1]])
+    need(m, f"{n1}: the 8 km octave's noise is not a lookup's .x")
+    look = re.match(rf"\s+{re.escape(m[1])} = call %dx\.types\.ResRet\.f32 @dx\.op\.sampleLevel\.f32\(i32 62, "
+                    r"%dx\.types\.Handle (\S+), %dx\.types\.Handle (\S+), float (\S+), float (\S+), float (\S+), "
+                    r"float undef, i32 0, i32 0, i32 0, float (\S+)\)", ir.lines[ir.defs[m[1]]])
+    need(look, f"{m[1]}: the 8 km octave's lookup isn't a 3D sampleLevel")
+    handle, sampler, coords, lod = look[1], look[2], look.group(3, 4, 5), look[6]
+    tn = Emitter("tn.")
+    acc = None
+    for c, mat, stretch in TYPES_NOISE:
+        uvw = []
+        for row in mat:
+            v = None
+            for k, coef in zip(coords, row):
+                if coef and v is None:
+                    v = k if coef == 1 else tn.mul(k, float(coef))
+                elif coef:
+                    v = tn.add(v, k) if coef == 1 else tn.mad(k, float(coef), v)
+            uvw.append(v)
+        res = tn.new(f"call %dx.types.ResRet.f32 @dx.op.sampleLevel.f32(i32 62, %dx.types.Handle {handle}, "
+                     f"%dx.types.Handle {sampler}, float {uvw[0]}, float {uvw[1]}, float {uvw[2]}, float undef, "
+                     f"i32 0, i32 0, i32 0, float {tn.add(lod, stretch)})")
+        d = tn.sub(tn.new(f"extractvalue %dx.types.ResRet.f32 {res}, 0"), n1)
+        acc = tn.mul(noise_w[c], d) if acc is None else tn.mad(noise_w[c], d, acc)
+    tn.lines.append(f"  %mod.tn.n = select i1 %mod.ty.on, float {tn.add(n1, acc)}, float {n1}")
+    edits.append((ir.defs[n1], [ir.lines[ir.defs[n1]], *tn.lines]))
+    for i in ir.users(n1):
+        edits.append((i, [re.sub(rf"{re.escape(n1)}(?![\w.])", "%mod.tn.n", ir.lines[i])]))
     one = [n for n, l in enumerate(ir.lines) if re.match(r"  %\d+ = select i1 %mod\.cbsoff, float %mod\.bd0\.xs, ", l)]
     need(len(one) <= 1, f"{len(one)} view-march 1 km octaves")
     if one:
         name = ir.def_name(one[0])
         need(one[0] > eight[0], "the 1 km octave comes before the 8 km one")
         edits.append((one[0], [ir.lines[one[0]].replace(f"{name} = ", "%mod.ty.e1 = ", 1),
-                               f"  {name} = fmul fast float %mod.ty.e1, %mod.ty.pf"]))
+                               f"  {name} = fmul fast float %mod.ty.e1, %mod.ty.pf1"]))
     # ---- the view march's cirrus band (MSFS's thin ice layer at User[9].x, +350 / -500 m, its
     # cover sat(t8.x) at the sample): over the storm cells' anvils, centred on their level and
     # covered as much as they are
@@ -3836,6 +3889,18 @@ ANCHOR_RADIUS_DEFAULT_M = 20000.0
 # how far toward the smooth noise channel smooth decks go (1 = the smooth channel only)
 DECK_FLATTEN = 0.7
 DECK_SMOOTH = 0.6
+# TYPE_DECKS: MSFS's own layers (where no METAR describes the slice) flatten the same way where
+# the cloud types call them stratiform: stratocumulus, stratus, altocumulus and altostratus get
+# the flat top, stratus and altostratus the smooth channel, by the cloud types' strength C23.
+# Without it MSFS's own decks above what the METARs see kept cumulus domes: altocumulus looked
+# like small cumulus, altostratus like dunes (captures 223, 224).
+# DECK_SLOPE: a flattened deck's shape is uniform up to its top slice, barely inside the surface
+# (s ~ +0.01), and the slice above, outside the layer, is far outside (s ~ -0.3: beyond the
+# renderer's erosion band, s > -0.075). So the erosion cut every cell off at the top slice's
+# centre: flat tops at one altitude above vertical walls (capture 228). apply_deck_tops lets s
+# drop by at most DECK_SLOPE per slice going up from a flattened slice; the erosion then shapes
+# the tops over the next slice (relief up to ~0.8 slice: ~200 m at 1 km, ~400 m at 4 km).
+DECK_SLOPE = 0.04
 # ... and a deck's top slice (if it has more than one) at most C 0.91 and from MSFS's
 # cellular channel (about 75 % covered over an overcast), so the top has lumps and
 # dimples one slice high instead of being a plane at a slice boundary. Applied by the add-on (cloud_anchor.h kDeckTopC) in
@@ -4744,11 +4809,14 @@ def apply_cb_towers(ir: Ir, text: str, values: dict) -> str:
             f"x and y of {len(out)} slices")
 
 
-def apply_metar_anchor(ir: Ir) -> str:
+def apply_metar_anchor(ir: Ir, text: str) -> str:
     """ch_cloudDensity, live-weather family: blend the weather-map value C of
     every slice toward the METAR stations' rows (ANCHOR_TABLE, above) by
-    distance. Exactly stock while C20 <= 0, without DebugCapture bit 6 or
-    without the table."""
+    distance, with their decks' flat tops and smooth channel. MSFS's own share
+    of each slice (1 - the anchored share) flattens too where the cloud types
+    (type_weights, from the blended values) call it stratiform, by sat(C23)
+    (TYPE_DECKS). Exactly stock while C20 <= 0 (or without DebugCapture bit 6
+    or the table) and C23 <= 0."""
     values = find_weather_values(ir)
     need(sorted(values) == list(range(WEATHER_SLICES)), f"weather-map values for slices {sorted(values)}")
     direction = find_planet_direction(ir)
@@ -4843,6 +4911,8 @@ def apply_metar_anchor(ir: Ir) -> str:
             f"  %mod.ma.dist = fadd fast float {dmin}, 0.000000e+00"]
     edits = []
     rows = 16 + 16 * n
+    terrain = column_terrain(ir, text)[1]
+    need(ir.defs.get(terrain, 0) < first, "the terrain comes after the weather values")
     for k, value in values.items():
         i0 = ir.defs[value]
         q = f"%mod.ma.k{k}."
@@ -4883,6 +4953,23 @@ def apply_metar_anchor(ir: Ir) -> str:
             f"  {q}smooth = select i1 %mod.ma.on, float {q}sm1, float 0.000000e+00",
         ]
         edits.append((i0, lines))
+    # MSFS's own stratiform layers (TYPE_DECKS), after the last value: per slice the flat top
+    # fl = strat + (1 - W) sat(C23) DECK_FLATTEN (Sc + St + Ac + As) and the smooth channel
+    # sm = smooth + (1 - W) sat(C23) DECK_SMOOTH (St + As)
+    tw = Emitter("tw.")
+    _, weights = type_weights(tw, values, terrain)
+    s23 = tw.sat("%mod.C23")
+    for k in values:
+        q = f"%mod.ma.k{k}."
+        sc, st, ac, as_ = weights[k]
+        free = tw.mul(tw.sub(1.0, f"{q}W"), s23)
+        flat = tw.add(tw.add(sc, st), tw.add(ac, as_))
+        tw.lines += [f"  {q}fl = call float @dx.op.tertiary.f32(i32 46, float {tw.mul(free, flat)}, "
+                     f"float {f32(DECK_FLATTEN)}, float {q}strat)",
+                     f"  {q}sm = call float @dx.op.tertiary.f32(i32 46, float {tw.mul(free, tw.add(st, as_))}, "
+                     f"float {f32(DECK_SMOOTH)}, float {q}smooth)"]
+    i_last = max(ir.defs[v] for v in values.values())
+    edits = [(i, lines + tw.lines if i == i_last else lines) for i, lines in edits]
     # flat tops and smooth decks: per slice, scale the dome taper and move the
     # noise-channel parameter toward the smooth channel
     decks = find_deck_sites(ir, values)
@@ -4893,9 +4980,9 @@ def apply_metar_anchor(ir: Ir) -> str:
             j = ir.defs[T]
             edits.append((j, [
                 ir.lines[j].replace(f"{T} = ", f"{q}T0 = ", 1),
-                f"  {q}ns = fsub fast float 1.000000e+00, {q}strat",
+                f"  {q}ns = fsub fast float 1.000000e+00, {q}fl",
                 f"  {q}T1 = fmul fast float {q}T0, {q}ns",
-                f"  {q}son = fcmp fast ogt float {q}strat, 0.000000e+00",
+                f"  {q}son = fcmp fast ogt float {q}fl, 0.000000e+00",
                 f"  {T} = select i1 {q}son, float {q}T1, float {q}T0",
             ]))
         t = site["t"]
@@ -4903,8 +4990,8 @@ def apply_metar_anchor(ir: Ir) -> str:
         edits.append((j, [
             ir.lines[j].replace(f"{t} = ", f"{q}t0 = ", 1),
             f"  {q}tr = fsub fast float 1.000000e+00, {q}t0",
-            f"  {q}t1 = call float @dx.op.tertiary.f32(i32 46, float {q}tr, float {q}smooth, float {q}t0)",
-            f"  {q}mon = fcmp fast ogt float {q}smooth, 0.000000e+00",
+            f"  {q}t1 = call float @dx.op.tertiary.f32(i32 46, float {q}tr, float {q}sm, float {q}t0)",
+            f"  {q}mon = fcmp fast ogt float {q}sm, 0.000000e+00",
             f"  {t} = select i1 {q}mon, float {q}t1, float {q}t0",
         ]))
     for i, new_lines in sorted(edits, key=lambda e: -e[0]):
@@ -4945,6 +5032,50 @@ def smoothstep(em: Emitter, x, lo: float, hi: float) -> str:
 
 def slice_bottom(k: int) -> float:
     return 15.625 * k * k
+
+
+def type_weights(em: "Emitter", values: dict, terrain: str) -> tuple[list, list]:
+    """The cloud types of each of the 31 slices from the column's weather
+    values (layout and rules above): per slice whether it is in a layer, and
+    its weights [Sc, St, Ac, As] (0 outside layers; cumulus is the rest)."""
+    n = WEATHER_SLICES
+    inside = [em.cmp("ogt", values[k], TYPES_IN_LAYER_C) for k in range(n)]
+    # each slice's layer: base and cover up from below, top and cover down from above
+    base, cover_up = [], []
+    for k in range(n):
+        if k == 0:
+            base.append(0.0)
+            cover_up.append(values[0])
+            continue
+        base.append(em.select(inside[k - 1], base[k - 1], slice_bottom(k)))
+        cover_up.append(em.max(values[k], em.select(inside[k - 1], cover_up[k - 1], 0.0)))
+    top, cover = [None] * n, [None] * n
+    for k in reversed(range(n)):
+        if k == n - 1:
+            top[k], cover[k] = slice_bottom(k + 1), cover_up[k]
+            continue
+        top[k] = em.select(inside[k + 1], top[k + 1], slice_bottom(k + 1))
+        cover[k] = em.max(cover_up[k], em.select(inside[k + 1], cover[k + 1], 0.0))
+    weights = []
+    for k in range(n):
+        depth = em.sub(top[k], base[k])
+        above = em.sub(base[k], terrain)
+        broken = smoothstep(em, cover[k], *TYPES_BROKEN)
+        low = em.sub(1.0, smoothstep(em, above, *TYPES_LOW_BASE))
+        ice = em.sat(em.mad(em.sub(base[k], "%mod.coh"), 1.0 / TYPES_ICE_BLEND_M, 1.0))
+        high = em.mul(em.mul(ice, ice), em.mad(ice, -2.0, 3.0))
+        mid = em.mul(em.sub(1.0, low), em.sub(1.0, high))
+        deep = smoothstep(em, depth, *TYPES_DEEP)
+        st_base = em.sub(1.0, smoothstep(em, above, *TYPES_ST_BASE))
+        st_thin = em.sub(1.0, smoothstep(em, depth, *TYPES_ST_DEPTH))
+        sc_thin = em.sub(1.0, smoothstep(em, depth, *TYPES_SC_DEPTH))
+        st = em.mul(em.mul(low, st_base), st_thin)  # (any cover: FEW/SCT are fractus)
+        sc = em.mul(broken, em.sub(em.mul(low, sc_thin), st))
+        mid_nd = em.mul(mid, em.sub(1.0, deep))
+        as_ = em.mul(em.mul(mid_nd, broken), smoothstep(em, depth, *TYPES_AS_DEPTH))
+        ac = em.sub(mid_nd, as_)
+        weights.append([em.select(inside[k], w, 0.0) for w in (sc, st, ac, as_)])
+    return inside, weights
 
 
 def cloud_types_lines(values: dict | None, tx: str, ty: str, terrain: str, shares: dict | None = None,
@@ -5020,42 +5151,7 @@ def cloud_types_lines(values: dict | None, tx: str, ty: str, terrain: str, share
     ]
     em = Emitter("ty.")
     n = WEATHER_SLICES
-    inside = [em.cmp("ogt", values[k], TYPES_IN_LAYER_C) for k in range(n)]
-    # each slice's layer: base and cover up from below, top and cover down from above
-    base, cover_up = [], []
-    for k in range(n):
-        if k == 0:
-            base.append(0.0)
-            cover_up.append(values[0])
-            continue
-        base.append(em.select(inside[k - 1], base[k - 1], slice_bottom(k)))
-        cover_up.append(em.max(values[k], em.select(inside[k - 1], cover_up[k - 1], 0.0)))
-    top, cover = [None] * n, [None] * n
-    for k in reversed(range(n)):
-        if k == n - 1:
-            top[k], cover[k] = slice_bottom(k + 1), cover_up[k]
-            continue
-        top[k] = em.select(inside[k + 1], top[k + 1], slice_bottom(k + 1))
-        cover[k] = em.max(cover_up[k], em.select(inside[k + 1], cover[k + 1], 0.0))
-    weights = []
-    for k in range(n):
-        depth = em.sub(top[k], base[k])
-        above = em.sub(base[k], terrain)
-        broken = smoothstep(em, cover[k], *TYPES_BROKEN)
-        low = em.sub(1.0, smoothstep(em, above, *TYPES_LOW_BASE))
-        ice = em.sat(em.mad(em.sub(base[k], "%mod.coh"), 1.0 / TYPES_ICE_BLEND_M, 1.0))
-        high = em.mul(em.mul(ice, ice), em.mad(ice, -2.0, 3.0))
-        mid = em.mul(em.sub(1.0, low), em.sub(1.0, high))
-        deep = smoothstep(em, depth, *TYPES_DEEP)
-        st_base = em.sub(1.0, smoothstep(em, above, *TYPES_ST_BASE))
-        st_thin = em.sub(1.0, smoothstep(em, depth, *TYPES_ST_DEPTH))
-        sc_thin = em.sub(1.0, smoothstep(em, depth, *TYPES_SC_DEPTH))
-        st = em.mul(em.mul(low, st_base), st_thin)  # (any cover: FEW/SCT are fractus)
-        sc = em.mul(broken, em.sub(em.mul(low, sc_thin), st))
-        mid_nd = em.mul(mid, em.sub(1.0, deep))
-        as_ = em.mul(em.mul(mid_nd, broken), smoothstep(em, depth, *TYPES_AS_DEPTH))
-        ac = em.sub(mid_nd, as_)
-        weights.append([em.select(inside[k], w, 0.0) for w in (sc, st, ac, as_)])
+    inside, weights = type_weights(em, values, terrain)
     # outside a layer: the layer's below, else the one above (weights are 0 outside layers)
     words = []
     for k in range(TYPES_SLICES):
@@ -5086,6 +5182,36 @@ def cloud_types_lines(values: dict | None, tx: str, ty: str, terrain: str, share
     return lines + ["  br label %mod.cgb.tyend", "", "mod.cgb.tyend:"]
 
 
+def apply_deck_tops(ir: Ir) -> str:
+    """ch_cloudDensity, live-weather family, after the towers: going up from a
+    flattened slice k (its flat top fl_k, apply_metar_anchor), the stored shape
+    x_k+1 rises toward x'_k - DECK_SLOPE / 2 by sat(fl_k / DECK_FLATTEN), x'_k
+    being slice k's stored shape after this. Exactly stock where fl_k = 0."""
+    stores = {}
+    for i, line in enumerate(ir.lines):
+        m = re.match(r"(\s+call void @dx\.op\.textureStore\.f32\(i32 67, %dx\.types\.Handle \S+, i32 \S+, i32 \S+, "
+                     r"i32 (\d+), )float ([^,]+), (float [^,]+, float [^,]+, float [^,]+, i8 15\).*)$", line)
+        if m:
+            stores[int(m[2])] = (i, m)
+    need(sorted(stores) == list(range(CG_SLICES)), "not 32 slice stores")
+    need(all(stores[k][0] < stores[k + 1][0] for k in range(CG_SLICES - 1)), "the slice stores aren't in order")
+    x_prev = stores[0][1][3]
+    edits = []
+    for k in range(1, WEATHER_SLICES):
+        i, m = stores[k]
+        fl = f"%mod.ma.k{k - 1}.fl"
+        need(fl in ir.defs, f"slice {k - 1}: no flat top")
+        em = Emitter(f"dt{k}.")
+        a = em.sat(em.mul(fl, 1.0 / DECK_FLATTEN))
+        rise = em.max(em.sub(em.sub(x_prev, DECK_SLOPE / 2), m[3]), 0.0)
+        x = em.select(em.cmp("ogt", fl, 0.0), em.mad(a, rise, m[3]), m[3])
+        edits.append((i, em.lines + [f"{m[1]}float {x}, {m[4]}"]))
+        x_prev = x
+    for i, lines in sorted(edits, key=lambda e: -e[0]):
+        ir.lines[i:i + 1] = lines
+    return f"deck tops: the shape drops at most {DECK_SLOPE} per slice above flattened slices ({len(edits)} stores)"
+
+
 def patch_cloud_gen_capture(text: str) -> tuple[str, str]:
     """ch_cloudDensity, every variant: on capture (DebugCapture bits 0 and 6)
     dump its constants, its input textures and its output (layout above) into
@@ -5097,11 +5223,13 @@ def patch_cloud_gen_capture(text: str) -> tuple[str, str]:
     values = None
     if all(srv_shapes(text).get(reg) == sh for reg, sh in CG_LAYOUTS["weather map"]["shapes"].items()):
         values = find_weather_values(ir)  # (the anchoring keeps their names)
-        anchor = apply_metar_anchor(ir)
+        anchor = apply_metar_anchor(ir, text)
         ir.reindex()
         anchor += "; " + apply_speck_suppression(ir, values)  # (from the anchored values)
         ir.reindex()
         anchor += "; " + apply_cb_towers(ir, text, values)
+        ir.reindex()
+        anchor += "; " + apply_deck_tops(ir)
         ir.reindex()
     tids = re.findall(r"^\s+(%[\w.]+) = call i32 @dx\.op\.threadId\.i32\(i32 93, i32 ([01])\)", text, re.M)
     tid = {int(c): n for n, c in tids}

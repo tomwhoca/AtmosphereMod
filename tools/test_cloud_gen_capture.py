@@ -359,9 +359,9 @@ class FlatTex(Tex):
         return (self.value,) * 4
 
 
-def anchor_cloud(strength=STRENGTH):
+def anchor_cloud(strength=STRENGTH, types=0.0):
     c = [0.0] * (P.CLOUD_PARAMS_SIZE // 4)
-    c[20], c[21] = strength, RADIUS_KM
+    c[20], c[21], c[23] = strength, RADIUS_KM, types
     return c
 
 
@@ -408,7 +408,9 @@ def with_table(stations, magic=P.ANCHOR_MAGIC):
 
 
 def anchor_ref(stock_c, direction, stations, strength=STRENGTH):
-    """The anchored weather values, float64, from the stock values and the column's planet direction."""
+    """The anchored weather values, float64, from the stock values and the column's planet direction;
+    the nearest station, the total weight, the decks' flat tops and smooth channel, the stations'
+    distances and each slice's anchored share W."""
     d = np.array(direction, dtype=np.float64)
     d /= np.linalg.norm(d)
     r = max(RADIUS_KM * 1000, P.ANCHOR_MIN_RADIUS_M)
@@ -420,7 +422,7 @@ def anchor_ref(stock_c, direction, stations, strength=STRENGTH):
         b.append(gi / ((di / 1000) ** 2 + P.ANCHOR_IDW_KM ** 2))
         dist.append(di)
         rows.append(anchor_rows(layers, ceiling))
-    out, strat, smooth = [], [], []
+    out, strat, smooth, shares = [], [], [], []
     for k in range(P.WEATHER_SLICES):
         q, sw, sc, sst, ssm = 1.0, 0.0, 0.0, 0.0, 0.0
         for i in range(len(stations)):
@@ -433,9 +435,10 @@ def anchor_ref(stock_c, direction, stations, strength=STRENGTH):
         out.append(c + (sc * inv - c) * w)
         strat.append(sst * inv * w * P.DECK_FLATTEN)
         smooth.append(ssm * inv * w * P.DECK_SMOOTH)
+        shares.append(w)
     total = 1.0 - math.prod(1.0 - gi for gi in g)
     nearest = min(di for di, st in zip(dist, stations) if st[1] > 0)
-    return out, nearest, total, strat, smooth, dist
+    return out, nearest, total, strat, smooth, dist, shares
 
 
 
@@ -459,9 +462,11 @@ def smoothstep(x, lo, hi):
     return t * t * (3 - 2 * t)
 
 
-def types_ref(c, terrain, ice=P.OPTICAL_ICE_DEFAULT_M):
+def types_ref(c, terrain, ice=P.OPTICAL_ICE_DEFAULT_M, fill=True):
     """The 32 slices' type weights (Sc, St, Ac, As), float64, from the column's
-    weather values c (31) and terrain (m), as patch_dxil.cloud_types_lines."""
+    weather values c (31) and terrain (m), as patch_dxil.cloud_types_lines;
+    with fill=False the 31 slices' own (patch_dxil.type_weights: 0 outside
+    layers)."""
     n = P.WEATHER_SLICES
     inside = [x > P.TYPES_IN_LAYER_C for x in c]
     base, cover_up = [], []
@@ -485,6 +490,8 @@ def types_ref(c, terrain, ice=P.OPTICAL_ICE_DEFAULT_M):
         mid_nd = mid * (1 - smoothstep(depth, *P.TYPES_DEEP))
         as_ = mid_nd * broken * smoothstep(depth, *P.TYPES_AS_DEPTH)
         weights.append((sc, st, mid_nd - as_, as_) if inside[k] else (0.0,) * 4)
+    if not fill:
+        return weights
     out = []
     for k in range(P.TYPES_SLICES):
         if k < n and inside[k]:
@@ -635,6 +642,66 @@ def check_specks(stock_p, patched_p, values, noise, t1_name, h_name, lut, tex, c
     check(stock_specks > 0, "specks: the mock weather made no specks to remove")
     print(f"specks: {stock_specks} stock speck slices below C {P.SPECK_C[0]} in 10 columns, {removed} removed; "
           f"volume vs model {worst:.1e}" + ("" if generator_model is not None else " (no model)"))
+
+
+def deck_top(strat):
+    """generator_model.column's slope for the slices' flat tops (patch_dxil.apply_deck_tops)."""
+    return [min(max(s / P.DECK_FLATTEN, 0.0), 1.0) for s in strat], P.DECK_SLOPE
+
+
+def check_type_decks(stock_p, patched_p, values, noise, t1_name, h_name, lut, tex, check):
+    """MSFS's own stratiform layers flatten by the cloud types (patch_dxil.TYPE_DECKS): layered
+    weather maps without stations, terrain at 50 m. With C23 = 0 the volume is stock; with C23 = 1
+    it matches the model with each slice's flat top DECK_FLATTEN (Sc + St + Ac + As) and smooth
+    channel DECK_SMOOTH (St + As) and the tops' slope (apply_deck_tops), and the stratiform layers'
+    slices change; the slope raises the slice above some of them."""
+    cases = [("OVC stratus", [((3, 6), 1.0)]), ("BKN stratocumulus", [((8, 10), 0.58)]),
+             ("BKN altostratus", [((15, 17), 0.6)]), ("SCT altocumulus", [((15, 17), 0.38)]),
+             ("SCT cumulus", [((8, 11), 0.38)])]
+    dims = tex[5].dims
+    worst, changed, raised = 0.0, {}, 0
+    for what, layers in cases:
+        profile = [0.0] * P.WEATHER_SLICES
+        for (k0, k1), cv in layers:
+            profile[k0:k1] = [cv] * (k1 - k0)
+        tex_l = {**tex, 0: FlatTex(0, (64, 64, 0, 1), 50.0 / 65535), 5: ProfileTex(5, dims, profile),
+                 6: ProfileTex(6, dims, profile)}
+        off = [0.0] * (P.CLOUD_PARAMS_SIZE // 4)
+        on = list(off)
+        on[23] = 1.0
+        changed[what] = 0
+        for tid in [(256, 256), (230, 270), (300, 220), (128, 400)]:
+            ref_m = Machine(stock_p, constants(0, cloud=off), tex_l, bytearray(16 << 20))
+            ref = ref_m.run(tid)
+            check(Machine(patched_p, constants(0, cloud=off), tex_l, bytearray(16 << 20)).run(tid) == ref,
+                  f"{what} {tid}: types' decks: C23 = 0 but the volume differs from stock")
+            m = Machine(patched_p, constants(0, cloud=on), tex_l, bytearray(16 << 20))
+            out = m.run(tid)
+            c = [m.env[values[k]] for k in range(P.WEATHER_SLICES)]
+            tw = types_ref(c, m.env[h_name], fill=False)
+            changed[what] += sum(1 for k in range(P.WEATHER_SLICES) if abs(out[k][0] - ref[k][0]) > 1e-3)
+            if generator_model is not None:
+                n4 = [tuple(m.env[noise[k]][:4]) for k in range(P.WEATHER_SLICES)]
+                fl = [P.DECK_FLATTEN * sum(w) for w in tw]
+                res = generator_model.column(c, n4, lut, m.env[t1_name], m.env[h_name], 0.0, strat=fl,
+                                             smooth=[P.DECK_SMOOTH * (w[1] + w[3]) for w in tw])
+                flat = generator_model.column(c, n4, lut, m.env[t1_name], m.env[h_name], 0.0, strat=fl,
+                                              smooth=[P.DECK_SMOOTH * (w[1] + w[3]) for w in tw], slope=deck_top(fl))
+                raised += sum(1 for k in range(P.WEATHER_SLICES) if flat[k][0] > res[k][0] + 1e-3)
+                res = flat
+                err = max(max(abs(out[k][0] - res[k][0]), abs(out[k][1] - res[k][1]))
+                          for k in range(P.WEATHER_SLICES))
+                worst = max(worst, err)
+                check(err < 1e-4, f"{what} {tid}: types' decks: the volume (x, y) differs from the model by {err:.1e}")
+    for what, n in changed.items():
+        if what == "SCT cumulus":
+            check(n == 0, f"types' decks: the {what} changed in {n} slices")
+        else:
+            check(n > 0, f"types' decks: the {what} didn't change")
+    check(generator_model is None or raised > 0, "types' decks: the tops' slope raised no slice")
+    print("types' decks (C23 = 1): slices changed per layer " + ", ".join(f"{w} {n}" for w, n in changed.items())
+          + f"; {raised} slices raised by the tops' slope; volume vs model {worst:.1e}"
+          + ("" if generator_model is not None else " (no model)"))
 
 
 class RainTex(Tex):
@@ -1194,7 +1261,8 @@ def main():
         ref_m = Machine(stock_p, constants(0, cloud=anchor_cloud()), TEX_ANCHOR, bytearray(16 << 20))
         ref = ref_m.run(tid)
         stock_c = [ref_m.env[values[k]] for k in range(P.WEATHER_SLICES)]
-        want, dist, w, strat, smooth, dists = anchor_ref(stock_c, [ref_m.env[v] for v in direction], STATIONS)
+        want, dist, w, strat, smooth, dists, shares = anchor_ref(stock_c, [ref_m.env[v] for v in direction],
+                                                                 STATIONS)
         on = Machine(patched_p, constants(on_flags, cloud=anchor_cloud()), TEX_ANCHOR, bytearray(table))
         out = on.run(tid)
         got = [on.env[values[k]] for k in range(P.WEATHER_SLICES)]
@@ -1205,10 +1273,24 @@ def main():
         if generator_model is not None:
             n4 = [tuple(ref_m.env[noise[k]][:4]) for k in range(P.WEATHER_SLICES)]
             res = generator_model.column(want, n4, lut, ref_m.env[t1_name], ref_m.env[h_name], 0.0, strat=strat,
-                                         smooth=smooth)
+                                         smooth=smooth, slope=deck_top(strat))
             vol_err = max(max(abs(out[k][0] - res[k][0]), abs(out[k][1] - res[k][1]))
                           for k in range(P.WEATHER_SLICES))
             check(vol_err < 1e-4, f"{tid}: the anchored volume (x, y) differs from the model by {vol_err:.1e}")
+            # with the cloud types on (C23 = 1): MSFS's own share of each slice flattens too where the
+            # types call it stratiform (patch_dxil.TYPE_DECKS)
+            typed = Machine(patched_p, constants(on_flags, cloud=anchor_cloud(types=1.0)), TEX_ANCHOR,
+                            bytearray(table))
+            out_t = typed.run(tid)
+            tw = types_ref(want, ref_m.env[h_name], fill=False)
+            strat_t = [st + (1 - a) * P.DECK_FLATTEN * sum(tw[k]) for k, (st, a) in enumerate(zip(strat, shares))]
+            smooth_t = [sm + (1 - a) * P.DECK_SMOOTH * (tw[k][1] + tw[k][3])
+                        for k, (sm, a) in enumerate(zip(smooth, shares))]
+            res_t = generator_model.column(want, n4, lut, ref_m.env[t1_name], ref_m.env[h_name], 0.0,
+                                           strat=strat_t, smooth=smooth_t, slope=deck_top(strat_t))
+            err_t = max(max(abs(out_t[k][0] - res_t[k][0]), abs(out_t[k][1] - res_t[k][1]))
+                        for k in range(P.WEATHER_SLICES))
+            check(err_t < 1e-4, f"{tid}: the volume with the types' decks differs from the model by {err_t:.1e}")
         covered = sum(1 for k in range(P.WEATHER_SLICES) if out[k][0] > 0.51)
         # the capture's per-column record: terrain, global terrain, the column's total weight, the nearest station
         cap = Machine(patched_p, constants(1 | P.DEBUG_BUFFER_16MB, cloud=anchor_cloud()), TEX, bytearray(table))
@@ -1240,6 +1322,7 @@ def main():
     check_types_table(check)
     check_types(stock_p, patched_p, values, h_name, table, TEX_ANCHOR, check)
     check_specks(stock_p, patched_p, values, noise, t1_name, h_name, lut, TEX_ANCHOR, check)
+    check_type_decks(stock_p, patched_p, values, noise, t1_name, h_name, lut, TEX_ANCHOR, check)
     check_towers(stock, patched_p, TEX_ANCHOR, check)
     # the cloud constants as the shader saw them, in the header
     cap = Machine(patched_p, constants(1 | P.DEBUG_BUFFER_16MB, cloud=anchor_cloud()), TEX, bytearray(table))

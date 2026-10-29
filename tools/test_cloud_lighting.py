@@ -445,7 +445,8 @@ def types_buffer(rng, magic=P.TYPES_MAGIC):
 def types_ref(c, grids, u, v, w):
     """Per lane, float64: the thickness factor T, the base mix m, the view
     ramp's sharpening, the puff factor (cloud types), the anvils' cover and
-    cover-weighted level, and the towers' mark and mark-weighted base."""
+    cover-weighted level, the towers' mark and mark-weighted base, and the
+    types' weights (lanes x 4, 0 with the types off)."""
     grid, anvil, tower = grids
     n = P.TYPES_N
     cell = []
@@ -469,7 +470,8 @@ def types_ref(c, grids, u, v, w):
     cu = np.maximum(1 - wts.sum(1), 0)
     ce = c0 * clamp(c[8], 0.0, 8.0)
     sharp = ce * (1 - s) + s * cu * max(ce, c0 * P.TYPES_CU_EDGE_MIN)
-    puff = 1 - s + s * (cu + (wts * np.array(P.TYPES_PUFF)).sum(1)) if s > 0 else np.ones(len(cu))
+    puff = [1 - s + s * (cu + (wts * np.array(f)).sum(1)) if s > 0 else np.ones(len(cu))
+            for f in (P.TYPES_PUFF, P.TYPES_PUFF_FINE)]  # (the 8 km and the 1 km octave's)
     an = anvil.astype(np.float64)
     corners = [((1 - ax) * (1 - ay), an[y0, x0]), (ax * (1 - ay), an[y0, x0 + 1]),
                ((1 - ax) * ay, an[y0 + 1, x0]), (ax * ay, an[y0 + 1, x0 + 1])]
@@ -482,7 +484,7 @@ def types_ref(c, grids, u, v, w):
     mbase = sum(b * a[:, 0] * a[:, 1] for b, a in corners) / np.maximum(mark, 1e-6)
     if s <= 0:
         cov, mark = np.zeros(len(cov)), np.zeros(len(mark))
-    return T, m, sharp, puff, cov, lev, mark, mbase
+    return T, m, sharp, puff, cov, lev, mark, mbase, wts * s
 
 
 def soft_output(ir, quarter):
@@ -781,7 +783,8 @@ def check(crc: str, stock: str) -> list[str]:
                     failures.append(f"{tag} {site['s2']}: finer octave abs. error max {err:.1e}")
     # cloud types: the view ramp and the optical thickness by the grid's weights
     puff_products = [(e, P.Ir(patched).def_name(i)) for i, l in enumerate(patched.splitlines())
-                     for e in ("%mod.ty.e8", "%mod.ty.e1") if l.endswith(f"= fmul fast float {e}, %mod.ty.pf")]
+                     for e, pf in (("%mod.ty.e8", "%mod.ty.pf"), ("%mod.ty.e1", "%mod.ty.pf1"))
+                     if l.endswith(f"= fmul fast float {e}, {pf}")]
     if not any(e == "%mod.ty.e8" for e, _ in puff_products):
         failures.append("types: the view march's 8 km erosion octave isn't scaled by the puff factor")
     cirrus = {}
@@ -791,6 +794,25 @@ def check(crc: str, stock: str) -> list[str]:
         if l.endswith("= call float @dx.op.binary.f32(i32 35, float %mod.ci.c0, float %mod.ci.cov)"):
             cirrus["cov"] = P.Ir(patched).def_name(i)
     band = "no cirrus band" not in summary  # (20 variants have no cirrus band)
+    # the 8 km octave's noise by type: the original lookup's .x (n1) and coordinates
+    lines = patched.splitlines()
+    tn = next((re.match(r"  %mod\.tn\.n = select i1 %mod\.ty\.on, float \S+, float (\S+)$", l) for l in lines
+               if l.startswith("  %mod.tn.n = ")), None)
+    octave = None
+    if tn is None:
+        failures.append("types: the 8 km octave has no noise by type")
+    else:
+        pir = P.Ir(patched)
+        res = re.match(r"\s+\S+ = extractvalue %dx\.types\.ResRet\.f32 (\S+), 0$", pir.lines[pir.defs[tn[1]]])[1]
+        look = re.search(r"float (\S+), float (\S+), float (\S+), float undef, i32 0, i32 0, i32 0, float (\S+)\)",
+                         pir.lines[pir.defs[res]])
+        octave = {"n1": tn[1], "coords": look.group(1, 2, 3), "lod": look[4]}
+        # each type's lookup: its lod is the octave's plus log2 of the matrix's largest stretch
+        stretches = sorted(P.literal_value(re.match(rf"  \S+ = fadd fast float {re.escape(look[4])}, (\S+)$", l)[1])
+                           for l in lines if re.match(rf"  %mod\.tn\.\d+ = fadd fast float {re.escape(look[4])}, ", l))
+        want_st = sorted(st for _, _, st in P.TYPES_NOISE)
+        if len(stretches) != len(want_st) or any(abs(a - b) > 1e-6 for a, b in zip(stretches, want_st)):
+            failures.append(f"types: the noise-by-type lookups' lod offsets {stretches} != {want_st}")
     if band and sorted(cirrus) != ["alt", "cov"]:
         failures.append(f"types: the cirrus band isn't linked to the anvils ({sorted(cirrus)})")
     # the storm towers' sky light: the light volume's sums of the ambient's visibilities (stock names)
@@ -829,6 +851,9 @@ def check(crc: str, stock: str) -> list[str]:
         seeds["%mod.ci.c0"] = rng.uniform(0, 1, N).astype(F)
         for name in (lv_sums or ())[:2]:
             seeds[name] = rng.uniform(0, 2 * lv_sums[2], N).astype(F)  # (n taps, each up to ~1.82)
+        if octave:
+            for name in octave["coords"]:  # (the octave's coordinates need the march's position)
+                seeds[name] = rng.uniform(-3, 3, N).astype(F)
         base = Evaluator(patched, {"b1 space50": plain, "b0 space50": mod}, seeds, sampler=fine_sampler, buffer=words)
         want_prod, want_ramp = base(opt["prod"]), base(ramp0)
         # off: without bit 7, with a wrong magic, with C23 = 0: exactly as without types
@@ -839,7 +864,18 @@ def check(crc: str, stock: str) -> list[str]:
             if not (np.array_equal(off(opt["prod"]), want_prod) and np.array_equal(off(ramp0), want_ramp)):
                 failures.append(f"{tag}: types off ({what}) but not as without them")
         got = Evaluator(patched, {"b1 space50": cloud, "b0 space50": mod}, seeds, sampler=fine_sampler, buffer=words)
-        T, m, sharp, puff, cov, lev, mark, mbase = types_ref(c, grid, tu, tv, tw)
+        T, m, sharp, puff, cov, lev, mark, mbase, wts = types_ref(c, grid, tu, tv, tw)
+        # the 8 km octave's noise by type: n1 + sum S w_x (n(M_x c) - n1), fine_sampler as the noise
+        if octave:
+            cs = np.stack([seeds[k].astype(np.float64) for k in octave["coords"]])
+            n1 = fine_sampler(*cs)[:, 0].astype(np.float64)
+            ref = n1.copy()
+            for ci, mat, _ in P.TYPES_NOISE:
+                mc = np.array(mat, np.float64) @ cs
+                ref += wts[:, ci] * (fine_sampler(*mc)[:, 0].astype(np.float64) - n1)
+            err = float(np.abs(got("%mod.tn.n").astype(np.float64) - ref).max())
+            if err > 2e-5:
+                failures.append(f"{tag} %mod.tn.n: 8 km octave noise by type abs. error max {err:.1e}")
         # the towers' sky light: the floor n CB_SIDE_AMBIENT mark sat((h - base) / ramp), and the
         # light volume's sums raised to it exactly
         if lv_sums:
@@ -867,11 +903,13 @@ def check(crc: str, stock: str) -> list[str]:
             if not np.array_equal(got(cirrus["cov"]), np.maximum(got("%mod.ci.c0"), got("%mod.ci.cov"))):
                 failures.append(f"{tag} {cirrus['cov']}: the cirrus cover isn't raised to the anvils'")
         # the puffs: the factor, and the view march's two erosion octaves scaled by it exactly
-        err = float(np.abs(got("%mod.ty.pf").astype(np.float64) - puff).max())
-        if err > 2e-5:
-            failures.append(f"{tag} %mod.ty.pf: puff factor abs. error max {err:.1e}")
+        for pf, ref in zip(("%mod.ty.pf", "%mod.ty.pf1"), puff):
+            err = float(np.abs(got(pf).astype(np.float64) - ref).max())
+            if err > 2e-5:
+                failures.append(f"{tag} {pf}: puff factor abs. error max {err:.1e}")
         for e_name, out_name in puff_products:
-            if not np.array_equal(got(out_name), (got(e_name) * got("%mod.ty.pf")).astype(F)):
+            pf = "%mod.ty.pf" if e_name == "%mod.ty.e8" else "%mod.ty.pf1"
+            if not np.array_equal(got(out_name), (got(e_name) * got(pf)).astype(F)):
                 failures.append(f"{tag} {out_name}: the erosion octave isn't scaled by the puff factor")
         ref_ramp = np.where(sharp <= 0, stock_ramp,
                             np.clip((stock_ramp - 0.5) * np.minimum(1 + sharp, q) + 0.5, 0, 1))
