@@ -653,6 +653,72 @@ add-on, the EFB app and the `[ATMOSPHEREMOD]` section from `ReShade.ini`, and
 asks before deleting `%LOCALAPPDATA%\AtmosphereMod` (the patched shaders, logs
 and your `tunables.ini`). ReShade itself stays installed.
 
+## Troubleshooting
+
+Most problems come from ReShade not loading the add-on. The logs that tell:
+- `ReShade.log`, in the folder with `FlightSimulator2024.exe`;
+- `weather.log` and `install.log`, in `%LOCALAPPDATA%\AtmosphereMod\logs`.
+  `weather.log` keeps adding to its end, so the last session is at the bottom.
+
+### "There were errors loading some add-ons"
+
+ReShade shows this at the top of the screen when an add-on didn't load.
+Search `ReShade.log` for `add-on` to see which one and why:
+
+| Line in `ReShade.log` | Fix |
+|---|---|
+| `Skipped loading add-on … because this build of ReShade has only limited add-on functionality` | This is the standard ReShade build: a ReShade update or another mod's installer may have replaced yours. Install ReShade **with full add-on support** over it, then run `Install AtmosphereMod.cmd` again. |
+| `Failed to load add-on … with error code …` | Windows couldn't load the file. Security software may have blocked or removed it: check Windows Security's protection history, allow `AtmosphereMod.addon64`, and run the installer again. With error code 126, also repair the Microsoft Visual C++ 2015–2022 Redistributable (x64). |
+| `Failed to register add-on, because the requested API version … is not supported` | ReShade is older than 6.8: update it. |
+| `Failed to register add-on, because another one with the same name ("AtmosphereMod") was already registered` | ReShade found two copies of the add-on. Keep only the one next to `FlightSimulator2024.exe`. |
+
+If the add-on named in these lines isn't `AtmosphereMod`, it's another ReShade
+add-on, not this mod.
+
+Harmless lines that show up in most logs: `Skipping device because the driver
+type is 'D3D_DRIVER_TYPE_WARP' …` and `Skipping swap chain because it was
+created without a proxy`. Other parts of Windows and the sim create small
+graphics devices of their own, and ReShade leaves them alone. "Errors compiling
+some effects" are about ReShade's own effects (the shader packages chosen in
+ReShade's setup), not about AtmosphereMod.
+
+### The EFB app shows "Waiting for AtmosphereMod"
+
+The app runs, but the add-on in the sim hasn't answered it. That's normal for
+a few seconds after a flight loads. If it stays:
+
+1. **Is ReShade running?** ReShade's banner should appear at the top of the
+   screen when the sim starts, and the Home key opens its overlay. If not,
+   run ReShade's setup again for `FlightSimulator2024.exe` (DirectX 10/11/12),
+   then `Install AtmosphereMod.cmd`.
+2. **Is the add-on loaded?** In the overlay's **Add-ons** tab, AtmosphereMod
+   should be listed and ticked, and `ReShade.log` should contain
+   `Registered add-on "AtmosphereMod"`. If it's unticked, tick it and restart
+   the sim. If it's missing, see the table above. With both an MS Store and a
+   Steam installation, check that the "sim:" folder the installer showed is
+   the one you play.
+3. **Does it reach the sim?** The last lines of `weather.log`:
+
+   | Last lines | Meaning |
+   |---|---|
+   | `connected; waiting for METARs …`, then lines starting with station names | The add-on is fine; see step 4. |
+   | `waiting for SimConnect`, and nothing after it | The add-on can't connect to the sim. A possible cause is a `SimConnect.cfg` from a network setup (in Documents or the sim's folder) that sends SimConnect clients elsewhere: rename it to test. |
+   | `weather feed stopped by an error: …` | A bug: please report it. |
+   | No `weather feed starting` for that session | The add-on didn't load: back to step 2. |
+
+4. **Connected, but still waiting:** the line at the bottom of the app's page
+   starts with "METAR link:". If it says "CommBus unavailable", the app itself
+   can't reach SimConnect. Either way, please report it.
+
+### Reporting a problem
+
+Open an issue on the
+[issues page](https://github.com/tomwhoca/AtmosphereMod/issues) and attach:
+- `ReShade.log`, `weather.log` and `install.log` (see above);
+- a screenshot of the problem, or of the EFB app's page;
+- your graphics card and driver version, Windows version, MS Store or Steam
+  version, and ReShade version.
+
 ## Known limitations
 
 - METAR anchoring, cloud types and thunderstorms work with live weather only.
