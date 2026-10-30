@@ -29,7 +29,9 @@
 #include <cstdio>
 #include <iterator>
 #include <regex>
+#include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace haze
@@ -79,6 +81,7 @@ struct Metar
     // The sky is described: layers, CAVOK, or SKC/CLR/NSC/NCD (not with VV,
     // an obscured sky). NSC/NCD/CAVOK: nothing significant below 5,000 ft.
     bool clouds_reported = false, no_significant_cloud = false;
+    bool depicted = false;        // a weather engine's (weather_engine.h), not the sim's
 };
 
 struct Inputs
@@ -144,6 +147,34 @@ inline int report_minutes_older(int older, int newer)
     return d;
 }
 
+// The report's DDHHMMZ as Metar::report_min; -1 when it has none.
+inline int report_time(const std::string &raw)
+{
+    static const std::regex time("(?:^|\\s)[A-Z][A-Z0-9]{3} ([0-3][0-9])([0-2][0-9])([0-5][0-9])Z\\b");
+    std::smatch t;
+    if (std::regex_search(raw, t, time))
+        return std::stoi(t[1]) * 1440 + std::stoi(t[2]) * 60 + std::stoi(t[3]);
+    return -1;
+}
+
+// Adds a reported layer (after the temperature and dew point): one without a
+// base (FEW///CB) at the base the dew-point spread suggests, left out without one.
+inline void add_layer(Metar &m, CloudLayer layer, bool unknown_base)
+{
+    if (unknown_base)
+    {
+        const double spread = m.temp_c - m.dew_c;
+        if (!std::isfinite(spread))
+            return;  // no way to place it: the sim's own clouds stay
+        layer.base_ft = std::clamp(spread * kBaseFtPerSpreadC, kEstimatedBaseMinFt, kEstimatedBaseMaxFt);
+        layer.base_estimated = true;
+    }
+    // the lowest FEW (3), SCT (4) or BKN (5) layer
+    if (layer.cover <= 5 && layer.base_ft < 10000.0 && !(layer.base_ft >= m.low_layer_ft))
+        m.low_layer_ft = layer.base_ft;
+    m.layers.push_back(layer);
+}
+
 // Parses the EFB app's message: {"time":..., "metar":{...}} or "metar":null.
 inline Metar parse_metar_json(const std::string &json)
 {
@@ -156,11 +187,7 @@ inline Metar parse_metar_json(const std::string &json)
     m.request_lat = number(json, "^\\{\"time\":\"[^\"]*\",\"lat\":(-?[0-9.]+)");
     m.request_lon = number(json, "^\\{\"time\":\"[^\"]*\",\"lat\":-?[0-9.]+,\"lon\":(-?[0-9.]+)");
     m.raw = match(json, "\"metarString\":\"([^\"]*)\"");
-    {
-        std::smatch t;
-        if (std::regex_search(m.raw, t, std::regex("(?:^|\\s)[A-Z][A-Z0-9]{3} ([0-3][0-9])([0-2][0-9])([0-5][0-9])Z\\b")))
-            m.report_min = std::stoi(t[1]) * 1440 + std::stoi(t[2]) * 60 + std::stoi(t[3]);
-    }
+    m.report_min = report_time(m.raw);
     m.temp_c = number(json, "\"temp\":(-?[0-9.]+)");
     m.dew_c = number(json, "\"dew\":(-?[0-9.]+)");
     // (the sim marks a value not reported with INT_MIN, -2147483648)
@@ -225,28 +252,19 @@ inline Metar parse_metar_json(const std::string &json)
                 std::distance(std::sregex_iterator(padded.begin(), padded.end(), unknown), std::sregex_iterator()));
         }
     }
-    const double spread = m.temp_c - m.dew_c;
-    // Lowest FEW (3), SCT (4) or BKN (5) layer: {"alt":15,"cover":3,...}, alt in hundreds of feet.
+    // {"alt":15,"cover":3,...}, alt in hundreds of feet
     const std::regex layer("\\{\"__Type\":\"Clouds\"[^}]*\\}");
     for (auto it = std::sregex_iterator(json.begin(), json.end(), layer); it != std::sregex_iterator(); ++it)
     {
-        double alt = number(it->str(), "\"alt\":([0-9.]+)") * 100.0;
+        const double alt = number(it->str(), "\"alt\":([0-9.]+)") * 100.0;
         const double cover = number(it->str(), "\"cover\":([0-9]+)");
         const double type = number(it->str(), "\"type\":(-?[0-9]+)");
-        bool estimated = false;
-        if (alt == 0.0 && cover >= 3 && cover <= 6 && unknown_bases[static_cast<int>(cover)] > 0)
-        {
-            --unknown_bases[static_cast<int>(cover)];
-            if (!std::isfinite(spread))
-                continue;  // no way to place it: the sim's own clouds stay
-            alt = std::clamp(spread * kBaseFtPerSpreadC, kEstimatedBaseMinFt, kEstimatedBaseMaxFt);
-            estimated = true;
-        }
-        if (cover >= 3 && cover <= 5 && alt < 10000.0 && !(alt >= m.low_layer_ft))
-            m.low_layer_ft = alt;
-        if (cover >= 3 && cover <= 6 && std::isfinite(alt))
-            m.layers.push_back({ alt, static_cast<int>(cover), std::isfinite(type) ? static_cast<int>(type) : -1,
-                                 estimated });
+        if (!(cover >= 3 && cover <= 6) || !std::isfinite(alt))
+            continue;
+        const int c = static_cast<int>(cover);
+        const bool unknown = alt == 0.0 && unknown_bases[c] > 0;
+        unknown_bases[c] -= unknown;
+        add_layer(m, { alt, c, std::isfinite(type) ? static_cast<int>(type) : -1 }, unknown);
     }
     // the sky condition, from the raw report where the JSON has no layer for it
     const std::string raw = " " + m.raw + " ";
@@ -255,6 +273,124 @@ inline Metar parse_metar_json(const std::string &json)
     m.no_significant_cloud = cavok || token("NSC") || token("NCD");
     m.clouds_reported = !obscured && (!m.layers.empty() || m.no_significant_cloud || token("SKC") || token("CLR"));
     m.valid = !m.icao.empty();
+    return m;
+}
+
+// Parses a report as text (Active Sky's depicted METAR) into what
+// parse_metar_json takes from the sim's: only the body, not the remarks or trends.
+inline Metar parse_metar_raw(const std::string &report)
+{
+    Metar m;
+    const size_t start = std::min(report.find_first_not_of(" \t\r\n\xEF\xBB\xBF"), report.size());
+    m.raw = report.substr(start, report.find_first_of("\r\n", start) - start);
+    std::vector<std::string> tokens;
+    {
+        std::istringstream in(m.raw);
+        for (std::string t; in >> t;)
+            tokens.push_back(t);
+    }
+    size_t i = 0;
+    if (i < tokens.size() && (tokens[i] == "METAR" || tokens[i] == "SPECI"))
+        ++i;
+    static const std::regex station("[A-Z][A-Z0-9]{3}"), digit("[0-9]");
+    if (i >= tokens.size() || !std::regex_match(tokens[i], station))
+        return m;
+    m.icao = tokens[i++];
+    m.report_min = report_time(m.raw);
+    static const std::regex metres("([0-9]{4})(?:NDV|[NSEW]{1,2})?");
+    static const std::regex miles("([PM]?)(?:([0-9]+)|([0-9])/([1-9][0-9]?))SM");
+    static const std::regex weather("(-|\\+|VC)?(MI|PR|BC|DR|BL|SH|TS|FZ)?((?:DZ|RA|SN|SG|IC|PL|GR|GS|UP|BR|FG|FU|VA|"
+                                    "DU|SA|HZ|PY|PO|SQ|FC|SS|DS)*)");
+    static const std::regex cloud("(FEW|SCT|BKN|OVC)([0-9]{3}|///)(CB|TCU|ACC|///)?");
+    static const std::regex temps("(M?)([0-9]{2})/(?:(M?)([0-9]{2})|//)?");
+    bool have_vis = false, obscured = false, sky_clear = false;
+    std::vector<std::pair<CloudLayer, bool>> reported;  // and whether its base is unknown: placed once the temperatures are
+    for (; i < tokens.size(); ++i)
+    {
+        const std::string &t = tokens[i];
+        if (t == "RMK" || t == "TEMPO" || t == "BECMG" || t == "NOSIG" || t.rfind("PROB", 0) == 0 ||
+            t.rfind("FM", 0) == 0)
+            break;
+        std::smatch g;
+        if (t == "CAVOK")
+            m.cavok = true;
+        else if (t == "NSC" || t == "NCD")
+            m.no_significant_cloud = true;
+        else if (t == "SKC" || t == "CLR")
+            sky_clear = true;
+        else if (t.rfind("VV", 0) == 0)
+            obscured = true;
+        else if (!have_vis && std::regex_match(t, g, metres))
+        {
+            m.vis_m = std::stod(g[1]);
+            have_vis = true;
+        }
+        else if (!have_vis && std::regex_match(t, g, miles))
+        {
+            double sm = g[2].matched ? std::stod(g[2]) : std::stod(g[3]) / std::stod(g[4]);
+            if (!g[2].matched && i > 0 && std::regex_match(tokens[i - 1], digit))
+                sm += std::stod(tokens[i - 1]);  // 1 1/2SM
+            m.vis_m = sm * 1609.344;
+            m.vis_open = g[1] == "P";
+            have_vis = true;
+        }
+        else if (std::regex_match(t, g, cloud))
+        {
+            static const char *const covers[] = { "FEW", "SCT", "BKN", "OVC" };
+            const int cover = static_cast<int>(std::find(std::begin(covers), std::end(covers), g[1].str()) -
+                                               std::begin(covers)) + 3;
+            const int type = g[3] == "TCU" ? 0 : g[3] == "CB" ? 1 : g[3] == "ACC" ? 2 : -1;
+            const bool unknown = g[2] == "///";
+            reported.push_back({ { unknown ? 0.0 : std::stod(g[2]) * 100.0, cover, type }, unknown });
+        }
+        else if (std::regex_match(t, g, temps))
+        {
+            m.temp_c = (g[1] == "M" ? -1.0 : 1.0) * std::stod(g[2]);
+            if (g[4].matched)
+                m.dew_c = (g[3] == "M" ? -1.0 : 1.0) * std::stod(g[4]);
+        }
+        else if (std::regex_match(t, g, weather) && (g[2].matched || g[3].length() > 0))
+        {
+            const bool ts = g[2] == "TS";
+            if (g[1] == "VC")
+            {
+                m.thunder_vicinity = m.thunder_vicinity || ts;  // VCTS: the storm cells' evidence (cloud_anchor.h)
+                continue;
+            }
+            if (ts)
+                m.thunder = m.precip = true;
+            const std::string codes = g[3];
+            for (size_t c = 0; c + 1 < codes.size(); c += 2)
+            {
+                const std::string p = codes.substr(c, 2);
+                if (p == "BR")
+                    m.mist = true;
+                else if (p == "FG")
+                    m.fog = true;
+                else if (p == "FU")
+                    m.smoke = true;
+                else if (p == "HZ")
+                    m.haze = true;
+                else if (p == "VA")
+                    m.ash = true;
+                else if (p == "DU" || p == "SA" || p == "PO" || p == "SS" || p == "DS")
+                    m.dust = true;
+                else if (p != "PY" && p != "SQ" && p != "FC")
+                    m.precip = true;
+            }
+        }
+    }
+    if (m.cavok)
+    {
+        m.vis_m = 10000.0;
+        m.no_significant_cloud = true;
+    }
+    m.vis_open = m.vis_open || m.cavok || m.vis_m >= 9999.0;
+
+    for (const auto &[layer, unknown] : reported)
+        add_layer(m, layer, unknown);
+    m.clouds_reported = !obscured && (!m.layers.empty() || m.no_significant_cloud || sky_clear);
+    m.valid = m.report_min >= 0;  // a report, not an error message
     return m;
 }
 

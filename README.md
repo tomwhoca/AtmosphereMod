@@ -484,8 +484,18 @@ add-on outside the sim can't read them directly.
   and elevation.
 
 These are the sim's own METARs, describing the same weather MSFS renders. No
-outside weather service or Active Sky is involved. Everything the add-on does
-with them is logged in `%LOCALAPPDATA%\AtmosphereMod\logs\weather.log`.
+outside weather service is involved. Everything the add-on does with them is
+logged in `%LOCALAPPDATA%\AtmosphereMod\logs\weather.log`.
+
+**With Active Sky.** When Active Sky feeds the sim, the weather MSFS renders
+is Active Sky's, not the sim's live weather. The add-on checks every minute
+for Active Sky's local API (`localhost:19285`, served while it runs). While
+Active Sky is connected to the sim, the add-on replaces each METAR from the
+EFB app with Active Sky's depicted METAR for the same station. A station
+Active Sky has no METAR for is skipped. If Active Sky closes, the add-on goes
+back to the sim's METARs. The log notes each switch and marks the depicted
+METARs `Active Sky:`. The cloud anchoring still applies to live weather only
+(see above), so with Active Sky its METARs drive the haze.
 
 **What it can't do.**
 - Without the EFB app, the haze uses fixed values and the cloud anchoring
