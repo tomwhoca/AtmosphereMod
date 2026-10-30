@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.20)
 project(AtmosphereMod VERSION 0.7.1 LANGUAGES CXX RC)
 
 configure_file(src/version.rc.in ${CMAKE_CURRENT_BINARY_DIR}/version.rc @ONLY)
-add_library(AtmosphereMod SHARED src/atmosphere_mod.cpp src/weather_feed.cpp src/settings_bridge.cpp
+add_library(AtmosphereMod SHARED src/atmosphere_mod.cpp src/weather_feed.cpp src/settings_bridge.cpp src/activesky.cpp
             src/file_dialog.cpp src/perf_report.cpp ${CMAKE_CURRENT_BINARY_DIR}/version.rc)
 
 # The weather feed is an in-process SimConnect client; the SDK's static library
@@ -13,7 +13,7 @@ if(NOT EXISTS "${SIMCONNECT_DIR}/include/SimConnect.h")
     message(FATAL_ERROR "SimConnect SDK not found at ${SIMCONNECT_DIR}; install the MSFS 2024 SDK")
 endif()
 target_include_directories(AtmosphereMod PRIVATE "${SIMCONNECT_DIR}/include")
-target_link_libraries(AtmosphereMod PRIVATE "${SIMCONNECT_DIR}/lib/static/SimConnect.lib" ws2_32 shlwapi
+target_link_libraries(AtmosphereMod PRIVATE "${SIMCONNECT_DIR}/lib/static/SimConnect.lib" ws2_32 shlwapi winhttp
                       ole32 shell32 uuid  # (ole32, shell32, uuid: the preset import's file dialog)
                       dxgi version)       # (the performance report: the GPU, ReShade's version)
 target_include_directories(AtmosphereMod PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/reshade/include)
