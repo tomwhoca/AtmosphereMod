@@ -51,8 +51,8 @@ rendering, and consists of several components:
 
 ## Screenshots
 
-Taken on 26 October 2026 with live weather, each pair a few seconds apart
-with the mod off and on.
+Taken on 26 October 2026 (the thunderstorms on 29 October) with live weather,
+each pair a few seconds apart with the mod off and on.
 The settings were the shipping ones except for solid clouds 4 (2 by default),
 crisper cloud edges 2 (off by default) and small changes to the cloud
 lighting.
@@ -211,6 +211,36 @@ With the mod only: MSFS has neither a glory nor its strong silver lining.
   </tr>
   <tr>
     <td colspan="2"><b>Horta</b>, Azores: firm cumulus over the island with blue sky between, and a deeper blue sea.<br><sub>METAR <code>LPHR 261400Z 34011KT 300V040 9999 FEW025 BKN060 19/12 Q1018</code></sub></td>
+  </tr>
+</table>
+
+### Thunderstorms
+
+Near Manaus in the late afternoon, with thunderstorms switched on (`C32`,
+experimental, off by default). The other settings were as above, except solid
+clouds 0.5 and a 60 km anchoring radius.
+
+<table>
+  <tr>
+    <th width="50%">Mod off (MSFS 2024)</th>
+    <th width="50%">Mod on</th>
+  </tr>
+  <tr>
+    <td><img src="Screenshots/thunderstorms-manaus-sunset-off.jpg" alt="Mod off: Manaus, toward the low sun"></td>
+    <td><img src="Screenshots/thunderstorms-manaus-sunset-on.jpg" alt="Mod on: Manaus, toward the low sun"></td>
+  </tr>
+  <tr>
+    <td colspan="2"><b>Toward the low sun</b>: a towering cumulus where the METAR reports TCU, lit orange by the sun 5&deg; high in the haze. MSFS shows fair-weather cumulus.</td>
+  </tr>
+  <tr>
+    <td><img src="Screenshots/thunderstorms-manaus-above-off.jpg" alt="Mod off: above the cumulus near Manaus"></td>
+    <td><img src="Screenshots/thunderstorms-manaus-above-on.jpg" alt="Mod on: above the cumulus near Manaus"></td>
+  </tr>
+  <tr>
+    <td colspan="2"><b>Above the cumulus</b>: the tower rises out of the few cumulus the METAR reports, lit from the side by the low sun. MSFS shows a denser field of small cumulus and no tower.</td>
+  </tr>
+  <tr>
+    <td colspan="2"><sub>METAR <code>SBEG 292100Z 14005KT 9000 VCSH FEW030 FEW035TCU 32/24 Q1008</code></sub></td>
   </tr>
 </table>
 
