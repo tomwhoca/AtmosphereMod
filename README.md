@@ -392,6 +392,11 @@ What it can do:
     ones are. Altocumulus, and altostratus even more, also get a softer base,
     so a thin altostratus is a veil the sun can shine through. Cumulus keeps
     the full thickness and gets crisp edges.
+  - Each type has its own shape. Altocumulus breaks up into smaller, finer
+    cloudlets, and stratocumulus into rows. The sim's own stratiform layers
+    become flat-topped decks, as the METAR-described ones do; stratus and
+    altostratus also get smoother. Deck tops are lumpy rather than cut off at
+    one altitude.
   - `C23 = 0` draws every cloud like cumulus again.
 - **Translucent high clouds** (`C18`, `C19`). Cirrus and thin mid-level
   sheets keep a translucent, soft look; `C19` makes cirrus more visible.
