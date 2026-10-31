@@ -27,7 +27,7 @@ PACKAGE = ROOT / "build" / "efb" / "atmospheremod-weather"
 APP_DIR = "html_ui/efb_ui/efb_apps/AtmoWeather"
 DEFAULTS_INI = ROOT / "shaders" / "tunables.defaults.ini"
 DEFAULTS_TS = APP / "src" / "defaults.ts"
-VERSION = "0.5.0"
+VERSION = "0.5.1"
 
 # Windows FILETIME epoch (1601-01-01) to Unix epoch, in 100 ns units.
 FILETIME_UNIX_OFFSET = 116444736000000000

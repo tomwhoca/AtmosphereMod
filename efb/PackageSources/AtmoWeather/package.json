@@ -1,6 +1,6 @@
 {
   "name": "@atmospheremod/atmo-weather",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "private": true,
   "description": "EFB app that sends the sim's METARs to AtmosphereMod over CommBus and shows its settings",
   "scripts": {
