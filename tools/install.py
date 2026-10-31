@@ -450,7 +450,7 @@ def install(args) -> None:
         say("Found several installations: " + ", ".join(map(str, sims)) + f"; using {sims[0]} (or pass --sim)")
     sim = sims[0]
     pak = find_pak(args.pak or sim)
-    if not (sim / "dxgi.dll").exists():
+    if not ((sim / "dxgi.dll").exists() or (sim / "ReShade64.dll").exists()):
         raise InstallError(f"ReShade isn't installed in {sim}: install ReShade 6.8 or newer *with full add-on "
                            f"support* for {EXE} first (https://reshade.me)")
     rv = reshade_version(sim)
