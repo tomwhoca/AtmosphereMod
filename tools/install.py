@@ -7,9 +7,10 @@ the bundled or the system Python), or:
     python install.py --uninstall
 
 What it does, with the sim closed:
-1. finds MSFS 2024 (MS Store / Xbox app or Steam), ReShade next to it, and the
-   Community folder; it asks for the sim's or the Community folder if it
-   can't find them;
+1. finds MSFS 2024 (MS Store / Xbox app or Steam), ReShade next to it (its own
+   dxgi.dll, or ReShade64.dll loaded by another program such as OptiShade),
+   and the Community folder; it asks for the sim's or the
+   Community folder if it can't find them;
 2. finds Microsoft's DirectX Shader Compiler (the release's own copy in its
    dxc folder, else the Windows SDK's, else a copy it downloads once from Microsoft's
    GitHub release, after asking);
@@ -61,6 +62,7 @@ EFB = "atmospheremod-weather"
 SECTION = "ATMOSPHEREMOD"
 ISSUES = "https://github.com/tomwhoca/AtmosphereMod/issues"
 BACKUP = "ReShade.ini.atmospheremod.bak"
+RESHADE_LIBRARY = "ReShade64.dll"  # ReShade loaded by another program (OptiShade)
 # Microsoft's DirectX Shader Compiler release the patcher was written against
 # (the Windows SDK 10.0.26100's dxc is the same version). The disassembly's
 # text format can change between versions, so this one is pinned.
@@ -218,6 +220,56 @@ def find_pak(where: Path) -> Path:
     if not paks:
         raise InstallError(f"no shader pack (Shaders\\SHADERSPAK.*.SM6.PC.PAK) in {where}")
     return paks[-1]
+
+
+def product_name(dll: Path) -> str | None:
+    """The product name in a DLL's version resource, or None."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        ver = ctypes.WinDLL("version")
+        ver.GetFileVersionInfoSizeW.argtypes = (wintypes.LPCWSTR, wintypes.LPDWORD)
+        ver.GetFileVersionInfoW.argtypes = (wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID)
+        ver.VerQueryValueW.argtypes = (wintypes.LPCVOID, wintypes.LPCWSTR, ctypes.POINTER(wintypes.LPVOID),
+                                       ctypes.POINTER(wintypes.UINT))
+        size = ver.GetFileVersionInfoSizeW(str(dll), None)
+        info = ctypes.create_string_buffer(size)
+        if not size or not ver.GetFileVersionInfoW(str(dll), 0, size, info):
+            return None
+        value, length = wintypes.LPVOID(), wintypes.UINT()
+        if not ver.VerQueryValueW(info, r"\VarFileInfo\Translation", ctypes.byref(value), ctypes.byref(length)) \
+                or length.value < 4:
+            return None
+        lang, codepage = ctypes.cast(value, ctypes.POINTER(wintypes.WORD * 2)).contents
+        if not ver.VerQueryValueW(info, rf"\StringFileInfo\{lang:04x}{codepage:04x}\ProductName",
+                                  ctypes.byref(value), ctypes.byref(length)) or not length.value:
+            return None
+        return ctypes.wstring_at(value, length.value).rstrip("\0") or None
+    except (OSError, AttributeError, ValueError):
+        return None
+
+
+def find_reshade(sim: Path) -> tuple[str, str | None]:
+    """How ReShade is loaded in the sim's folder, and a note to show, if any.
+    ReShade's own installer puts it in dxgi.dll. Another program can load it
+    as ReShade64.dll instead: OptiShade does, from its own dxgi.dll or
+    winmm.dll. One user has reported that way working, with OptiShade 0.21.4
+    (pull request #5); it isn't tested here (no OptiShade release was
+    available to test with)."""
+    library = sim / RESHADE_LIBRARY
+    reshade_dxgi = (sim / "dxgi.dll").exists() and (not library.exists()
+                                                     or product_name(sim / "dxgi.dll") == "ReShade")
+    if not reshade_dxgi and not library.exists():
+        raise InstallError(f"ReShade isn't installed in {sim}: install ReShade 6.8 or newer *with full add-on "
+                           f"support* for {EXE} first (https://reshade.me)")
+    if not library.exists():
+        return "dxgi.dll", None
+    if reshade_dxgi:
+        return "dxgi.dll", (f"Warning: there's also a {RESHADE_LIBRARY}, which another program such as OptiShade "
+                            f"loads, so ReShade may load twice. Keep only one: OptiShade's or ReShade's own.")
+    return (f"{RESHADE_LIBRARY}, loaded by another program such as OptiShade",
+            f"ReShade loaded by another program, such as OptiShade: one user has reported it working with "
+            f"OptiShade 0.21.4, but it isn't tested here. Please report whether it works for you: {ISSUES}")
 
 
 def reshade_version(sim: Path) -> str | None:
@@ -450,9 +502,7 @@ def install(args) -> None:
         say("Found several installations: " + ", ".join(map(str, sims)) + f"; using {sims[0]} (or pass --sim)")
     sim = sims[0]
     pak = find_pak(args.pak or sim)
-    if not ((sim / "dxgi.dll").exists() or (sim / "ReShade64.dll").exists()):
-        raise InstallError(f"ReShade isn't installed in {sim}: install ReShade 6.8 or newer *with full add-on "
-                           f"support* for {EXE} first (https://reshade.me)")
+    reshade, reshade_note = find_reshade(sim)
     rv = reshade_version(sim)
     community = args.community or community_folder()
     if community is None:
@@ -460,13 +510,16 @@ def install(args) -> None:
     data = args.data
     say(f"AtmosphereMod {version()}")
     say(f"  sim:        {sim}")
-    say(f"  ReShade:    {rv or 'version unknown (start the sim once with ReShade first)'}")
+    say(f"  ReShade:    {rv or 'version unknown (start the sim once with ReShade first)'} ({reshade})")
     say(f"  shaders:    {pak}")
     say(f"  Community:  {community or 'not found: the EFB app (METAR features) is skipped'}")
     say(f"  data:       {data}")
     if rv and tuple(int(x) for x in rv.split(".")[:2]) < (6, 8):
         say(f"  ReShade {rv} is too old: install 6.8 or newer with full add-on support.")
         raise InstallError("ReShade too old")
+    if reshade_note:
+        say()
+        say(reshade_note)
     say()
     say(DISCLAIMER)
     say()
@@ -485,7 +538,7 @@ def install(args) -> None:
     work = data / "work"
     with open(data / "logs" / "install.log", "w", encoding="utf-8") as log:
         log.write(f"AtmosphereMod {version()} installer, {datetime.now():%Y-%m-%d %H:%M}\nsim {sim}\npak {pak}\n"
-                  f"dxc {dxc}\n\n")
+                  f"reshade {rv or 'unknown'} ({reshade})\ndxc {dxc}\n\n")
         patched, failed, pack = patch(pak, dxc, work, shaders, log)
     shutil.rmtree(work, ignore_errors=True)  # (the extracted game shaders aren't kept)
 
@@ -534,7 +587,7 @@ def install(args) -> None:
         shutil.copytree(payload / "efb" / EFB, target)
         say(f"EFB app: {target}")
 
-    record = {"version": version(), "date": f"{datetime.now():%Y-%m-%d %H:%M}", "sim": str(sim),
+    record = {"version": version(), "date": f"{datetime.now():%Y-%m-%d %H:%M}", "sim": str(sim), "reshade": reshade,
               "community": str(community) if community else None, "data": str(data), "pak": pak.name,
               "patched": patched, "failed": failed}
     (data / "install.json").write_text(json.dumps(record, indent=2))

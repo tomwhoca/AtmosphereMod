@@ -602,6 +602,36 @@ that the update changed in ways the patcher doesn't recognise are skipped and
 listed. Those parts simply fall back to the sim's own shaders, so an update
 can't break the sim.
 
+### With OptiShade
+
+[OptiShade](https://github.com/GamingWithGravy/OptiShade) brings its own
+ReShade: a `ReShade64.dll` that OptiShade's own `dxgi.dll` or `winmm.dll`
+loads. The installer accepts that ReShade too. **One user has reported it
+working** with OptiShade 0.21.4 Stable (its ReShade 6.8.0.73), on an RTX 5070
+Ti with the MS Store version: the add-on loaded, the EFB app showed the
+METARs, Ctrl+Shift+F9 switched the mod, and OptiShade's own effects kept
+working. It hasn't been tested here: when it was added (October 2026),
+OptiShade had no release available to download. Compatibility with OptiShade
+1.0 will be tested and confirmed once it's out.
+
+If you already have OptiShade installed, you're welcome to try it, and please
+report how it went on the
+[issues page](https://github.com/tomwhoca/AtmosphereMod/issues), whether it
+works or not:
+- Run `Install AtmosphereMod.cmd` as usual. It tells you when it has found
+  ReShade loaded by another program.
+- Keep one ReShade. Installing ReShade's own on top would replace OptiShade's
+  `dxgi.dll`, or, next to its `winmm.dll`, could load ReShade twice. The
+  installer warns when it finds ReShade's own `dxgi.dll` and a
+  `ReShade64.dll`.
+- After starting the sim, `ReShade.log` should have the line
+  `Registered add-on "AtmosphereMod"`. If it doesn't, see
+  [Troubleshooting](#troubleshooting): OptiShade's ReShade, like any other,
+  needs to be 6.8 or newer with full add-on support.
+- OptiShade's image effects are a filter over the finished picture, so they
+  also recolour the haze and sky the mod draws. Switch them off to see the
+  mod on its own.
+
 ## Using it
 
 All hotkeys use **Ctrl+Shift**:
