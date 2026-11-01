@@ -1,5 +1,6 @@
 #include "weather_feed.h"
 
+#include "activesky.h"
 #include "cloud_stations.h"
 #include "haze_mapping.h"
 #include "ozone_climatology.h"
@@ -22,6 +23,7 @@
 #include <cstdio>
 #include <cstring>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <utility>
@@ -185,6 +187,8 @@ void log(const char *fmt, ...)
 }
 
 anchor::StationSet g_stations([](const std::string &line) { log("%s", line.c_str()); });
+activesky::ActiveSky g_activesky([](const std::string &line) { log("%s", line.c_str()); });
+engine::WeatherEngine &g_engine = g_activesky;  // weather thread only
 
 double now_s()
 {
@@ -426,6 +430,17 @@ void request_metar(HANDLE sim)
     SimConnect_CallCommBusEvent(sim, kRequestEvent, SIMCONNECT_COMM_BUS_BROADCAST_TO_JS, sizeof(body), body);
 }
 
+// The sim's and the engine's reports don't mix: report times differ (Active
+// Sky's historic mode), and the stations would blend both weathers.
+void engine_switched()
+{
+    const std::lock_guard lock(g_mutex);
+    g_newest_report = -1;
+    g_stations.restart();
+    g_held_metar.valid = false;
+    g_jumped = true;  // the aircraft's METAR from the new source now
+}
+
 // Caller holds g_mutex. The METAR nearest the aircraft: the haze, the
 // freezing level and the first anchor station.
 void use_metar(HANDLE sim, const haze::Metar &metar, std::string &last_metar, ULONGLONG &last_logged)
@@ -447,7 +462,8 @@ void use_metar(HANDLE sim, const haze::Metar &metar, std::string &last_metar, UL
     {
         last_metar = metar.raw;
         last_logged = GetTickCount64();
-        log("%s | %s", line.c_str(), metar.raw.c_str());
+        log("%s | %s%s%s", line.c_str(), metar.depicted ? g_engine.name() : "", metar.depicted ? ": " : "",
+            metar.raw.c_str());
     }
 }
 
@@ -626,6 +642,13 @@ bool dispatch(HANDLE sim, std::string &partial, std::string &last_metar, ULONGLO
             partial.clear();
             if (!metar.valid)
                 break;
+            if (g_engine.injecting() && !loading_position(metar.request_lat, metar.request_lon))
+            {
+                std::optional<haze::Metar> d = g_engine.depict(metar);
+                if (!d)
+                    break;
+                metar = std::move(*d);
+            }
             const std::lock_guard lock(g_mutex);
             const bool asked_at = std::isfinite(metar.request_lat) && std::isfinite(metar.request_lon);
             if (asked_at && loading_position(metar.request_lat, metar.request_lon))
@@ -763,6 +786,8 @@ void run_loop()
         while (!g_stop && connected)
         {
             connected = dispatch(sim, partial, last_metar, last_logged);
+            if (g_engine.poll())
+                engine_switched();
             if (g_jumped.exchange(false))
                 next_request = next_survey = GetTickCount64();
             if (GetTickCount64() >= next_request)
