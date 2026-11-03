@@ -55,6 +55,12 @@ DXC_SHIPPED = ("bin/x64/dxc.exe", "bin/x64/dxcompiler.dll", "bin/x64/dxil.dll",
 CMD = r"""@echo off
 setlocal
 cd /d "%~dp0"
+if not exist "installer\install.py" (
+  echo The installer's files aren't next to this script. Unzip the whole AtmosphereMod zip
+  echo into a folder first ^(right-click it, Extract All^), then run this script from there.
+  pause
+  exit /b 1
+)
 set "PY="
 if exist "installer\python\python.exe" set "PY=installer\python\python.exe"
 if not defined PY (

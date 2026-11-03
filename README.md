@@ -640,13 +640,19 @@ can't break the sim.
 
 [OptiShade](https://github.com/GamingWithGravy/OptiShade) brings its own
 ReShade: a `ReShade64.dll` that OptiShade's own `dxgi.dll` or `winmm.dll`
-loads. The installer accepts that ReShade too. **One user has reported it
-working** with OptiShade 0.21.4 Stable (its ReShade 6.8.0.73), on an RTX 5070
-Ti with the MS Store version: the add-on loaded, the EFB app showed the
-METARs, Ctrl+Shift+F9 switched the mod, and OptiShade's own effects kept
-working. It hasn't been tested here: when it was added (October 2026),
-OptiShade had no release available to download. Compatibility with OptiShade
-1.0 will be tested and confirmed once it's out.
+loads. The installer accepts that ReShade too. **Users have reported it
+working:**
+- OptiShade 0.21.4 Stable (its ReShade 6.8.0.73), on an RTX 5070 Ti with the
+  MS Store version: the add-on loaded, the EFB app showed the METARs,
+  Ctrl+Shift+F9 switched the mod, and OptiShade's own effects kept working;
+- OptiShade 0.21.5 beta with the Steam version and AtmosphereMod 0.5.1: the
+  EFB app's settings and the hotkeys all working;
+- OptiShade 0.21.2 with AtmosphereMod 0.5.1, with the user's OptiShade
+  presets.
+
+It hasn't been tested here: when it was added (October 2026), OptiShade had no
+release available to download. Compatibility with OptiShade 1.0 will be tested
+and confirmed once it's out.
 
 If you already have OptiShade installed, you're welcome to try it, and please
 report how it went on the

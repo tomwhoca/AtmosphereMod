@@ -39,6 +39,7 @@ import os
 import platform
 import re
 import shutil
+import stat
 import string
 import subprocess
 import sys
@@ -282,10 +283,14 @@ def reshade_version(sim: Path) -> str | None:
     return None
 
 
-def community_folder() -> Path | None:
-    """<InstalledPackagesPath>\\Community, from MSFS 2024's UserCfg.opt (MS Store or Steam)."""
-    for cfg in (Path(os.environ["LOCALAPPDATA"]) / "Packages/Microsoft.Limitless_8wekyb3d8bbwe/LocalCache/UserCfg.opt",
-                Path(os.environ["APPDATA"]) / "Microsoft Flight Simulator 2024/UserCfg.opt"):
+def community_folder(sim: Path | None = None) -> Path | None:
+    """<InstalledPackagesPath>\\Community, from MSFS 2024's UserCfg.opt: the
+    Steam version's first for a sim in a Steam library, else the MS Store
+    version's (a PC can have both, or one left over from an old install)."""
+    store = Path(os.environ["LOCALAPPDATA"]) / "Packages/Microsoft.Limitless_8wekyb3d8bbwe/LocalCache/UserCfg.opt"
+    steam = Path(os.environ["APPDATA"]) / "Microsoft Flight Simulator 2024/UserCfg.opt"
+    on_steam = sim is not None and "steamapps" in (part.lower() for part in sim.parts)
+    for cfg in (steam, store) if on_steam else (store, steam):
         if cfg.exists():
             m = re.search(r'^InstalledPackagesPath\s+"([^"]+)"', read_config(cfg), re.M)
             if m and Path(m[1]).is_dir():
@@ -300,6 +305,52 @@ def community_from(path: Path) -> Path | None:
         if p.is_dir() and p.name.lower() == "community":
             return p
     return None
+
+
+def is_link(path: Path) -> bool:
+    """A symbolic link or a junction, as add-on linkers put packages into
+    Community; also one whose folder is gone."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    junction = getattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", 0xA0000003)
+    return stat.S_ISLNK(st.st_mode) or getattr(st, "st_reparse_tag", 0) == junction
+
+
+def remove_package(target: Path) -> str | None:
+    """Remove a package from Community. A link (is_link) goes as the link only:
+    the folder it points to stays as it is (shutil.rmtree refuses links, the
+    error of issues #8 and #10). Returns where the link pointed, None for a
+    folder."""
+    if not is_link(target):
+        shutil.rmtree(target)
+        return None
+    try:
+        points_to = os.readlink(target).removeprefix("\\\\?\\")
+    except OSError:
+        points_to = "?"
+    try:
+        os.rmdir(target)  # (a link to a folder, or a junction: the link itself)
+    except OSError:
+        os.unlink(target)  # (a link to a file)
+    return points_to
+
+
+def install_efb(payload: Path, community: Path) -> None:
+    """The EFB app into Community, as a real folder. If the old one was a link
+    (an add-on linker's), the user is told: the folder it pointed to still
+    holds the old version, and a linker's library needs the new one."""
+    target = community / EFB
+    linked = remove_package(target) if target.exists() or is_link(target) else None
+    shutil.copytree(payload / "efb" / EFB, target)
+    say(f"EFB app: {target}")
+    if linked:
+        say(f"  Note: this was a link to {linked}, as add-on linkers make.")
+        say("  The new EFB app is now a real folder in Community; the folder the link pointed")
+        say("  to wasn't changed and still holds the old version. If you keep your add-ons")
+        say("  outside Community with a linker: move the new folder from Community into your")
+        say("  add-on library, in place of the old one, and link it again.")
 
 
 def ask_community_folder(yes: bool, skip: str) -> Path | None:
@@ -504,7 +555,7 @@ def install(args) -> None:
     pak = find_pak(args.pak or sim)
     reshade, reshade_note = find_reshade(sim)
     rv = reshade_version(sim)
-    community = args.community or community_folder()
+    community = args.community or community_folder(sim)
     if community is None:
         community = ask_community_folder(args.yes, "the EFB app, and with it the METAR features, is left out")
     data = args.data
@@ -579,13 +630,8 @@ def install(args) -> None:
     say(f"Add-on: {sim / ADDON}; ReShade.ini [{SECTION}] set" + (f" (backup {BACKUP})" if (sim / BACKUP).exists()
                                                                     else ""))
 
-    # the EFB app
     if community:
-        target = community / EFB
-        if target.exists():
-            shutil.rmtree(target)
-        shutil.copytree(payload / "efb" / EFB, target)
-        say(f"EFB app: {target}")
+        install_efb(payload, community)
 
     record = {"version": version(), "date": f"{datetime.now():%Y-%m-%d %H:%M}", "sim": str(sim), "reshade": reshade,
               "community": str(community) if community else None, "data": str(data), "pak": pak.name,
@@ -606,7 +652,8 @@ def uninstall(args) -> None:
     if not sims:
         manual = ask_sim_folder(args.yes)
         sims = [manual] if manual else []
-    community = args.community or (Path(record["community"]) if record.get("community") else community_folder())
+    community = args.community or (Path(record["community"]) if record.get("community")
+                                   else community_folder(sims[0] if sims else None))
     if community is None and not record:
         community = ask_community_folder(args.yes, "the EFB app, if installed, stays")
     if not ask("Uninstall AtmosphereMod?", args.yes):
@@ -619,9 +666,10 @@ def uninstall(args) -> None:
         if ini.exists() and f"[{SECTION}]" in read_ini(ini):
             ini.write_text(remove_section(read_ini(ini)), encoding="utf-8")
             say(f"removed [{SECTION}] from {ini}")
-    if community and (community / EFB).exists():
-        shutil.rmtree(community / EFB)
-        say(f"removed {community / EFB}")
+    if community and ((community / EFB).exists() or is_link(community / EFB)):
+        linked = remove_package(community / EFB)
+        say(f"removed {community / EFB}" + (f" (a link: the folder it pointed to, {linked}, wasn't touched;"
+                                            " delete it there if you no longer need it)" if linked else ""))
     if data.exists() and ask(f"Also delete {data} (patched shaders, logs and your tunables.ini)?", args.yes):
         shutil.rmtree(data)
         say(f"removed {data}")
