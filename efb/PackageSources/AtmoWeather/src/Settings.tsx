@@ -307,10 +307,10 @@ interface State {
   C?: number[];
   TE?: number[];
   weather?: string;
-  /** The add-on's version (from 0.5.2 on). */
+  /** The add-on's version (from 0.6.0 on). */
   version?: string;
   /** The saved presets, the one the settings are ("" for none) and whether it has them as they are,
-   * and why the last preset request failed or what an import did (from 0.5.2 on). */
+   * and why the last preset request failed or what an import did (from 0.6.0 on). */
   presets?: string[];
   preset?: string;
   presetSaved?: boolean;
@@ -376,11 +376,11 @@ export class SettingsModel {
   /** The Ctrl+Shift+F9 switch. */
   public readonly enabled = Subject.create(true);
   public readonly weather = Subject.create("");
-  /** The add-on's version, "" until it says (or if it's older than 0.5.2). */
+  /** The add-on's version, "" until it says (or if it's older than 0.6.0). */
   public readonly addonVersion = Subject.create("");
   /** The saved presets: Default first. */
   public readonly presets = Subject.create<readonly string[]>([]);
-  /** The add-on has presets (0.5.2 on). */
+  /** The add-on has presets (0.6.0 on). */
   public readonly hasPresets = Subject.create(false);
   /** The preset the settings are, or were before they changed ("" for none). */
   public readonly preset = Subject.create("");

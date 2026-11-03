@@ -54,7 +54,7 @@ rendering, and consists of several components:
 Taken on 26 October 2026 (the thunderstorms on 29 October) with live weather,
 each pair a few seconds apart with the mod off and on.
 The settings were the shipping ones except for solid clouds 4 (2 by default
-then, 0.5 since 0.5.2),
+then, 0.5 since 0.6.0),
 crisper cloud edges 2 (off by default) and small changes to the cloud
 lighting.
 
@@ -212,6 +212,21 @@ With the mod only: MSFS has neither a glory nor its strong silver lining.
   </tr>
   <tr>
     <td colspan="2"><b>Horta</b>, Azores: firm cumulus over the island with blue sky between, and a deeper blue sea.<br><sub>METAR <code>LPHR 261400Z 34011KT 300V040 9999 FEW025 BKN060 19/12 Q1018</code></sub></td>
+  </tr>
+</table>
+
+### Fly-through clouds
+
+With the mod only: in MSFS's own cloud the wing stays almost clear. Taken on 3
+November 2026 with visibility inside clouds 40 m and structure 50 % (the
+shipping values are now 10 m and 10 %), solid clouds 0.5.
+
+<table>
+  <tr>
+    <td><img src="Screenshots/inside-cloud-minneapolis.jpg" alt="The engine and the wing fading into the cloud, from the cabin window"></td>
+  </tr>
+  <tr>
+    <td><b>In the overcast</b> near Minneapolis, from the cabin window: the engine and the wing fade into the cloud a few metres out, in the cloud's own grey light.<br><sub>METAR <code>KMSP 031853Z 01009G21KT 5SM -RA BR OVC010 14/13 A2966 RMK AO2 RAB06 SLP043 P0001 T01390128</code></sub></td>
   </tr>
 </table>
 
@@ -408,7 +423,7 @@ What it can do:
     are see-through and the sun glows through an overcast.
   - The mod makes low clouds and cumulus solid from the base up, without
     making them darker.
-- **Inside a cloud** (`C33`):
+- **Fly-through clouds** (`C33`, `C34`):
   - MSFS's clouds are so thin inside that you can see for hundreds of metres
     in them, and the wings never fade into the cloud. In real clouds you see
     about 20–150 m.
@@ -417,31 +432,25 @@ What it can do:
     takes the cloud's own light, so the fog is white in a bright cloud and
     grey in a dark one.
   - It applies within about 100 m of the camera and fades out by 300 m, so
-    clouds seen from farther away keep their look, whatever `C16`. The
-    cockpit itself stays clear, and ice clouds (cirrus) stay thin, as real
-    ones are.
+    clouds seen from farther away keep their look, whatever `C16`. Ice
+    clouds (cirrus) stay thin, as real ones are.
   - It starts 25 m inside the cloud and is full from 75 m in. A cloud's outer
     layer stays as MSFS draws it and veils the fog behind it, so skimming a
     cloud top or passing a cloud's edge doesn't break the fog into bands and
     blocks (MSFS draws its clouds at a reduced resolution, and in steps of
     20 m near the aircraft).
-  - `C33` is the visibility inside a dense cloud, in metres (40 by default;
+  - `C33` is the visibility inside a dense cloud, in metres (10 by default;
     thinner parts of a cloud allow more); 0 turns it off.
+  - **Turn off other in-cloud effects:** add-ons that simulate flying
+    through clouds, such as TriTriSim GFX's wing fade effect or CloudSurf
+    (flightsim.to), will most likely conflict with the mod's denser clouds.
+    Turn them off; to keep theirs instead, `C33` at 0 turns Fly-through
+    clouds off.
   - **Structure** (`C34`): the sim's clouds are almost even inside, so the
     fog has patches of denser and thinner cloud, fixed to the ground, that
     come at you and pass by as you fly. Each patch is shaded by the cloud
     toward the sun, so thinner parts are brighter and denser ones darker,
-    which is what makes them show. 0 gives an even fog.
-  - **See-through parts and lights**, such as windows, engine fans,
-    propeller discs, exhaust and smoke, and the aircraft's, runway and city
-    lights, get the same fog. MSFS draws them after its clouds, so the mod
-    fogs them separately, by their distance, in the colour of the fog
-    around them: they fade into the cloud with the rest of the aircraft,
-    and lights dim. (MSFS's own fog leaves them too clear: it only fades
-    them by a coarse estimate of the cloud in front.) For this the installer
-    patches the sim's forward, particle and light shaders too, about 2,800
-    variants (around 115 MB in `%LOCALAPPDATA%\AtmosphereMod`); the add-on
-    loads only the ones the sim uses.
+    which is what makes them show. 0 gives an even fog; 0.1 by default.
 - **Cloud types** (`C23`–`C27`, live weather). Real clouds aren't all equally
   solid: cumulus are dense with crisp edges, while stratiform clouds hold less
   water, spread more evenly, and have softer edges.
@@ -823,6 +832,11 @@ Open an issue on the
   re-patched.
 - DirectX 12 only. The performance cost hasn't been measured on other systems
   yet.
+- Inside a dense cloud, the aircraft's outline (a wing's edge against the
+  fogged background) can flicker by a pixel or two: MSFS draws its clouds at
+  a reduced resolution and rebuilds the full picture over several frames,
+  which doesn't match the anti-aliased edge exactly. Visibility inside
+  clouds at 0 (the sim's own) avoids it.
 
 ## Support the mod
 
