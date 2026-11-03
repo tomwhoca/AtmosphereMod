@@ -23,6 +23,10 @@ interpreter and compares, for several settings:
     march's no steeper than max(160, step) / step;
   - the view march's cloud extinction (apply_cloud_optical), ramp * sigma' with
     sigma' = lerp(C16 0.01 (sigma / 0.01)^C17, C19 sigma, sat((h - C18 + 3 km) / 3 km));
+    and the in-cloud fog around the camera (C33) on top of it, ramp sigma' + e c w max(sigma_n - sigma', 0)
+    with sigma_n = 3 / C33 (sigma / 0.01)^(1/3), w = sat((t - 1.5) / 1.5) (1 - smoothstep(100, 300, t))
+    times the liquid share, t the sample's distance, e smoothstep over the depth into the cloud
+    (NEAR_FOG_DEPTH_M) and c the share of a cloud's own extinction;
   - the surface detail (apply_cloud_detail): every march's 1 km octave
     scaled by a = 1 - C28 (1 - smoothstep(D / C29)), D the height above the
     cloud base; and in the view march a finer octave + C30 a (n3 - 0.75), n3
@@ -86,6 +90,21 @@ SETS = [
     (0.6, 1.0, 0.5, 0.4, 0.4, 0.06, 0.5, 150, 1.0, 1.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.0, 0.5, 0.0, 2.0)
     + (0.0,) * 8 + (1.0, 300.0, 0.02, 350.0),
 ]
+
+
+def near_set(c0=1.0, c16=0.0, c17=0.0, c18=0.0, c19=0.0, c33=40.0, c34=0.0):
+    c = [0.0] * 35
+    c[0], c[1], c[16], c[17], c[18], c[19], c[33], c[34] = c0, 0.9, c16, c17, c18, c19, c33, c34
+    return tuple(c)
+
+
+# C33: the in-cloud fog around the camera, alone, over solid clouds, clamped, off;
+# C34: its structure, alone, over solid clouds, clamped, off, without the fog, with C0 = 0
+NEAR_SETS = [near_set(), near_set(c16=2.0, c17=0.33), near_set(c16=0.5, c17=0.33, c18=3000.0, c19=1.5, c33=60.0),
+             near_set(c0=0.5, c33=120.0), near_set(c33=5.0), near_set(c33=5000.0), near_set(c33=-1.0),
+             near_set(c0=0.0, c16=2.0, c17=0.33),
+             near_set(c34=0.5), near_set(c16=2.0, c17=0.33, c33=20.0, c34=1.0), near_set(c34=3.0),
+             near_set(c34=-1.0), near_set(c33=0.0, c34=1.0), near_set(c0=0.0, c34=1.0)]
 
 
 def type_set(c0=1.0, c8=2.0, c16=4.0, c17=0.33, c18=0.0, strength=1.0, thick=(0.6, 0.5, 0.4, 0.3)):
@@ -579,6 +598,23 @@ def check(crc: str, stock: str) -> list[str]:
     else:
         dir_names, light_names = cos_ops[:3], cos_ops[3:]
     t_name = P.find_ap_depth(ir)
+    # the in-cloud structure's inputs (C34): the noise frame, the 8 km lookup's lod and the sun
+    # direction, as the shader has them (copied into its guarded block where the stock march
+    # computes them only in clouds); every evaluation needs them, the structure's branch feeds the
+    # extinction
+    inside = P.find_inside_site(P.Ir(stock))
+    irng = np.random.default_rng(7)
+
+    def as_used(name):
+        copy = f"%mod.in.w{name[1:]}"
+        return copy if re.search(rf"{re.escape(copy)} = ", patched) else name
+    frame = irng.uniform(-300, 300, (N, 3)).astype(F)
+    inside_seeds = {as_used(inside["lod"]): np.zeros(N, F)}
+    for k3 in range(3):
+        inside_seeds[as_used(inside["w"][k3])] = frame[:, k3]
+        inside_seeds[as_used(inside["light"][k3])] = np.full(N, sun[k3], dtype=F)
+    radiance = {a: irng.uniform(0, 2, N).astype(F) for _, a in inside["radiance"]}
+    ext_seed = irng.uniform(1e-4, 0.1, N).astype(F)
     ramp_x = np.linspace(-1.0, 2.0, N).astype(F)
     # the view march's step (m): its ramp is sharpened no steeper than max(160, step) / step,
     # and its extinction is at most OPTICAL_STEP_TAU per step
@@ -628,7 +664,8 @@ def check(crc: str, stock: str) -> list[str]:
         cloud = np.zeros((P.CLOUD_PARAMS_SIZE // 16, 4))
         cloud.flat[:len(c)] = c
         cbs = {"b1 space50": cloud, "b0 space50": np.zeros((4, 4))}
-        seeds = {ms["s"]: s, **rain, opt["sigma"]: sigma, opt["height"]: height, **dseeds, step_name: step}
+        seeds = {ms["s"]: s, **rain, opt["sigma"]: sigma, opt["height"]: height, **dseeds, step_name: step,
+                 **inside_seeds}
         for _, cosname, *_ in blends:
             seeds[cosname] = cos
         for x, _ in softs:
@@ -781,6 +818,91 @@ def check(crc: str, stock: str) -> list[str]:
                 err = float(np.abs(s2_val - ref).max())
                 if err > 2e-5:
                     failures.append(f"{tag} {site['s2']}: finer octave abs. error max {err:.1e}")
+    # the in-cloud fog around the camera (C33): sample distances from the camera to past its fade
+    near_t = np.concatenate([[0.0, 1.5, 2.25, 3.0, 50.0, 100.0, 200.0, 300.0, 400.0],
+                             rng.uniform(0, 400, N - 9)]).astype(F)
+    for c in NEAR_SETS:
+        cloud = np.zeros((P.CLOUD_PARAMS_SIZE // 16, 4))
+        cloud.flat[:len(c)] = c
+        seeds = {ms["s"]: s, **rain, opt["sigma"]: sigma, opt["height"]: height, **dseeds, LV: np.ones(N, F),
+                 edges["depth"]: depth, t_name: near_t, step_name: step, **radiance, inside["ext"]: ext_seed}
+        for _, cosname, *_ in blends:
+            seeds[cosname] = cos
+        for x, _ in softs:
+            seeds[x] = d
+        for k3 in range(3):
+            seeds[dir_names[k3]] = view[:, k3].astype(F)
+            seeds[light_names[k3]] = np.full(N, sun[k3], dtype=F)
+        for x, _ in edges["ramps"]:
+            seeds[x] = ramp_x
+        seeds.update(inside_seeds)
+        got = Evaluator(patched, {"b1 space50": cloud, "b0 space50": np.zeros((4, 4))}, seeds, sampler=fine_sampler)
+        tag = f"near C={c}"
+        c0 = clamp(c[0], 0.0, 1.0)
+        prod = got(opt["prod"]).astype(np.float64)
+        ramp_v = got(edges["ramps"][0][1]).astype(np.float64)
+        s64, h64, t64 = sigma.astype(np.float64), height.astype(np.float64), near_t.astype(np.float64)
+        h_ice = c[18] if c[18] > 0 else P.OPTICAL_ICE_DEFAULT_M
+        wi = np.clip((h64 - h_ice + P.OPTICAL_ICE_BLEND_M) / P.OPTICAL_ICE_BLEND_M, 0, 1)
+        if c[16] <= 0 or c0 <= 0:
+            base = s64
+        else:
+            gam = clamp(c[17], 0.2, 1.0) if c[17] > 0 else 1.0
+            liquid = clamp(c[16], 0.0, 20.0) * P.OPTICAL_REF * (s64 / P.OPTICAL_REF) ** gam
+            ice = (clamp(c[19], 0.0, 20.0) if c[19] > 0 else 1.0) * s64
+            base = np.minimum(liquid + wi * (ice - liquid), cap)
+        # every step's radiance times the structure's light factor (1 without it)
+        fe_got = got("%mod.in.fe").astype(np.float64)
+        for xr, ar in inside["radiance"]:
+            want_x = radiance[ar].astype(np.float64) * fe_got * ext_seed.astype(np.float64)
+            err = float(np.max(np.abs(got(xr).astype(np.float64) - want_x) / np.maximum(np.abs(want_x), 1e-9)))
+            if err > 1e-5:
+                failures.append(f"{tag} {xr}: step radiance not scaled by the light factor (rel. error {err:.1e})")
+        if c[33] <= 0 or c0 <= 0:
+            if not np.array_equal(prod.astype(F), (ramp_v * base).astype(F)) and c[16] <= 0:
+                failures.append(f"{tag} {opt['prod']}: in-cloud fog off but not as without it")
+            if c0 <= 0 and not np.array_equal(prod.astype(F), (ramp_v * s64).astype(F)):
+                failures.append(f"{tag} {opt['prod']}: C0 = 0 but not stock")
+            if not np.array_equal(fe_got, np.ones(N)):
+                failures.append(f"{tag}: in-cloud fog off but the light factor isn't 1")
+            continue
+        # the structure: n1 - n2 for the density, n1 - (n1 toward the sun) for the light, within the fog's range
+        m, f = np.ones(N), np.ones(N)
+        if c[34] > 0:
+            p1, p2 = (np.float32(1.0 / p) for p in P.INSIDE_PERIODS_M)
+            u1, u2 = frame * p1, frame * p2
+            us = (np.float32(P.INSIDE_SUN_M) * p1 * sun.astype(F)[None, :] + u1).astype(F)
+            n1, n2, ns = (fine_sampler(*u.T)[:, 0].astype(np.float64) for u in (u1, u2, us))
+            strength = clamp(c[34], 0.0, 2.0)
+            inrange = t64 < P.NEAR_FOG_OUT_M
+            m = np.where(inrange, np.clip(1 + strength * P.INSIDE_DENSITY_GAIN * (n1 - n2),
+                                          P.INSIDE_DENSITY_MIN, P.INSIDE_DENSITY_MAX), 1.0)
+            f = np.where(inrange, np.clip(1 + strength * P.INSIDE_LIGHT_GAIN * (n1 - ns), *P.INSIDE_LIGHT_RANGE), 1.0)
+        near = 3.0 / clamp(c[33], *P.NEAR_FOG_VIS_M) * (s64 / P.OPTICAL_REF) ** P.NEAR_FOG_PROFILE * m
+        inner = np.clip((t64 - P.NEAR_FOG_INNER_M) / P.NEAR_FOG_INNER_M, 0, 1)
+        x = np.clip((t64 - P.NEAR_FOG_FULL_M) / (P.NEAR_FOG_OUT_M - P.NEAR_FOG_FULL_M), 0, 1)
+        w = inner * (1 - x * x * (3 - 2 * x)) * (1 - wi)
+        err = float(np.abs(fe_got - (1 + w * (f - 1))).max())
+        if err > 1e-4:
+            failures.append(f"{tag} %mod.in.fe: structure light factor abs. error max {err:.1e}")
+        # the extra density only inside the cloud (smoothstep over the depth into it) and in a cloud's own extinction
+        y = np.clip((depth.astype(np.float64) - P.NEAR_FOG_DEPTH_M[0]) / (P.NEAR_FOG_DEPTH_M[1] - P.NEAR_FOG_DEPTH_M[0]),
+                    0, 1)
+        edge = y * y * (3 - 2 * y)
+        cloudy = np.clip((s64 - P.NEAR_FOG_SIGMA[0]) / (P.NEAR_FOG_SIGMA[1] - P.NEAR_FOG_SIGMA[0]), 0, 1)
+        ref = ramp_v * base + edge * cloudy * w * np.maximum(near - base, 0)
+        floor = np.maximum(1e-5, 1e-3 * np.abs(np.maximum(ramp_v, edge) * np.maximum(near, base)))
+        err = np.abs(prod - ref) / np.maximum(np.abs(ref), floor)
+        e = float(np.nan_to_num(err, nan=np.inf).max())
+        worst = max(worst, float(np.percentile(err, 99.9)))
+        if e > 1e-4:
+            failures.append(f"{tag} {opt['prod']}: in-cloud fog rel. error max {e:.1e}")
+        # the fog only adds: at least the extinction without it, and none from the cockpit (t <= 1.5 m)
+        if np.any(prod < (ramp_v * base).astype(F) * (1 - 1e-5) - 1e-9):
+            failures.append(f"{tag} {opt['prod']}: the in-cloud fog lowered the extinction")
+        if not np.array_equal(prod[t64 <= P.NEAR_FOG_INNER_M].astype(F),
+                              (ramp_v * base)[t64 <= P.NEAR_FOG_INNER_M].astype(F)) and c[16] <= 0:
+            failures.append(f"{tag} {opt['prod']}: fog within {P.NEAR_FOG_INNER_M} m of the camera")
     # cloud types: the view ramp and the optical thickness by the grid's weights
     puff_products = [(e, P.Ir(patched).def_name(i)) for i, l in enumerate(patched.splitlines())
                      for e, pf in (("%mod.ty.e8", "%mod.ty.pf"), ("%mod.ty.e1", "%mod.ty.pf1"))
@@ -834,7 +956,7 @@ def check(crc: str, stock: str) -> list[str]:
         plain = np.zeros((P.CLOUD_PARAMS_SIZE // 16, 4))
         plain.flat[:len(c)] = untyped
         seeds = {ms["s"]: s, **rain, opt["sigma"]: sigma, opt["height"]: height, **dseeds, LV: np.ones(N, F),
-                 edges["depth"]: depth, t_name: dist.astype(F), step_name: step}
+                 edges["depth"]: depth, t_name: dist.astype(F), step_name: step, **inside_seeds}
         for _, cosname, *_ in blends:
             seeds[cosname] = cos
         for x, _ in softs:

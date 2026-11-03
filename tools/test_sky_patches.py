@@ -64,7 +64,7 @@ def constants(flags=0, t0=0.0, t12=0.0, c22=0.0, layout="transmittance", haze=No
         for index, value in zip((1, 3, 4, 5, 6, 10), haze):
             tun[index] = value
     mod[1:4] = np.array(tun).reshape(3, 4)
-    cloud = np.zeros((8, 4))
+    cloud = np.zeros((P.CLOUD_PARAMS_SIZE // 16, 4))
     cloud.flat[22] = c22
     atmo = np.array(ATMO, dtype=np.float64)
     if layout == "transmittance":
@@ -162,7 +162,8 @@ def main():
     spots = [(0.0, 0.0), (30.0, 5.0), (-20.0, 40.0), (70.0, -60.0), (-90.0, -10.0), (10.0, 120.0), (150.0, 0.0),
              (-5.0, -150.0)]
     for crc, stock in load("ch_camera_volume"):
-        patched, summary = P.patch_medium(stock, far_slice=True, dump="camera", field=True, ms_rows="read")
+        patched, summary = P.patch_medium(stock, far_slice=True, dump="camera", field=True, ms_rows="read",
+                                          tint=True)
         print(f"ch_camera_volume {crc}: {summary}")
         sp, pp = Prog(stock), Prog(patched)
         lay = "camera"

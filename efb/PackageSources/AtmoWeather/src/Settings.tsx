@@ -236,6 +236,18 @@ export const TABS: TabSpec[] = [
             "Clouds as thick as real ones: the sim's are see-through at bases and edges, and the sun glows "
             + "through an overcast. Thickness at a cumulus core (1 is the sim's); only the look, not the lighting.",
             0, 4, 0.25, 2, { format: (d) => (d <= 0 ? "the sim's" : d.toFixed(2)) }),
+      plain("C33", "Visibility inside clouds",
+            "How far you see inside a cloud, around your aircraft: the wings fade into it as in a real cloud. "
+            + "The sim's clouds are so thin inside that you see for hundreds of metres. Only near you, so clouds "
+            + "seen from outside keep their look; ice clouds stay thin.",
+            0, 200, 10, 0, { format: (d) => (d <= 0 ? "the sim's" : `${Math.round(d)} m`) }),
+      {
+        ...percent("C34", "Structure inside clouds",
+                   "Patches of denser and thinner cloud around you that you fly through, each shaded by the cloud "
+                   + "toward the sun: thinner parts brighter. 0 % is an even fog.",
+                   1),
+        needs: "C33",
+      },
       percent("C23", "Cloud types",
               "Tells cloud types apart by height, depth and cover: dense, crisp cumulus; thinner, softer "
               + "stratocumulus, stratus, altocumulus and altostratus. 0 % draws every cloud like cumulus. Live "

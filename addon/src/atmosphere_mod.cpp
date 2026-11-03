@@ -67,6 +67,10 @@ namespace
 {
 // Passes logged in detail: dispatch and draw sizes (dispatches.tsv) and rates
 // (dispatch_rates.log).
+// Drawn after the clouds, fogged by their distance (tools/patch_dxil.py patch_forward_fog).
+const std::unordered_set<std::string> kForwardFogEntries = {"ph_base", "ph_particle", "ph_billboard_lights",
+                                                             "ph_macro_lights"};
+
 const std::unordered_set<std::string> kWatchedEntries = {
     // atmosphere
     "ch_transmittance_lut", "ch_multi_scatt", "ch_sky_view", "ch_camera_volume",
@@ -99,12 +103,15 @@ struct ModParams
     float tunables[12] = {};  // T0..T11
 };
 static_assert(sizeof(ModParams) == 64);
-// Cloud tunables C0..C32 (tunables.ini). C0..C31, compute only: 32 root
-// constants at b1 space50, read by the patched ch_volumetric_clouds_render
-// (tools/patch_dxil.py, cloud_prologue_lines). C32 (thunderstorms) goes to the
-// shaders as ModParams' DebugCapture bit 8 (push_mod_args).
-constexpr uint32_t kCloudTunableCount = 33;
-constexpr uint32_t kCloudRootConstants = 32;
+// Cloud tunables C0..C35 (tunables.ini). Compute only: 36 root constants at
+// b1 space50, C0..C35 by index, read by the patched
+// ch_volumetric_clouds_render (tools/patch_dxil.py, cloud_prologue_lines).
+// C32 (thunderstorms) reaches the shaders as ModParams' DebugCapture bit 8
+// (push_mod_args); C35 (developers: > 0 tints what the forward pass fogs, as
+// the graphics DebugCapture bit 13; < 0 turns that fog off) likewise.
+constexpr uint32_t kCloudTunableCount = 36;
+constexpr uint32_t kCloudRootConstants = 36;
+static_assert(kCloudTunableCount <= kCloudRootConstants);
 constexpr uint32_t kDebugMagic = 0x4F4D5441;  // 'ATMO'
 constexpr uint32_t kDebugBufferSize = 20 * 1024 * 1024;  // bits 6 and 7 below: the weather volume, cloud types
 // Regions: uint4(stamp, register count, 0, 0) then float4 registers.
@@ -176,7 +183,7 @@ constexpr uint32_t kCloudGenAnchor = 0xAC1000;
 static_assert(kCloudGenAnchor + weather::kAnchorTableBytes <= kCloudGenBytes);
 constexpr uint32_t kAnchorUploadSlots = 4;    // a ring, so a copy in flight keeps its source
 constexpr uint64_t kAnchorUploadFrames = 8;   // at most this often (the volume is rebuilt every ~25 frames)
-constexpr uint32_t kCloudGenCloud = 3072;  // the cloud constants C0..C31 as the generator sees them
+constexpr uint32_t kCloudGenCloud = 3072;  // the cloud constants C0..C35 as the generator sees them
 constexpr uint32_t kCloudGenDims = 16;
 constexpr uint32_t kCloudGenUser = 128;
 constexpr uint32_t kCloudGenPost = 1152;
@@ -192,6 +199,21 @@ constexpr uint32_t kCloudShStride = 144;
 static_assert(kDebugRegionGlobal + 16 + 16 * kGlobalRegisters <= kCloudUserRegion);
 static_assert(kCloudShRegion + 2 * kCloudShStride <= kCloudGenRegion);
 static_assert(kCloudGenRegion + kCloudGenBytes <= kDebugBufferSize);
+// The fog around the camera for see-through surfaces (patch_dxil.py
+// FOG_REGION): the cloud renderer records, every frame, its first march
+// step's extinction and radiance at 4 screen points, float4 then uint frame
+// | 0x10000, 32 bytes each; then the cloud merge its factor from the clouds'
+// colour to the scene's (FOG_SCALE: float, uint frame | 0x10000); the patched
+// forward pass (ph_base) reads them.
+constexpr uint32_t kFogRegion = 0x3E3000;
+constexpr uint32_t kFogPoints = 4;
+constexpr uint32_t kFogPointBytes = 32;
+constexpr uint32_t kFogScale = kFogRegion + kFogPoints * kFogPointBytes;
+// The merge's fog colour grid (patch_dxil.py FOG_GRID): per cell float4(colour, alpha).
+constexpr uint32_t kFogGrid = kFogRegion + 0x100, kFogGridX = 32, kFogGridY = 18;
+static_assert(kFogScale + 8 <= kFogGrid);
+static_assert(kCloudShRegion + 2 * kCloudShStride <= kFogRegion);
+static_assert(kFogGrid + kFogGridX * kFogGridY * 16 <= kCloudGenRegion);
 // Cloud types (patch_dxil.py TYPES_REGION): the generator writes per-slice type
 // weights on a 128 x 128 grid over the weather volume (header uint4(magic,
 // frame, threads per axis, f32 64 / N), then 128 x 128 x 32 RGBA8) with
@@ -297,6 +319,7 @@ struct TrackedPipeline
     bool graphics = false;
     bool watched = false;
     bool radar = false;  // the replica dumps the radar capture region
+    uint32_t fog_mode = 0;  // kForwardFogEntries: the fog for its blending (forward_fog_mode), 0 = not replaced
     uint32_t mod_param = UINT32_MAX;  // first injected root parameter, if any
     uint32_t cloud_param = UINT32_MAX;  // injected cloud constants (compute only)
     uint32_t tlas_param = UINT32_MAX;   // injected root SRV for MSFS's TLAS (compute only)
@@ -315,13 +338,30 @@ struct __declspec(uuid("7c1f3d52-9a4e-4f0b-8e2d-5b6a1c9d0e47")) CommandListState
 {
     pipeline compute = {};
     pipeline graphics = {};  // only when it is a tracked graphics pipeline
+    pipeline graphics_any = {};  // any graphics pipeline with a pixel shader, for the capture's draw log
+    uint32_t draw_index = 0;     // the draw log's draws on this list
     float viewport_width = 0.0f, viewport_height = 0.0f;  // first viewport, for draw logs
+    bool timeable = false;          // a direct or compute list of the game's device (kept over resets)
+    std::vector<uint32_t> timers;   // its timestamps since the reset, resolved at the close
+};
+
+// Every graphics pipeline's pixel shader and how it writes its targets
+// (graphics.tsv), not only the tracked ones: for the capture's draw log.
+struct GraphicsShader
+{
+    uint32_t crc = 0;
+    std::string entry;
+    std::string blend;  // RT0's and RT1's blending and the depth test (describe_output)
 };
 
 std::shared_mutex g_mutex;  // guards the containers below
 std::unordered_map<uint32_t, std::string> g_names;                  // crc -> entry
 std::unordered_map<uint32_t, std::vector<uint8_t>> g_replacements;  // crc -> DXIL
+// The forward pass's replacements (thousands, ~100 MB): read when a pipeline needs one.
+std::unordered_map<uint32_t, fs::path> g_lazy_replacements;         // crc -> file
 std::unordered_map<uint64_t, TrackedPipeline> g_pipelines;          // pipeline -> info
+std::unordered_map<uint64_t, GraphicsShader> g_graphics;            // graphics pipeline -> pixel shader
+std::unordered_map<uint64_t, uint32_t> g_compute_shaders;           // compute pipeline -> shader crc (draw log)
 std::unordered_map<uint64_t, std::vector<LayoutParam>> g_layouts;   // layout -> params
 std::unordered_map<uint64_t, uint32_t> g_injected;                  // layout -> first mod param
 std::unordered_map<uint64_t, uint32_t> g_cloud_injected;            // layout -> cloud constants param
@@ -345,10 +385,12 @@ std::array<float, kTunableCount> g_tunables = {};            // tunables.ini
 std::array<float, kTunableCount> g_effective_tunables = {};  // with the weather feed blended in (T13)
 std::array<float, kTunableCount> g_radar_tunables = {};      // tunables.ini R0..R13
 std::array<float, kTunableCount> g_effective_radar_tunables = {};  // pushed on radar draws: R4 = 0 -> METAR freezing level
-std::array<float, kCloudTunableCount> g_cloud_tunables = {};       // tunables.ini C0..C32
+std::array<float, kCloudTunableCount> g_cloud_tunables = {};       // tunables.ini C0..C35
 std::array<float, kCloudTunableCount> g_effective_cloud_tunables = {};  // pushed: C13-C15 = the aircraft (SimConnect)
 // C32 <= 0: no thunderstorm cells (DebugCapture bit 8 to the cloud generator)
 std::atomic<bool> g_storms_off{true};
+std::atomic<bool> g_fog_tint{false};  // C35 > 0: DebugCapture bit 13 on graphics draws
+std::atomic<bool> g_forward_fog_off{false};  // C35 < 0: no fog on the forward pass (bits 10-12 left 0)
 constexpr float kFallbackFreezingLevel = 3000.0f;  // m, R4 = 0 before the first METAR
 // Ozone for the fitted sky colours (T8): T14 (tunables.ini only; the shaders
 // get the scale) > 0 fixes the column in DU, 0 takes the climatology at the
@@ -375,6 +417,7 @@ std::ofstream g_event_log;     // events.log
 std::ofstream g_rootsig_log;   // rootsigs.log: every root signature the game creates
 std::ofstream g_create_log;    // compute_creates.tsv: every compute pipeline creation attempt
 std::ofstream g_texture_log;   // textures3d.tsv: each distinct 3D texture the game creates
+std::ofstream g_graphics_log;  // graphics.tsv: every graphics pipeline's pixel shader and output state
 
 // Debug buffer, its root UAV view, and the CPU readback copy.
 resource g_debug_buffer = {};
@@ -408,6 +451,24 @@ std::ofstream g_rate_log;  // dispatch_rates.log
 
 std::atomic<bool> g_enabled{true};
 std::atomic<uint64_t> g_frame{0};
+// On capture, the draws of the next whole frame, in recording order per
+// command list, and the order the command lists ran in: captures/<id>_draws.tsv
+// (what the game draws after its clouds, and how it blends it).
+std::mutex g_draw_log_mutex;
+std::vector<std::string> g_draw_log;
+std::atomic<uint64_t> g_draw_log_frame{UINT64_MAX};  // the frame being logged
+uint32_t g_draw_log_id = 0;                          // present thread only
+constexpr size_t kDrawLogMax = 60000;
+// The draw log's GPU time: a timestamp before every draw and dispatch it logs and one
+// at each such list's close, resolved at the close (not after each query: that would
+// make the GPU wait at every draw). ReShade's readback doesn't wait for the GPU, so
+// the log is written kGpuTimerDelayFrames after its frames.
+constexpr uint32_t kGpuTimers = 65536;
+constexpr uint64_t kGpuTimerDelayFrames = 10;
+ID3D12QueryHeap *g_timer_heap = nullptr;  // the game's device (g_debug_device)
+resource g_timer_readback = {};
+std::atomic<uint32_t> g_timer_next{0};
+std::atomic<uint64_t> g_timer_frequency{0};  // the graphics queue's ticks per second
 bool g_inject = false;
 bool g_inject_graphics = false;
 fs::path g_data_dir;
@@ -516,9 +577,20 @@ void load_names()
         g_names[static_cast<uint32_t>(std::stoul(crc, nullptr, 16))] = entry;
 }
 
-std::unordered_map<uint32_t, std::vector<uint8_t>> load_replacements()
+std::string entry_name(uint32_t crc);
+
+std::vector<uint8_t> read_file(const fs::path &path)
+{
+    std::ifstream file(path, std::ios::binary);
+    return std::vector<uint8_t>((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+}
+
+// The replacements in <DataPath>/shaders, by crc; the forward pass's go to
+// `lazy` (their files only).
+std::unordered_map<uint32_t, std::vector<uint8_t>> load_replacements(std::unordered_map<uint32_t, fs::path> &lazy)
 {
     std::unordered_map<uint32_t, std::vector<uint8_t>> result;
+    lazy.clear();
     std::error_code ec;
     for (const auto &item : fs::directory_iterator(g_data_dir / "shaders", ec))
     {
@@ -533,8 +605,12 @@ std::unordered_map<uint32_t, std::vector<uint8_t>> load_replacements()
         {
             continue;
         }
-        std::ifstream file(item.path(), std::ios::binary);
-        std::vector<uint8_t> code((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+        if (entry_name(crc) == "ph_base")
+        {
+            lazy[crc] = item.path();
+            continue;
+        }
+        std::vector<uint8_t> code = read_file(item.path());
         if (!code.empty())
             result[crc] = std::move(code);
     }
@@ -651,6 +727,260 @@ void log_shader(uint32_t crc, const char *stage, pipeline_layout layout)
                '\t' + hex64(layout.handle));
 }
 
+const char *factor_name(blend_factor f)
+{
+    static const char *const kNames[] = { "0", "1", "sc", "1-sc", "dc", "1-dc", "sa", "1-sa", "da", "1-da", "k",
+                                          "1-k", "ka", "1-ka", "sa_sat", "s1c", "1-s1c", "s1a", "1-s1a" };
+    const auto i = static_cast<uint32_t>(f);
+    return i < std::size(kNames) ? kNames[i] : "?";
+}
+
+const char *op_name(blend_op op)
+{
+    static const char *const kNames[] = { "+", "-", "rev-", "min", "max" };
+    const auto i = static_cast<uint32_t>(op);
+    return i < std::size(kNames) ? kNames[i] : "?";
+}
+
+// A graphics pipeline's outputs for graphics.tsv: its render targets' formats
+// (DXGI), the depth test and write, and RT0's and RT1's blending as
+// "x*src op y*dst, a: x op y" ("s1c" and "s1a" are dual-source factors,
+// SV_Target1). `summary` gets the blending and depth, for the draw log.
+std::string describe_output(uint32_t count, const pipeline_subobject *subobjects, std::string &summary)
+{
+    std::string rts = "-", depth = "-", rt[2] = { "-", "-" }, coverage;
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        const pipeline_subobject &s = subobjects[i];
+        if (s.data == nullptr)
+            continue;
+        if (s.type == pipeline_subobject_type::render_target_formats)
+        {
+            rts = std::to_string(s.count) + " RT";
+            for (uint32_t r = 0; r < s.count; ++r)
+                rts += (r ? "," : " ") + std::to_string(static_cast<uint32_t>(static_cast<const format *>(s.data)[r]));
+        }
+        else if (s.type == pipeline_subobject_type::depth_stencil_state)
+        {
+            const auto &d = *static_cast<const depth_stencil_desc *>(s.data);
+            depth = std::string(d.depth_enable ? "depth test" : "no depth test") + (d.depth_write_mask ? "+write" : "");
+        }
+        else if (s.type == pipeline_subobject_type::blend_state)
+        {
+            const auto &b = *static_cast<const blend_desc *>(s.data);
+            for (int r = 0; r < 2; ++r)
+            {
+                char buf[128];
+                if (b.blend_enable[r])
+                    snprintf(buf, sizeof(buf), "%s*src %s %s*dst, a: %s %s %s, mask %X",
+                             factor_name(b.source_color_blend_factor[r]), op_name(b.color_blend_op[r]),
+                             factor_name(b.dest_color_blend_factor[r]), factor_name(b.source_alpha_blend_factor[r]),
+                             op_name(b.alpha_blend_op[r]), factor_name(b.dest_alpha_blend_factor[r]),
+                             b.render_target_write_mask[r]);
+                else
+                    snprintf(buf, sizeof(buf), "off, mask %X", b.render_target_write_mask[r]);
+                rt[r] = buf;
+            }
+            if (b.alpha_to_coverage_enable)
+                coverage = ", alpha to coverage";
+        }
+    }
+    summary = "RT0 " + rt[0] + " | RT1 " + rt[1] + " | " + depth + coverage;
+    return rts + '\t' + depth + '\t' + rt[0] + '\t' + rt[1] + coverage;
+}
+
+// The forward pass's blending, for its fog (tools/patch_dxil.py
+// patch_forward_fog, FOG_*), by what it draws into. Into the scene colour
+// (R11G11B10_FLOAT): 1 dual source (src0 + src1 dst), 2 alpha, 3
+// premultiplied alpha, 4 additive. Into the refraction buffer (one
+// RGBA16F target, premultiplied: refraction offsets, blur and coverage, not
+// colour): 5, the fog fades them. 0 for anything else, which keeps the stock
+// shader (opaque: MSFS draws those before its clouds, whose fog covers them;
+// other buffers, which aren't colour).
+uint32_t forward_fog_mode(uint32_t count, const pipeline_subobject *subobjects)
+{
+    format rt0 = format::unknown;
+    uint32_t targets = 0;
+    for (uint32_t i = 0; i < count; ++i)
+        if (subobjects[i].type == pipeline_subobject_type::render_target_formats && subobjects[i].data != nullptr &&
+            subobjects[i].count > 0)
+        {
+            rt0 = static_cast<const format *>(subobjects[i].data)[0];
+            targets = subobjects[i].count;
+        }
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        if (subobjects[i].type != pipeline_subobject_type::blend_state || subobjects[i].data == nullptr)
+            continue;
+        const auto &b = *static_cast<const blend_desc *>(subobjects[i].data);
+        if (!b.blend_enable[0] || b.color_blend_op[0] != blend_op::add)
+            return 0;
+        const blend_factor src = b.source_color_blend_factor[0], dst = b.dest_color_blend_factor[0];
+        if (rt0 == format::r16g16b16a16_float && targets == 1)
+            return src == blend_factor::one && dst == blend_factor::one_minus_source_alpha ? 5 : 0;
+        if (rt0 != format::r11g11b10_float)
+            return 0;
+        if (src == blend_factor::one && dst == blend_factor::source1_color)
+            return 1;
+        if (src == blend_factor::source_alpha && dst == blend_factor::one_minus_source_alpha)
+            return 2;
+        if (src == blend_factor::one && dst == blend_factor::one_minus_source_alpha)
+            return 3;
+        if (dst == blend_factor::one && (src == blend_factor::one || src == blend_factor::source_alpha))
+            return 4;
+        return 0;
+    }
+    return 0;
+}
+
+// Every graphics pipeline with a pixel shader, once: graphics.tsv, and its
+// shader for the capture's draw log.
+void record_graphics(pipeline pipe, uint32_t crc, uint32_t count, const pipeline_subobject *subobjects)
+{
+    GraphicsShader ps;
+    ps.crc = crc;
+    const std::string fields = describe_output(count, subobjects, ps.blend);
+    {
+        const std::unique_lock lock(g_mutex);
+        if (const auto it = g_names.find(crc); it != g_names.end())
+            ps.entry = it->second;
+        if (!g_graphics.try_emplace(pipe.handle, ps).second)
+            return;  // (init_pipeline repeats for the same handle)
+    }
+    write_line(g_graphics_log, hex32(crc) + '\t' + (ps.entry.empty() ? "?" : ps.entry) + '\t' + hex64(pipe.handle) +
+               '\t' + fields);
+}
+
+// Two frames: MSFS records a frame's command lists across presents (and frame
+// generation presents twice per rendered frame), so one often caught a fragment.
+constexpr uint64_t kDrawLogFrames = 2;
+
+bool draw_log_on()
+{
+    const uint64_t first = g_draw_log_frame.load(std::memory_order_relaxed);
+    const uint64_t frame = g_frame.load(std::memory_order_relaxed);
+    return frame >= first && frame < first + kDrawLogFrames;
+}
+
+// A timestamp on the list now, for the draw log's GPU time: "#index", or "-" without one.
+std::string gpu_timestamp(command_list *cmd_list, CommandListState &state)
+{
+    if (g_timer_heap == nullptr || !state.timeable || cmd_list->get_device() != g_debug_device)
+        return "-";
+    const uint32_t index = g_timer_next.fetch_add(1, std::memory_order_relaxed);
+    if (index >= kGpuTimers)
+        return "-";
+    reinterpret_cast<ID3D12GraphicsCommandList *>(cmd_list->get_native())
+        ->EndQuery(g_timer_heap, D3D12_QUERY_TYPE_TIMESTAMP, index);
+    state.timers.push_back(index);
+    return '#' + std::to_string(index);
+}
+
+void log_draw(command_list *cmd_list, const std::string &what)
+{
+    auto *state = cmd_list->get_private_data<CommandListState>();
+    if (state == nullptr)
+        return;
+    GraphicsShader ps;
+    {
+        const std::shared_lock lock(g_mutex);
+        if (const auto it = g_graphics.find(state->graphics_any.handle); it != g_graphics.end())
+            ps = it->second;
+    }
+    std::string line = "draw\t" + hex64(reinterpret_cast<uintptr_t>(cmd_list)) + '\t' +
+                       std::to_string(state->draw_index++) + '\t' + what + '\t' + hex32(ps.crc) + '\t' +
+                       (ps.entry.empty() ? "?" : ps.entry) + '\t' + ps.blend + '\t' + gpu_timestamp(cmd_list, *state);
+    const std::lock_guard lock(g_draw_log_mutex);
+    if (g_draw_log.size() < kDrawLogMax)
+        g_draw_log.push_back(std::move(line));
+}
+
+void write_draw_log()
+{
+    std::vector<std::string> lines;
+    {
+        const std::lock_guard lock(g_draw_log_mutex);
+        lines.swap(g_draw_log);
+    }
+    // Each entry's GPU time: from its timestamp to the next one on its list (the next
+    // draw or dispatch, or the list's close), so what the list does in between (copies,
+    // clears, barriers) counts to the entry before it.
+    const uint32_t timers = std::min(g_timer_next.load(), kGpuTimers);
+    const uint64_t frequency = g_timer_frequency.load();
+    std::vector<uint64_t> ticks;
+    if (timers > 0 && frequency > 0 && g_debug_device != nullptr)
+    {
+        void *mapped = nullptr;
+        if (g_debug_device->map_buffer_region(g_timer_readback, 0, uint64_t(timers) * 8, map_access::read_only,
+                                              &mapped) && mapped)
+        {
+            ticks.assign(static_cast<const uint64_t *>(mapped), static_cast<const uint64_t *>(mapped) + timers);
+            g_debug_device->unmap_buffer_region(g_timer_readback);
+        }
+    }
+    std::vector<double> micros(lines.size(), -1.0);
+    std::vector<uint64_t> at(lines.size(), 0);  // the timestamps of the entries timed (both ends)
+    std::unordered_map<std::string, std::pair<size_t, uint64_t>> open;  // list -> its last timed entry
+    double total = 0.0;
+    for (size_t i = 0; i < lines.size() && !ticks.empty(); ++i)
+    {
+        const size_t hash = lines[i].rfind("\t#");
+        if (hash == std::string::npos)
+            continue;
+        const uint32_t index = uint32_t(std::stoul(lines[i].substr(hash + 2)));
+        const size_t tab = lines[i].find('\t');
+        const std::string list = lines[i].substr(tab + 1, lines[i].find('\t', tab + 1) - tab - 1);
+        const uint64_t t = index < ticks.size() ? ticks[index] : 0;
+        if (const auto it = open.find(list); it != open.end())
+        {
+            const auto [before, t0] = it->second;
+            if (t0 != 0 && t >= t0 && t - t0 < frequency)  // (under a second: else not run yet)
+            {
+                total += micros[before] = double(t - t0) * 1e6 / double(frequency);
+                at[before] = t0;
+                at[i] = t;
+            }
+        }
+        if (lines[i].rfind("close\t", 0) == 0)
+            open.erase(list);
+        else
+            open[list] = {i, t};
+    }
+    // ... and when, from the first: the GPU's timeline, with its idle gaps between the lists
+    uint64_t first = UINT64_MAX, last = 0;
+    for (const uint64_t t : at)
+        if (t != 0)
+            first = std::min(first, t), last = std::max(last, t);
+    const fs::path dir = g_data_dir / "logs" / "captures";
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    std::ofstream file(dir / (std::to_string(g_draw_log_id) + "_draws.tsv"));
+    file << "kind\tcommand list\tindex\twhat\tcrc32\tentry\tblending and depth\tgpu us\tgpu at us\n";
+    for (size_t i = 0; i < lines.size(); ++i)
+    {
+        const size_t hash = lines[i].rfind("\t#");
+        if (hash == std::string::npos)
+        {
+            file << lines[i] << '\n';
+            continue;
+        }
+        char us[32] = "-", when[32] = "-";
+        if (micros[i] >= 0.0)
+            snprintf(us, sizeof(us), "%.1f", micros[i]);
+        if (at[i] != 0)
+            snprintf(when, sizeof(when), "%.1f", double(at[i] - first) * 1e6 / double(frequency));
+        file << lines[i].substr(0, hash) << '\t' << us << '\t' << when << '\n';
+    }
+    char timing[160] = "no GPU times (no timestamps, or not read back)";
+    if (!ticks.empty() && last > first)
+        snprintf(timing, sizeof(timing), "%u GPU timestamps, %.2f ms of GPU time between them over %.2f ms", timers,
+                 total / 1000.0, double(last - first) * 1e3 / double(frequency));
+    else if (!ticks.empty())
+        snprintf(timing, sizeof(timing), "%u GPU timestamps, %.2f ms of GPU time between them", timers, total / 1000.0);
+    event(reshade::log::level::info, "capture " + std::to_string(g_draw_log_id) + ": " +
+          std::to_string(lines.size()) + " draws and command list executions logged; " + timing);
+}
+
 std::string describe_param(const LayoutParam &param)
 {
     std::string out;
@@ -711,7 +1041,8 @@ void retire(device *dev, pipeline pipe)
 
 void reload(device *dev)
 {
-    auto fresh = load_replacements();
+    std::unordered_map<uint32_t, fs::path> lazy;
+    auto fresh = load_replacements(lazy);
     const auto tunables = load_tunables();
     const auto radar_tunables = load_tunables('R');
     const auto cloud_tunables = load_tunables<kCloudTunableCount>('C');
@@ -729,6 +1060,7 @@ void reload(device *dev)
     {
         const std::unique_lock lock(g_mutex);
         g_replacements = fresh;
+        g_lazy_replacements = std::move(lazy);
         g_tunables = tunables;
         g_radar_tunables = radar_tunables;
         g_cloud_tunables = cloud_tunables;
@@ -924,7 +1256,7 @@ bool on_create_pipeline_layout(device *, uint32_t &param_count, pipeline_layout_
     debug.type = descriptor_type::buffer_unordered_access_view;
     extended.emplace_back(debug);
 
-    // Compute also gets the cloud tunables: 6 + 16 + 2 + 32 = 56 dwords.
+    // Compute also gets the cloud tunables: 6 + 16 + 2 + 36 = 60 dwords.
     if (compute)
     {
         constant_range cloud = {};
@@ -935,7 +1267,7 @@ bool on_create_pipeline_layout(device *, uint32_t &param_count, pipeline_layout_
         extended.emplace_back(cloud);
 
         // ... and MSFS's ray-tracing scene (its TLAS) as a root SRV, t0 space50,
-        // for the aircraft's shadow with Raytraced Shadows: 58 of the 64 dwords
+        // for the aircraft's shadow with Raytraced Shadows: 62 of the 64 dwords
         descriptor_range tlas = {};
         tlas.dx_register_space = kModSpace;
         tlas.count = 1;
@@ -977,9 +1309,15 @@ void push_mod_args(command_list *cmd_list, const TrackedPipeline &info, const st
         if (info.radar)
             p.debug_capture |= 2;  // R0..R13 in the tunables (the replica runs its model only then)
         // bit 6: the debug buffer (20 MB) is bound; bit 9: its station table has
-        // the haze rows (the patched ps_deferredRendering reads them then)
+        // the haze rows (the patched ps_deferredRendering reads them then);
+        // bits 10-12: the forward pass's blending, for its fog (forward_fog_mode);
+        // bit 13: tint what it fogs (C35 > 0, developers; C35 < 0: the mode left
+        // 0, no fog); bits 16-31: the frame, as for compute (the fog record's age)
         if (can_capture)
-            p.debug_capture |= 64 | (g_haze_rows.load(std::memory_order_relaxed) ? kHazeFieldBit : 0);
+            p.debug_capture |= 64 | (g_haze_rows.load(std::memory_order_relaxed) ? kHazeFieldBit : 0) |
+                               ((g_forward_fog_off.load(std::memory_order_relaxed) ? 0 : info.fog_mode) << 10) |
+                               (g_fog_tint.load(std::memory_order_relaxed) ? 1u << 13 : 0) |
+                               ((uint32_t(g_frame.load(std::memory_order_relaxed)) & 0xFFFF) << 16);
         p.frame = g_capture_stamp.load(std::memory_order_relaxed);
         cmd_list->push_constants(shader_stage::all_graphics, info.layout, info.mod_param, 0, sizeof(p) / 4, &p);
         if (can_capture)
@@ -1429,6 +1767,72 @@ void write_shadow_capture(std::ofstream &file, const uint8_t *data, const fs::pa
     }
 }
 
+// The fog record for see-through surfaces (kFogRegion), as the readback has it.
+void write_fog_record(std::ofstream &file, const uint8_t *data)
+{
+    file << "\nFog for see-through surfaces (the cloud renderer's first march step at 4 screen points; frame "
+         << (g_frame.load() & 0xFFFF) << " now):\n";
+    for (uint32_t p = 0; p < kFogPoints; ++p)
+    {
+        const auto *f = reinterpret_cast<const float *>(data + kFogRegion + kFogPointBytes * p);
+        uint32_t stamp;
+        std::memcpy(&stamp, data + kFogRegion + kFogPointBytes * p + 16, sizeof(stamp));
+        char line[200];
+        if ((stamp & 0x10000) == 0)
+            snprintf(line, sizeof(line), "  point %u: not written (no cloud there yet)\n", p);
+        else
+            snprintf(line, sizeof(line),
+                     "  point %u: extinction %.4g /m (visibility %.0f m), radiance %.4g %.4g %.4g, frame %u\n", p,
+                     f[0], f[0] > 0.0f ? 3.0f / f[0] : 0.0f, f[1], f[2], f[3], stamp & 0xFFFF);
+        file << line;
+    }
+    // the merge's factor from the clouds' colour to the scene's (patch_dxil.py FOG_SCALE)
+    float scale;
+    uint32_t stamp;
+    std::memcpy(&scale, data + kFogScale, sizeof(scale));
+    std::memcpy(&stamp, data + kFogScale + 4, sizeof(stamp));
+    char line[200];
+    if (stamp & 0x10000)
+        snprintf(line, sizeof(line), "  the merge's factor to the scene: %.6g, frame %u\n", scale, stamp & 0xFFFF);
+    else
+        snprintf(line, sizeof(line), "  the merge's factor to the scene: not written\n");
+    file << line;
+    // the merge's fog colour grid: its range, and the cells that aren't finite
+    const auto *cells = reinterpret_cast<const float *>(data + kFogGrid);
+    uint32_t bad = 0, cloudy = 0, finite = 0;
+    float lo = 1e30f, hi = -1e30f, alpha_sum = 0.0f;
+    for (uint32_t i = 0; i < kFogGridX * kFogGridY; ++i)
+    {
+        const float *c = cells + 4 * i;
+        if (!std::isfinite(c[0]) || !std::isfinite(c[1]) || !std::isfinite(c[2]) || !std::isfinite(c[3]))
+        {
+            ++bad;
+            continue;
+        }
+        ++finite;
+        alpha_sum += c[3];
+        if (c[3] < 0.05f)
+            continue;
+        ++cloudy;
+        lo = std::min({lo, c[0], c[1], c[2]});
+        hi = std::max({hi, c[0], c[1], c[2]});
+    }
+    snprintf(line, sizeof(line),
+             "  the merge's fog colour grid (%ux%u): %u cell(s) not finite, %u with cloud enough (alpha >= 0.05), "
+             "colour %.4g .. %.4g, mean alpha %.3f\n",
+             kFogGridX, kFogGridY, bad, cloudy, cloudy ? lo : 0.0f, cloudy ? hi : 0.0f,
+             finite ? alpha_sum / float(finite) : 0.0f);
+    file << line;
+    for (const auto &[x, y] : {std::pair{4u, 3u}, std::pair{27u, 3u}, std::pair{16u, 9u}, std::pair{4u, 14u},
+                               std::pair{27u, 14u}})
+    {
+        const float *c = cells + 4 * (y * kFogGridX + x);
+        snprintf(line, sizeof(line), "    cell (%u, %u): colour %.4g %.4g %.4g, alpha %.3f\n", x, y, c[0], c[1],
+                 c[2], c[3]);
+        file << line;
+    }
+}
+
 void write_capture(const uint8_t *data)
 {
     const fs::path dir = g_data_dir / "logs" / "captures";
@@ -1514,6 +1918,7 @@ void write_capture(const uint8_t *data)
     write_output_captures(file, data, dir);
     write_shadow_window(file, data, dir);
     write_global_dump(file, data, dir);
+    write_fog_record(file, data);
     write_cloud_capture(file, data, dir);
     event(reshade::log::level::info, "capture " + std::to_string(g_capture_id) + " written: " + path.string());
 }
@@ -1618,6 +2023,46 @@ void upload_anchor_table(effect_runtime *runtime, uint64_t frame)
     g_haze_rows.store(haze_word == anchor::kHazeMagic, std::memory_order_relaxed);
 }
 
+// The next capture's number (captures and GPU times count together).
+uint32_t next_capture_id()
+{
+    if (g_capture_id == 0)
+    {
+        // continue after the captures already on disk, so a new session doesn't overwrite them
+        std::error_code ec;
+        for (const auto &f : fs::directory_iterator(g_data_dir / "logs" / "captures", ec))
+        {
+            const std::string name = f.path().filename().string();
+            if (name.ends_with("_sky_atmosphere.txt") || name.ends_with("_draws.tsv"))
+                g_capture_id = std::max(g_capture_id, uint32_t(std::strtoul(name.c_str(), nullptr, 10)));
+        }
+    }
+    return ++g_capture_id;
+}
+
+// Ctrl+Shift+F12: the draw log alone, for its GPU times. No capture is armed, so no
+// replacement writes its capture data in the frames timed; with F9 off they're stock.
+void request_gpu_times(uint64_t frame)
+{
+    if (g_timer_heap == nullptr)
+    {
+        event(reshade::log::level::warning, "GPU times unavailable: no timestamps (see the start of this log)");
+        return;
+    }
+    if (const uint64_t first = g_draw_log_frame.load();
+        first != UINT64_MAX && frame < first + kDrawLogFrames + kGpuTimerDelayFrames)
+        return;  // (one draw log at a time)
+    {
+        const std::lock_guard lock(g_draw_log_mutex);
+        g_draw_log.clear();
+    }
+    g_draw_log_id = next_capture_id();
+    g_timer_next = 0;
+    g_draw_log_frame = frame + 1;
+    event(reshade::log::level::info, "GPU times " + std::to_string(g_draw_log_id) + ": the next frames, " +
+          (g_enabled ? "the mod's" : "stock (replacements are OFF)"));
+}
+
 void request_capture(uint64_t frame)
 {
     if (g_debug_buffer.handle == 0)
@@ -1627,18 +2072,7 @@ void request_capture(uint64_t frame)
     }
     if (g_capture.load() != Capture::idle)
         return;
-    if (g_capture_id == 0)
-    {
-        // continue after the captures already on disk, so a new session doesn't overwrite them
-        std::error_code ec;
-        for (const auto &f : fs::directory_iterator(g_data_dir / "logs" / "captures", ec))
-        {
-            const std::string name = f.path().filename().string();
-            if (name.size() > 18 && name.ends_with("_sky_atmosphere.txt"))
-                g_capture_id = std::max(g_capture_id, uint32_t(std::strtoul(name.c_str(), nullptr, 10)));
-        }
-    }
-    ++g_capture_id;
+    next_capture_id();
     g_capture_stamp = g_capture_id;
     g_capture_dispatches = 0;
     g_capture_radar_draws = 0;
@@ -1649,6 +2083,13 @@ void request_capture(uint64_t frame)
         const std::lock_guard lock(g_seen_mutex);
         g_capture_order.clear();
     }
+    {
+        const std::lock_guard lock(g_draw_log_mutex);
+        g_draw_log.clear();
+    }
+    g_draw_log_id = g_capture_id;
+    g_timer_next = 0;
+    g_draw_log_frame = frame + 1;  // the next whole frames (kDrawLogFrames)
     g_capture = Capture::armed;
     event(reshade::log::level::info, "capture " + std::to_string(g_capture_id) + " armed" +
           (g_enabled ? "" : " (replacements are OFF; it completes once they're back on)"));
@@ -1706,6 +2147,17 @@ void create_debug_resources(device *dev)
     if (failed == nullptr)
     {
         g_debug_device = dev;
+        // the draw log's GPU times: without them the log has none
+        const D3D12_QUERY_HEAP_DESC timers = {D3D12_QUERY_HEAP_TYPE_TIMESTAMP, kGpuTimers, 0};
+        if (!dev->create_resource(resource_desc(uint64_t(kGpuTimers) * 8, memory_heap::readback,
+                                                resource_usage::copy_dest),
+                                  nullptr, resource_usage::copy_dest, &g_timer_readback) ||
+            FAILED(reinterpret_cast<ID3D12Device *>(dev->get_native())
+                       ->CreateQueryHeap(&timers, IID_PPV_ARGS(&g_timer_heap))))
+        {
+            g_timer_heap = nullptr;
+            event(reshade::log::level::warning, "failed to create the GPU timestamps; the draw log has no GPU times");
+        }
         event(reshade::log::level::info, "debug resources created");
         return;
     }
@@ -1762,11 +2214,21 @@ void on_destroy_device(device *dev)
         dev->destroy_resource(std::exchange(g_readback, resource{}));
     if (g_anchor_upload.handle != 0)
         dev->destroy_resource(std::exchange(g_anchor_upload, resource{}));
+    if (g_timer_heap != nullptr)
+        std::exchange(g_timer_heap, nullptr)->Release();
+    if (g_timer_readback.handle != 0)
+        dev->destroy_resource(std::exchange(g_timer_readback, resource{}));
 }
 
 void on_init_command_list(command_list *cmd_list)
 {
-    cmd_list->create_private_data<CommandListState>();
+    auto *state = cmd_list->create_private_data<CommandListState>();
+    // (timestamps only where D3D12 allows them: not in bundles or copy lists)
+    if (cmd_list->get_device()->get_api() == device_api::d3d12)
+    {
+        const D3D12_COMMAND_LIST_TYPE type = reinterpret_cast<ID3D12CommandList *>(cmd_list->get_native())->GetType();
+        state->timeable = type == D3D12_COMMAND_LIST_TYPE_DIRECT || type == D3D12_COMMAND_LIST_TYPE_COMPUTE;
+    }
 }
 
 void on_destroy_command_list(command_list *cmd_list)
@@ -1777,7 +2239,44 @@ void on_destroy_command_list(command_list *cmd_list)
 void on_reset_command_list(command_list *cmd_list)
 {
     if (auto *state = cmd_list->get_private_data<CommandListState>())
+    {
+        const bool timeable = state->timeable;
         *state = {};
+        state->timeable = timeable;
+    }
+}
+
+// A list with draw log timestamps: one more at its end, then all of them resolved into
+// the readback, contiguous runs at a time.
+void on_close_command_list(command_list *cmd_list)
+{
+    auto *state = cmd_list->get_private_data<CommandListState>();
+    if (state == nullptr || state->timers.empty() || g_timer_heap == nullptr)
+        return;
+    const std::string stamp = gpu_timestamp(cmd_list, *state);
+    const uint64_t first = g_draw_log_frame.load(std::memory_order_relaxed);
+    const uint64_t frame = g_frame.load(std::memory_order_relaxed);
+    if (stamp != "-" && first != UINT64_MAX && frame < first + kDrawLogFrames + kGpuTimerDelayFrames)
+    {
+        const std::lock_guard lock(g_draw_log_mutex);
+        if (g_draw_log.size() < kDrawLogMax)
+            g_draw_log.push_back("close\t" + hex64(reinterpret_cast<uintptr_t>(cmd_list)) + "\t-\t-\t-\t-\t-\t" +
+                                 stamp);
+    }
+    auto *native = reinterpret_cast<ID3D12GraphicsCommandList *>(cmd_list->get_native());
+    auto *readback = reinterpret_cast<ID3D12Resource *>(g_timer_readback.handle);
+    std::vector<uint32_t> &timers = state->timers;
+    std::sort(timers.begin(), timers.end());
+    for (size_t i = 0; i < timers.size();)
+    {
+        size_t j = i + 1;
+        while (j < timers.size() && timers[j] == timers[j - 1] + 1)
+            ++j;
+        native->ResolveQueryData(g_timer_heap, D3D12_QUERY_TYPE_TIMESTAMP, timers[i], UINT(j - i), readback,
+                                 uint64_t(timers[i]) * 8);
+        i = j;
+    }
+    timers.clear();
 }
 
 void on_init_pipeline_layout(device *dev, uint32_t count, const pipeline_layout_param *params, pipeline_layout layout)
@@ -1866,6 +2365,13 @@ void on_init_pipeline(device *dev, pipeline_layout layout, uint32_t count, const
             pixel_index = i;
         }
     }
+    if (!is_compute && pixel_index != UINT32_MAX)
+        record_graphics(pipe, pixel_crc, count, subobjects);
+    if (is_compute)
+    {
+        const std::unique_lock lock(g_mutex);
+        g_compute_shaders[pipe.handle] = compute_crc;
+    }
 
     TrackedPipeline info;
     info.crc = is_compute ? compute_crc : pixel_crc;
@@ -1873,6 +2379,7 @@ void on_init_pipeline(device *dev, pipeline_layout layout, uint32_t count, const
     info.graphics = !is_compute;
     info.dev = dev;
     std::vector<uint8_t> code;
+    fs::path lazy_file;
     {
         const std::shared_lock lock(g_mutex);
         if (g_pipelines.contains(pipe.handle))  // init_pipeline repeats for the same handle
@@ -1887,9 +2394,29 @@ void on_init_pipeline(device *dev, pipeline_layout layout, uint32_t count, const
             info.tlas_param = it->second;
         if (const auto it = g_replacements.find(info.crc); it != g_replacements.end())
             code = it->second;
+        else if (const auto lazy = g_lazy_replacements.find(info.crc); lazy != g_lazy_replacements.end())
+            lazy_file = lazy->second;
     }
     info.watched = kWatchedEntries.contains(info.entry);
     info.radar = info.entry == "ph_rain_radar_horz";
+    // The forward pass, particles and light points: replaced only where they
+    // blend into the scene colour or the refraction buffer (their fog depends
+    // on how), ph_base's replacement read from disk the first time a pipeline
+    // needs it
+    if (info.graphics && kForwardFogEntries.contains(info.entry))
+    {
+        info.fog_mode = info.mod_param != UINT32_MAX ? forward_fog_mode(count, subobjects) : 0;
+        if (info.fog_mode == 0)
+        {
+            code.clear();
+        }
+        else if (code.empty() && !lazy_file.empty())
+        {
+            code = read_file(lazy_file);
+            const std::unique_lock lock(g_mutex);
+            g_replacements.try_emplace(info.crc, code);
+        }
+    }
     if (info.graphics && (pixel_index == UINT32_MAX || (code.empty() && !info.watched)))
         return;  // graphics pipelines are tracked only when replaced or watched
 
@@ -1922,6 +2449,7 @@ void on_destroy_pipeline(device *dev, pipeline pipe)
     pipeline replacement = {};
     {
         const std::unique_lock lock(g_mutex);
+        g_graphics.erase(pipe.handle);
         const auto it = g_pipelines.find(pipe.handle);
         if (it == g_pipelines.end())
             return;
@@ -1938,7 +2466,7 @@ void on_bind_pipeline(command_list *cmd_list, pipeline_stage stages, pipeline pi
 {
     pipeline replacement = {};
     bool graphics = true;  // every compute pipeline is tracked, so an unknown one is graphics
-    bool tracked = false;
+    bool tracked = false, shaded = false;
     {
         const std::shared_lock lock(g_mutex);
         if (const auto it = g_pipelines.find(pipe.handle); it != g_pipelines.end())
@@ -1947,13 +2475,19 @@ void on_bind_pipeline(command_list *cmd_list, pipeline_stage stages, pipeline pi
             graphics = it->second.graphics;
             replacement = it->second.replacement;
         }
+        shaded = g_graphics.contains(pipe.handle);
     }
     if (auto *state = cmd_list->get_private_data<CommandListState>())
     {
         if (graphics)
+        {
             state->graphics = tracked ? pipe : pipeline{};
+            state->graphics_any = shaded ? pipe : pipeline{};
+        }
         else
+        {
             state->compute = pipe;
+        }
     }
     if (replacement.handle != 0 && g_enabled.load(std::memory_order_relaxed))
         cmd_list->bind_pipeline(stages, replacement);
@@ -1969,7 +2503,7 @@ void before_dispatch(command_list *cmd_list, const std::string &size)
 
     TrackedPipeline info;
     std::array<float, kTunableCount> tunables;
-    std::array<float, kCloudTunableCount> cloud;
+    std::array<float, kCloudRootConstants> cloud = {};  // (the spare ones 0)
     {
         const std::shared_lock lock(g_mutex);
         const auto it = g_pipelines.find(state->compute.handle);
@@ -1977,7 +2511,7 @@ void before_dispatch(command_list *cmd_list, const std::string &size)
             return;
         info = it->second;
         tunables = g_effective_tunables;
-        cloud = g_effective_cloud_tunables;
+        std::copy(g_effective_cloud_tunables.begin(), g_effective_cloud_tunables.end(), cloud.begin());
     }
     if (info.watched)
     {
@@ -2100,8 +2634,35 @@ bool on_dispatch_rays(command_list *cmd_list, resource, uint64_t, uint64_t, reso
     return false;
 }
 
+// Every dispatch in the capture's draw log (the frame's order, compute passes included).
+void log_dispatch_draw_log(command_list *cmd_list, const std::string &what)
+{
+    if (!draw_log_on())
+        return;
+    auto *state = cmd_list->get_private_data<CommandListState>();
+    if (state == nullptr)
+        return;
+    uint32_t crc = 0;
+    std::string entry = "?";
+    {
+        const std::shared_lock lock(g_mutex);
+        if (const auto it = g_compute_shaders.find(state->compute.handle); it != g_compute_shaders.end())
+            crc = it->second;
+        if (const auto it = g_names.find(crc); it != g_names.end())
+            entry = it->second;
+    }
+    std::string line = "dispatch\t" + hex64(reinterpret_cast<uintptr_t>(cmd_list)) + '\t' +
+                       std::to_string(state->draw_index++) + '\t' + what + '\t' + hex32(crc) + '\t' + entry + "\t-\t" +
+                       gpu_timestamp(cmd_list, *state);
+    const std::lock_guard lock(g_draw_log_mutex);
+    if (g_draw_log.size() < kDrawLogMax)
+        g_draw_log.push_back(std::move(line));
+}
+
 bool on_dispatch(command_list *cmd_list, uint32_t x, uint32_t y, uint32_t z)
 {
+    log_dispatch_draw_log(cmd_list, std::to_string(x) + " x " + std::to_string(y) + " x " + std::to_string(z) +
+                                        " groups");
     before_dispatch(cmd_list, std::to_string(x) + '\t' + std::to_string(y) + '\t' + std::to_string(z));
     return false;
 }
@@ -2130,9 +2691,13 @@ void before_draw(command_list *cmd_list, const std::string &size)
         tunables = info.radar ? g_effective_radar_tunables : g_effective_tunables;  // R0..R13 for the radar
     }
     // The viewport gives the target size: for the radar, the display's resolution.
-    char viewport[48];
-    snprintf(viewport, sizeof(viewport), ", viewport %.0fx%.0f", state->viewport_width, state->viewport_height);
-    log_dispatch(info, size + viewport);
+    // (Not the forward pass's draws: every mesh is a new size.)
+    if (info.fog_mode == 0)
+    {
+        char viewport[48];
+        snprintf(viewport, sizeof(viewport), ", viewport %.0fx%.0f", state->viewport_width, state->viewport_height);
+        log_dispatch(info, size + viewport);
+    }
     {
         const std::lock_guard lock(g_seen_mutex);
         ++g_dispatch_counts[info.entry];
@@ -2150,6 +2715,8 @@ void before_draw(command_list *cmd_list, const std::string &size)
 
 bool on_draw(command_list *cmd_list, uint32_t vertices, uint32_t instances, uint32_t, uint32_t)
 {
+    if (draw_log_on())
+        log_draw(cmd_list, std::to_string(vertices) + " vertices x" + std::to_string(instances));
     if (tracked_graphics_bound(cmd_list))
         before_draw(cmd_list, "draw\t" + std::to_string(vertices) + " vertices\t" + std::to_string(instances) +
                     " instances");
@@ -2158,6 +2725,8 @@ bool on_draw(command_list *cmd_list, uint32_t vertices, uint32_t instances, uint
 
 bool on_draw_indexed(command_list *cmd_list, uint32_t indices, uint32_t instances, uint32_t, int32_t, uint32_t)
 {
+    if (draw_log_on())
+        log_draw(cmd_list, std::to_string(indices) + " indices x" + std::to_string(instances));
     if (tracked_graphics_bound(cmd_list))
         before_draw(cmd_list, "draw_indexed\t" + std::to_string(indices) + " indices\t" +
                     std::to_string(instances) + " instances");
@@ -2168,11 +2737,31 @@ bool on_draw_or_dispatch_indirect(command_list *cmd_list, indirect_command type,
                                   uint32_t)
 {
     if (type == indirect_command::dispatch)
+    {
+        log_dispatch_draw_log(cmd_list, "indirect x" + std::to_string(count));
         before_dispatch(cmd_list, "indirect\tx" + std::to_string(count) + '\t');
-    else if ((type == indirect_command::draw || type == indirect_command::draw_indexed) &&
-             tracked_graphics_bound(cmd_list))
-        before_draw(cmd_list, "draw_indirect\tx" + std::to_string(count) + '\t');
+    }
+    else if (type == indirect_command::draw || type == indirect_command::draw_indexed)
+    {
+        if (draw_log_on())
+            log_draw(cmd_list, "indirect x" + std::to_string(count));
+        if (tracked_graphics_bound(cmd_list))
+            before_draw(cmd_list, "draw_indirect\tx" + std::to_string(count) + '\t');
+    }
     return false;
+}
+
+void on_execute_command_list(command_queue *queue, command_list *cmd_list)
+{
+    if (!draw_log_on())
+        return;
+    if (g_timer_frequency.load(std::memory_order_relaxed) == 0 &&
+        (queue->get_type() & command_queue_type::graphics) == command_queue_type::graphics)
+        g_timer_frequency = queue->get_timestamp_frequency();
+    const std::lock_guard lock(g_draw_log_mutex);
+    if (g_draw_log.size() < kDrawLogMax)
+        g_draw_log.push_back("execute\t" + hex64(reinterpret_cast<uintptr_t>(cmd_list)) + "\t-\tqueue " +
+                             hex64(reinterpret_cast<uintptr_t>(queue)));
 }
 
 // Once per frame: tunables.ini with the weather feed's smoothed values blended
@@ -2218,6 +2807,8 @@ void update_effective_tunables()
     // METAR anchoring: C20 (strength) and C21 (radius) are the ini's; the
     // stations go to the generator as a table (upload_anchor_table).
     g_storms_off.store(!(cloud[32] > 0.0f), std::memory_order_relaxed);
+    g_fog_tint.store(cloud[35] > 0.0f, std::memory_order_relaxed);
+    g_forward_fog_off.store(cloud[35] < 0.0f, std::memory_order_relaxed);
 
     const std::unique_lock lock(g_mutex);
     g_effective_tunables = effective;
@@ -2312,6 +2903,10 @@ bool sync_settings(bool reload_key)
 void on_present(effect_runtime *runtime)
 {
     const uint64_t frame = ++g_frame;
+    // (once the GPU has run the logged frames: their GPU times)
+    if (const uint64_t first = g_draw_log_frame.load();
+        first != UINT64_MAX && frame == first + kDrawLogFrames + kGpuTimerDelayFrames)
+        write_draw_log();
     // (once per game device: again if the game ever recreates its device)
     static device *debug_tried = nullptr;
     if (g_debug_device == nullptr && runtime->get_device() != debug_tried)
@@ -2330,6 +2925,8 @@ void on_present(effect_runtime *runtime)
         reload(runtime->get_device());
     if ((modifiers && runtime->is_key_pressed(VK_F11)) || g_auto_capture_due.exchange(false))
         request_capture(frame);
+    if (modifiers && runtime->is_key_pressed(VK_F12))
+        request_gpu_times(frame);
     advance_capture(runtime, frame);
     if (frame % kDispatchRateFrames == 0)
         log_dispatch_rates(frame);
@@ -2354,6 +2951,8 @@ void open_logs()
     g_create_log << "crc32\tlayout\n";
     g_texture_log.open(dir / "textures3d.tsv", std::ios::trunc);
     g_texture_log << "width\theight\tdepth\tlevels\tdxgi_format\tusage\theap\n";
+    g_graphics_log.open(dir / "graphics.tsv", std::ios::trunc);
+    g_graphics_log << "pixel shader crc32\tentry\tpipeline\trender targets (DXGI formats)\tdepth\tRT0 blending\tRT1 blending\n";
     g_rate_log.open(dir / "dispatch_rates.log", std::ios::trunc);
 }
 } // namespace
@@ -2368,7 +2967,7 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE re
     reshade::get_config_value(nullptr, "ATMOSPHEREMOD", "InjectGraphicsRootSignature", g_inject_graphics);
     open_logs();
     load_names();
-    g_replacements = load_replacements();
+    g_replacements = load_replacements(g_lazy_replacements);
     g_tunables = load_tunables();
     g_ozone_setting = load_tunables<kTunableCount + 1>()[kTunableCount];  // T14
     weather::set_haze_field(load_tunable('T', 15, 1.0f) > 0.0f);
@@ -2384,6 +2983,7 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE re
     reshade::register_event<reshade::addon_event::init_command_list>(on_init_command_list);
     reshade::register_event<reshade::addon_event::destroy_command_list>(on_destroy_command_list);
     reshade::register_event<reshade::addon_event::reset_command_list>(on_reset_command_list);
+    reshade::register_event<reshade::addon_event::close_command_list>(on_close_command_list);
     reshade::register_event<reshade::addon_event::create_pipeline_layout>(on_create_pipeline_layout);
     reshade::register_event<reshade::addon_event::init_pipeline_layout>(on_init_pipeline_layout);
     reshade::register_event<reshade::addon_event::destroy_pipeline_layout>(on_destroy_pipeline_layout);
@@ -2399,6 +2999,7 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE re
     reshade::register_event<reshade::addon_event::draw>(on_draw);
     reshade::register_event<reshade::addon_event::draw_indexed>(on_draw_indexed);
     reshade::register_event<reshade::addon_event::draw_or_dispatch_indirect>(on_draw_or_dispatch_indirect);
+    reshade::register_event<reshade::addon_event::execute_command_list>(on_execute_command_list);
     reshade::register_event<reshade::addon_event::reshade_present>(on_present);
 
     event(reshade::log::level::info, "data dir " + g_data_dir.string() + ", " + std::to_string(g_names.size()) +

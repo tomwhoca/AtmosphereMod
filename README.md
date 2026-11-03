@@ -407,6 +407,40 @@ What it can do:
     are see-through and the sun glows through an overcast.
   - The mod makes low clouds and cumulus solid from the base up, without
     making them darker.
+- **Inside a cloud** (`C33`):
+  - MSFS's clouds are so thin inside that you can see for hundreds of metres
+    in them, and the wings never fade into the cloud. In real clouds you see
+    about 20–150 m.
+  - Around your aircraft, the mod gives liquid clouds a real cloud's density:
+    the wingtips fade into the cloud, and in a dense one they disappear. It
+    takes the cloud's own light, so the fog is white in a bright cloud and
+    grey in a dark one.
+  - It applies within about 100 m of the camera and fades out by 300 m, so
+    clouds seen from farther away keep their look, whatever `C16`. The
+    cockpit itself stays clear, and ice clouds (cirrus) stay thin, as real
+    ones are.
+  - It starts 25 m inside the cloud and is full from 75 m in. A cloud's outer
+    layer stays as MSFS draws it and veils the fog behind it, so skimming a
+    cloud top or passing a cloud's edge doesn't break the fog into bands and
+    blocks (MSFS draws its clouds at a reduced resolution, and in steps of
+    20 m near the aircraft).
+  - `C33` is the visibility inside a dense cloud, in metres (40 by default;
+    thinner parts of a cloud allow more); 0 turns it off.
+  - **Structure** (`C34`): the sim's clouds are almost even inside, so the
+    fog has patches of denser and thinner cloud, fixed to the ground, that
+    come at you and pass by as you fly. Each patch is shaded by the cloud
+    toward the sun, so thinner parts are brighter and denser ones darker,
+    which is what makes them show. 0 gives an even fog.
+  - **See-through parts and lights**, such as windows, engine fans,
+    propeller discs, exhaust and smoke, and the aircraft's, runway and city
+    lights, get the same fog. MSFS draws them after its clouds, so the mod
+    fogs them separately, by their distance, in the colour of the fog
+    around them: they fade into the cloud with the rest of the aircraft,
+    and lights dim. (MSFS's own fog leaves them too clear: it only fades
+    them by a coarse estimate of the cloud in front.) For this the installer
+    patches the sim's forward, particle and light shaders too, about 2,800
+    variants (around 115 MB in `%LOCALAPPDATA%\AtmosphereMod`); the add-on
+    loads only the ones the sim uses.
 - **Cloud types** (`C23`–`C27`, live weather). Real clouds aren't all equally
   solid: cumulus are dense with crisp edges, while stratiform clouds hold less
   water, spread more evenly, and have softer edges.
@@ -669,6 +703,7 @@ ones you're most likely to touch:
 | `C9` | glory strength (0 = off) |
 | `C12` | darkness of your aircraft's shadow on the clouds (0 = off) |
 | `C16`, `C17` | cloud thickness (0 = the sim's) and how solid the bases are |
+| `C33`, `C34` | visibility inside clouds, around your aircraft (m; 0 = the sim's), and its structure |
 | `C19` | thickness of high, icy clouds (cirrus) |
 | `C20`, `C21` | METAR anchoring: strength (0 = off) and each station's radius (km) |
 | `C23` | cloud types: 0 = every cloud like cumulus, 1 = softer stratiform decks |

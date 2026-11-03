@@ -972,6 +972,17 @@ def check_towers(stock, patched_p, tex, check):
     worst, columns, slices, skipped, n_towers, worst_share, flat = 0.0, 0, 0, 0, 0, 0.0, 0
     worst_cov, covered, stored = 0.0, 0, 0
     worst_mark, marked = 0.0, 0
+    # the skip (CB_TOWERS_SKIP: the shapes only with a cell around the column) against computing
+    # them in every column, as before: the same volume and renderer values, bit for bit
+    keep = P.CB_TOWERS_SKIP
+    P.CB_TOWERS_SKIP = False
+    try:
+        always_p = Prog(P.patch_cloud_gen_capture(stock)[0])
+    finally:
+        P.CB_TOWERS_SKIP = keep
+    go = re.search(r"br i1 (\S+), label %mod\.cbg\.go,", P.patch_cloud_gen_capture(stock)[0])[1]
+    renderer = [f"%mod.cb.ty{k}" for k in range(P.WEATHER_SLICES)] + ["%mod.cb.ccov", "%mod.cb.mark", "%mod.cb.mbase"]
+    skips = [0, 0]  # (columns that skipped, that didn't)
     seen = []
     for tx in range(16, 500, 23):
         for ty in range(20, 500, 37):
@@ -979,6 +990,13 @@ def check_towers(stock, patched_p, tex, check):
             out = m.run((tx, ty))
             if len(out) != 32:
                 continue  # outside the disc
+            m_all = Machine(always_p, cb, tex_r, bytearray(16 << 20))
+            out_all = m_all.run((tx, ty))
+            skips[0 if not m.env[go] else 1] += 1
+            same = out == out_all and all(m.env[n] == m_all.env[n] for n in renderer)
+            same = same and (m.env["%mod.cb.ccov"] == 0.0 or m.env["%mod.cb.calt"] == m_all.env["%mod.cb.calt"])
+            check(same, f"({tx}, {ty}): the towers' skip ({'taken' if not m.env[go] else 'not taken'}) changed "
+                        "the output")
             p = [m.env[c] for c in planet]
             uv = (m.env[rain["u_name"]], m.env[rain["v_name"]])
             seen.append((tx, ty, p))
@@ -1042,6 +1060,9 @@ def check_towers(stock, patched_p, tex, check):
     check(slices > 0, "towers: no slice of the mock weather got a tower")
     check(covered > 0 and stored > 0, f"towers: anvil cover in {covered} columns, {stored} stored in the grid")
     check(marked > 0, "towers: no column marked for the sky light")
+    check(all(skips), f"towers' skip: {skips[0]} columns skipped, {skips[1]} didn't (want both)")
+    print(f"towers' skip: {skips[0]} columns without a cell skipped, {skips[1]} with one computed; "
+          "both as computing every column, bit for bit")
     # with the stations' storm evidence (bit 6 and the table): thunder, CB and TCU reports at three
     # of the columns above
     picks = [seen[len(seen) // 4][2], seen[len(seen) // 2][2], seen[3 * len(seen) // 4][2]]
@@ -1327,7 +1348,7 @@ def main():
     # the cloud constants as the shader saw them, in the header
     cap = Machine(patched_p, constants(1 | P.DEBUG_BUFFER_16MB, cloud=anchor_cloud()), TEX, bytearray(table))
     cap.run((0, 0))
-    got_c = struct.unpack_from("<32I", cap.buf, P.CLOUD_GEN_REGION + P.CG_CLOUD)
+    got_c = struct.unpack_from(f"<{P.CLOUD_PARAMS_SIZE // 4}I", cap.buf, P.CLOUD_GEN_REGION + P.CG_CLOUD)
     want_c = tuple(struct.unpack("<I", struct.pack("<f", x))[0] for x in anchor_cloud())
     check(got_c == want_c, "cloud constants in the capture header")
     print("all checks passed" if bad == 0 else f"{bad} check(s) failed")

@@ -171,6 +171,10 @@ class Evaluator:
             with np.errstate(all="ignore"):
                 return np.nan_to_num(np.trunc(self.val(m[1])), nan=0, posinf=2 ** 31 - 1,
                                      neginf=-2 ** 31).astype(np.int64)
+        if m := re.match(r"fptoui float (\S+) to i32", rhs):
+            with np.errstate(all="ignore"):
+                return np.clip(np.nan_to_num(np.trunc(self.val(m[1])), nan=0, posinf=2 ** 32 - 1, neginf=0),
+                               0, 2 ** 32 - 1).astype(np.int64)
         if m := re.match(r"(?:uitofp|sitofp) i32 (\S+) to float", rhs):
             return np.asarray(iv(m[1])).astype(F)
         if re.match(r"call %dx\.types\.Handle @dx\.op\.annotateHandle\(i32 216, %dx\.types\.Handle \S+, "

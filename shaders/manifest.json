@@ -55,9 +55,10 @@
         "far_slice": true,
         "dump": "camera",
         "field": true,
-        "ms_rows": "read"
+        "ms_rows": "read",
+        "tint": true
       },
-      "note": "the aerial-perspective volume: our medium and aerosol phase, the far-slice stretch (T12); on capture: dumps its constants (region B); the haze field: each march sample's haze from the METAR stations around (HAZE_ROWS); reads the multiple-scattering LUT's quadratic rows"
+      "note": "the aerial-perspective volume: our medium and aerosol phase, the far-slice stretch (T12); on capture: dumps its constants (region B); the haze field: each march sample's haze from the METAR stations around (HAZE_ROWS); reads the multiple-scattering LUT's quadratic rows; each cell's optical depth per colour, for the clouds' haze colour (CAMVOL_TINT_REGION)"
     },
     {
       "entry": "ph_globalCloudAtmospherics",
@@ -121,6 +122,47 @@
         "field": true,
         "ms_rows": "read"
       }
+    },
+    {
+      "entry": "ph_volumetric_clouds_merge",
+      "kind": "fog_scale",
+      "crcs": "all",
+      "note": "the clouds' composite: records its factor from the clouds' colour to the scene's (FOG_SCALE) and the fog's colour on a coarse grid over the screen (FOG_GRID), for the forward pass's fog; output unchanged"
+    },
+    {
+      "entry": "ph_base",
+      "kind": "forward_fog",
+      "crcs": "all",
+      "note": "the forward pass (glass, fan and propeller discs, light glows, the refraction buffer), drawn after the clouds: the fog around the camera (the cloud renderer's record, the merge's fog colour) by the view depth along the ray, by the pipeline's target and blending (the add-on: the scene colour or the refraction buffer only); only elements in the world (those MSFS fades by its cloud frustum volume)"
+    },
+    {
+      "entry": "ph_particle",
+      "kind": "forward_fog",
+      "crcs": "all",
+      "args": {
+        "world_only": false
+      },
+      "note": "particles (exhaust, smoke, spray), drawn after the clouds: the forward pass's fog (patch_forward_fog)"
+    },
+    {
+      "entry": "ph_billboard_lights",
+      "kind": "forward_fog",
+      "crcs": "all",
+      "args": {
+        "world_only": false,
+        "distance": "light"
+      },
+      "note": "light points (aircraft, runway and approach lights), drawn after the clouds: dimmed by the fog over the light's own distance (additive)"
+    },
+    {
+      "entry": "ph_macro_lights",
+      "kind": "forward_fog",
+      "crcs": "all",
+      "args": {
+        "world_only": false,
+        "distance": "light"
+      },
+      "note": "city and ground lights, drawn after the clouds: dimmed by the fog over the light's own distance (additive)"
     }
   ]
 }

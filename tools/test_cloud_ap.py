@@ -133,6 +133,106 @@ def reference(u, v, depth_m, tgrey, g, a, t, samples=P.CLOUD_AP_SAMPLES, newton=
     return tgrey[..., None] + (tinted - tgrey[..., None]) * w, trans
 
 
+def tint_tail(tau, tgrey, weight):
+    """numpy: patch_dxil.emit_haze_tint (the spectral shape of tau, the mean of tgrey)."""
+    mean = tau.mean(-1, keepdims=True)
+    shape = np.where(mean < 1e-6, 1.0, tau / np.maximum(mean, 1e-6))
+    target = np.maximum(tgrey, 1e-4)[..., None]
+    te = -np.log(target)
+    for _ in range(P.CLOUD_AP_NEWTON_STEPS):
+        e = np.exp(-shape * te)
+        slope = (shape * e).mean(-1, keepdims=True)
+        te = np.maximum(te + (e.mean(-1, keepdims=True) - target) / np.maximum(slope, 1e-6), 0.0)
+    out = tgrey[..., None] + (np.exp(-shape * te) - tgrey[..., None]) * weight[..., None]
+    return np.where(weight[..., None] > 0, out, tgrey[..., None])
+
+
+def check_tint_from_volume() -> list[str]:
+    """The haze colour from the camera volume (CLOUD_AP_FROM_VOLUME): the volume's
+    store (patch_medium tint) and the view march's lookup (emit_cloud_haze_colour_volume)."""
+    import csv
+    from test_medium_patch import Evaluator
+    failures = []
+    rng = np.random.default_rng(9)
+    nx, ny, nz = P.CAMVOL_N
+    frame = 4321
+
+    def flags(bits, at=frame):
+        mod = np.zeros((4, 4))
+        mod[0, 0] = np.uint32(bits | (at << 16)).view(np.float32)
+        return mod
+
+    # the volume: each cell's -ln T per colour, the frame, at (z * ny + y) * nx + x
+    dxc = P.find_dxc()
+    index = {Path(r["path"]).name.split(".")[0]: r for r in csv.DictReader(open(ROOT / "extracted" / "index.csv"))}
+    stock = P.disassemble(ROOT / "extracted" / index["0x7d2ec0ce"]["path"], dxc)
+    patched, summary = P.patch_medium(stock, far_slice=True, dump="camera", field=True, ms_rows="read", tint=True)
+    trans = re.search(r"\(T (%\S+), (%\S+), (%\S+)\)", summary).groups()
+    store = next(l for l in patched.splitlines() if "rawBufferStore" in l and "%mod.vt.b" in l)
+    addr, *vals = re.match(r"\s+call void @dx\.op\.rawBufferStore\.f32\(i32 140, %dx\.types\.Handle \S+, i32 (\S+), "
+                           r"i32 undef, float (\S+), float (\S+), float (\S+), float (\S+), i8 15", store).groups()
+    go = re.search(r"br i1 (\S+), label %mod\.vt\.go,", patched)[1]
+    coords = re.search(r"textureStore\.f32\(i32 67, %dx\.types\.Handle \S+, i32 (\S+), i32 (\S+), i32 (\S+), "
+                       r"float \S+, float \S+, float \S+, float %\d+, i8 15\)", stock).groups()
+    n = 4096
+    t_seed = np.concatenate([[0.0, 1e-38, 1.0, 1.0 + 1e-6], rng.uniform(1e-6, 1.0, n * 3 - 4)]).reshape(n, 3)
+    xyz = [rng.integers(0, size + 3, n) for size in P.CAMVOL_N]  # (some outside the volume)
+    seeds = {name: t_seed[:, c].astype(F) for c, name in enumerate(trans)}
+    seeds.update({name: xyz[k].astype(np.int64) for k, name in enumerate(coords)})
+    for bits in (P.DEBUG_BUFFER_TYPES, 0):
+        ev = Evaluator(patched, {"b0 space50": flags(bits)}, seeds)
+        inside = (xyz[0] < nx) & (xyz[1] < ny) & (xyz[2] < nz)
+        if not np.array_equal(np.asarray(ev(go), bool), inside & (bits != 0)):
+            failures.append(f"volume store: written {'outside the volume' if bits else 'without the 20 MB buffer'}")
+        if not bits:
+            continue
+        want_addr = P.CAMVOL_TINT_REGION + 16 * ((xyz[2] * ny + xyz[1]) * nx + xyz[0])
+        if not np.array_equal(np.asarray(ev(addr), np.int64)[inside], want_addr[inside]):
+            failures.append("volume store: wrong cell")
+        want = np.maximum(-np.log(np.maximum(t_seed.astype(F).astype(np.float64), 1e-30)), 0.0)
+        got = np.stack([np.asarray(ev(v), np.float64) for v in vals[:3]], -1)
+        err = float(np.max(np.abs(got - want) / np.maximum(want, 1e-3)))
+        if err > 1e-5:
+            failures.append(f"volume store: -ln T rel. error {err:.1e}")
+        stamp = np.asarray(ev(vals[3]), np.float32).view(np.uint32)
+        if not np.all(stamp == (frame | 0x10000)):
+            failures.append("volume store: wrong stamp")
+
+    # the view march: the 8 cells around the lookup, trilinear, then the tint
+    cells = rng.uniform(0.0, 3.0, (nz, ny, nx, 3))  # -ln T per colour
+    words = np.zeros((P.CAMVOL_TINT_REGION + 16 * nx * ny * nz) // 4, F)
+    region = words[P.CAMVOL_TINT_REGION // 4:].reshape(nz, ny, nx, 4)
+    region[..., :3] = cells
+    em = P.Emitter("ca")
+    outs = P.emit_cloud_haze_colour_volume(em, "%u", "%v", "%w", "%tg", "%wt")
+    text = "\n".join(P.prologue_lines() + em.lines)
+    n = 6000
+    u, v, w = (rng.uniform(-0.05, 1.05, n) for _ in range(3))  # (edges: clamped to the outer cells)
+    tgrey = rng.uniform(0.05, 1.0, n)
+    weight = np.where(rng.uniform(0, 1, n) < 0.1, 0.0, rng.uniform(0.0, 1.0, n))
+    seeds = {"%u": u.astype(F), "%v": v.astype(F), "%w": w.astype(F), "%tg": tgrey.astype(F), "%wt": weight.astype(F)}
+    f = [c.astype(F).astype(np.float64) * size - 0.5 for c, size in ((u, nx), (v, ny), (w, nz))]
+    base = [np.clip(np.floor(fk), 0, size - 2).astype(int) for fk, size in zip(f, P.CAMVOL_N)]
+    fr = [np.clip(fk - b, 0, 1) for fk, b in zip(f, base)]
+    tau = 0
+    for dz in (0, 1):
+        for dy in (0, 1):
+            for dx in (0, 1):
+                wgt = (fr[0] if dx else 1 - fr[0]) * (fr[1] if dy else 1 - fr[1]) * (fr[2] if dz else 1 - fr[2])
+                tau = tau + wgt[:, None] * cells[base[2] + dz, base[1] + dy, base[0] + dx]
+    for name, written_at, ok in (("fresh", frame - P.CAMVOL_TINT_FRESH_FRAMES, True),
+                                 ("stale", frame - P.CAMVOL_TINT_FRESH_FRAMES - 1, False), ("unwritten", None, False)):
+        region[..., 3] = (np.full((nz, ny, nx), 0, np.uint32) if written_at is None else
+                          np.full((nz, ny, nx), (written_at & 0xFFFF) | 0x10000, np.uint32)).view(F)
+        ev = Evaluator(text, {"b0 space50": flags(P.DEBUG_BUFFER_TYPES)}, seeds, buffer=words)
+        got = np.stack([np.asarray(ev(o), np.float64) for o in outs], -1)
+        want = tint_tail(tau, tgrey, weight if ok else np.zeros(n))
+        err = float(np.max(np.abs(got - want)))
+        if err > 2e-4:
+            failures.append(f"view march, {name} cells: abs. error {err:.1e}")
+    return failures
+
+
 def read_pfm(path):
     data = path.read_bytes()
     header = data.split(b"\n", 3)
@@ -221,6 +321,9 @@ def main():
     print(f"  example far-slice transmittance (R, G, B): {np.round(far[len(far) // 2], 3).tolist()}")
     # float32 (IR) against float64 (reference): rare worst cases reach ~1e-3.
     ok = np.percentile(err, 99.9) < 1e-3 and err.max() < 5e-3
+    tint_failures = check_tint_from_volume()
+    print("haze colour from the camera volume:", "; ".join(tint_failures) if tint_failures else "as numpy")
+    ok = ok and not tint_failures
     print("PASS" if ok else "FAIL")
     sys.exit(0 if ok else 1)
 

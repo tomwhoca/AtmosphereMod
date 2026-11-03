@@ -15,8 +15,9 @@ terrain, ch_sky's cubemap):
      fitted Rayleigh/ozone, brown-haze absorption, HG g and backscatter lobe.
      The cloud renderer instead gets per-colour haze (T11), a forward lobe in
      its sun/moon phase, tunable multiple scattering, the build-up of bounced
-     light, crisper edges, a glory, the aircraft's shadow, optical thickness
-     and surface detail (CloudParams C0-C31);
+     light, crisper edges, a glory, the aircraft's shadow, optical thickness,
+     the in-cloud fog around the camera and its structure, and surface detail
+     (CloudParams C0-C34);
   3. add our ModParams cbuffer (b0 space50, the injected root constants) to the
      resource metadata and load the tunables at the entry point; for the
      clouds also CloudParams (b1 space50, compute only);
@@ -35,10 +36,13 @@ import argparse
 import csv
 import json
 import math
+import multiprocessing
+import os
 import re
 import struct
 import subprocess
 import sys
+import traceback
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -62,7 +66,9 @@ BACKSCATTER_G = -0.4
 AEROSOL_SPECTRAL_LOG2 = (-0.30610, 0.0, 0.32193)
 MOD_SPACE = 50
 MOD_PARAMS_SIZE = 64
-CLOUD_PARAMS_SIZE = 128  # C0..C31 at b1 space50, compute only
+# C0..C35 at b1 space50, compute only (C32 also reaches the shaders as a ModParams bit; C35 too, to the
+# forward pass: FOG_TINT_BIT)
+CLOUD_PARAMS_SIZE = 144
 
 LOG2E = "0x3FF7154760000000"
 NEG_LOG2E = "0xBFF7154760000000"
@@ -345,6 +351,20 @@ def cloud_prologue_lines() -> list[str]:
         "  %mod.coki1 = call float @dx.op.binary.f32(i32 36, float %mod.coki0, float 2.000000e+01)",
         "  %mod.cokiz = fcmp fast ole float %mod.C19, 0.000000e+00",
         "  %mod.coki = select i1 %mod.cokiz, float 1.000000e+00, float %mod.coki1",
+        # in-cloud fog around the camera (apply_cloud_optical): visibility C33 (m, 10..1000, off if <= 0)
+        # at a cumulus core, as extinction 3 / C33
+        f"  %mod.cnv0 = call float @dx.op.binary.f32(i32 35, float %mod.C33, float {f32(NEAR_FOG_VIS_M[0])})",
+        f"  %mod.cnv = call float @dx.op.binary.f32(i32 36, float %mod.cnv0, float {f32(NEAR_FOG_VIS_M[1])})",
+        "  %mod.cnk = fdiv fast float 3.000000e+00, %mod.cnv",
+        "  %mod.cnoff0 = fcmp fast ole float %mod.C33, 0.000000e+00",
+        "  %mod.cnoff = or i1 %mod.cnoff0, %mod.cooff1",
+        # structure inside clouds (apply_cloud_inside): strength C34 (0..2, off if <= 0 or without C33)
+        "  %mod.cis0 = call float @dx.op.binary.f32(i32 35, float %mod.C34, float 0.000000e+00)",
+        "  %mod.cis = call float @dx.op.binary.f32(i32 36, float %mod.cis0, float 2.000000e+00)",
+        f"  %mod.cikd = fmul fast float %mod.cis, {f32(INSIDE_DENSITY_GAIN)}",
+        f"  %mod.cikl = fmul fast float %mod.cis, {f32(INSIDE_LIGHT_GAIN)}",
+        "  %mod.cisoff0 = fcmp fast ole float %mod.C34, 0.000000e+00",
+        "  %mod.cisoff = or i1 %mod.cisoff0, %mod.cnoff",
         # surface detail (apply_cloud_detail): base smoothing C0 * C28 (0..1) over C29 m (300 if <= 0),
         # a finer octave C0 * C30 (0..0.1) at a C31 m period (50..1000, 350 if <= 0)
         "  %mod.cbs0 = call float @dx.op.unary.f32(i32 7, float %mod.C28)",
@@ -380,16 +400,29 @@ def finish(ir: Ir, cloud: bool = False, debug_uav: bool = False) -> str:
     attrs = {}
     for m in re.finditer(r"^declare \S+ @(dx\.op\.[\w.]+)\(.*\) (#\d+)$", text, re.M):
         attrs[m[1]] = m[2]
+    extra = []
+    # (simple shaders, a light's glow: without cbuffers or maths, the prologue still needs these)
+    groups = dict((m[2], m[1]) for m in re.finditer(r"^attributes (#\d+) = \{ (.*) \}$", text, re.M))
+    for op, decl, kind in (
+            ("cbufferLoadLegacy.f32", "%dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32, %dx.types.Handle, i32)",
+             "nounwind readonly"),
+            ("unary.f32", "float @dx.op.unary.f32(i32, float)", "nounwind readnone")):
+        if f"dx.op.{op}" in attrs:
+            continue
+        if kind not in groups:
+            groups[kind] = f"#{max((int(g[1:]) for g in groups.values()), default=-1) + 1}"
+            text += f"\nattributes {groups[kind]} = {{ {kind} }}\n"
+        attrs[f"dx.op.{op}"] = groups[kind]
+        extra.append(f"declare {decl} {groups[kind]}")
     need("dx.op.unary.f32" in attrs and "dx.op.cbufferLoadLegacy.f32" in attrs
          and "dx.op.createHandleFromBinding" in attrs and "dx.op.annotateHandle" in attrs,
          "missing a dx.op declaration we rely on")
-    extra = []
     if "dx.op.binary.f32" not in attrs:
         extra.append(f"declare float @dx.op.binary.f32(i32, float, float) {attrs['dx.op.unary.f32']}")
     if "dx.op.tertiary.f32" not in attrs:
         extra.append(f"declare float @dx.op.tertiary.f32(i32, float, float, float) {attrs['dx.op.unary.f32']}")
     if debug_uav:
-        store_attr = next((a for op, a in attrs.items() if "Store" in op), None)
+        store_attr = next((a for op, a in attrs.items() if "store" in op.lower()), None)
         for kind, ty in (("i32", "i32"), ("f32", "float")):
             # (the validator rejects unused declarations)
             if f"dx.op.rawBufferStore.{kind}" not in attrs and f"@dx.op.rawBufferStore.{kind}(" in text:
@@ -440,6 +473,8 @@ def finish(ir: Ir, cloud: bool = False, debug_uav: bool = False) -> str:
         types += "\n%dx.types.Dimensions = type { i32, i32, i32, i32 }"
     if "@dx.op.cbufferLoadLegacy.i32(" in text and "%dx.types.CBufRet.i32 = type" not in text:
         types += "\n%dx.types.CBufRet.i32 = type { i32, i32, i32, i32 }"
+    if "%dx.types.CBufRet.f32 = type" not in text:
+        types += "\n%dx.types.CBufRet.f32 = type { float, float, float, float }"
     last_type = max(m.end() for m in re.finditer(r"^%[^\n]+ = type [^\n]+$", text, re.M))
     text = text[:last_type] + types + text[last_type:]
     res = re.search(r"^!dx\.resources = !\{!(\d+)\}$", text, re.M)
@@ -681,16 +716,24 @@ def emit_haze_field(em: "Emitter", segment, glob_binding: str) -> dict:
     return {k: em.select(counts, v, HAZE_GLOBALS[k]) for k, v in field.items()}
 
 
-def guard_block(ir: Ir, at: int, cond: str, body: list[str], outputs: dict, tag: str) -> tuple[list, dict, list]:
+def guard_block(ir: Ir, at: int, cond: str, body: list[str], outputs: dict, tag: str,
+                entry: bool = False) -> tuple[list, dict, list]:
     """Splits the block holding line `at` just before it, so that `body` runs only where cond
     holds: outputs {name: (value from body, value otherwise)} come out of a join block's phis.
     Returns the lines to put before line `at`, the joined names, and the edits of the phis in
-    the block's successors (its tail, with the terminator, is now the join block)."""
+    the block's successors (its tail, with the terminator, is now the join block). entry: the
+    block may be the entry block (unnamed: %0, before the first value %1)."""
     j = at
-    while not ir.lines[j].startswith("; <label>:"):
+    label_re = re.compile(r"; <label>:(\d+)|([\w.]+):\s*$")  # dxc's numbered blocks, or our named ones
+    while not label_re.match(ir.lines[j]) and not ir.lines[j].startswith("define "):
         j -= 1
-        need(j > 0 and not ir.lines[j].startswith("define "), f"line {at}: in the entry block")
-    head = "%" + re.match(r"; <label>:(\d+)", ir.lines[j])[1]
+        need(j > 0, f"line {at}: no block")
+    if ir.lines[j].startswith("define "):
+        need(entry and "()" in ir.lines[j] and "%0" not in ir.defs, f"line {at}: in the entry block")
+        head = "%0"
+    else:
+        m = label_re.match(ir.lines[j])
+        head = "%" + (m[1] or m[2])
     k = at
     while not re.match(r"\s+(br|ret|switch) ", ir.lines[k]):
         k += 1
@@ -702,8 +745,9 @@ def guard_block(ir: Ir, at: int, cond: str, body: list[str], outputs: dict, tag:
         names[n] = f"%mod.{tag}.{n}"
         lines.append(f"  {names[n]} = phi float [ {a}, {go} ], [ {b}, {head} ]")
     edits = []
-    for label in sorted(set(re.findall(r"label (%\d+)", ir.lines[k]))):
-        top = [i for i, l in enumerate(ir.lines) if re.match(rf"; <label>:{label[1:]}\b", l)]
+    for label in sorted(set(re.findall(r"label (%[\w.]+)", ir.lines[k]))):
+        top = [i for i, l in enumerate(ir.lines)
+               if re.match(rf"; <label>:{re.escape(label[1:])}\b", l) or l.rstrip() == f"{label[1:]}:"]
         need(len(top) == 1, f"no block {label}")
         i = top[0] + 1
         while re.match(rf"\s+{V} = phi ", ir.lines[i]):
@@ -959,7 +1003,7 @@ def ms_rows_write_edit(ir: Ir, segment) -> tuple:
 
 def patch_medium(text: str, no_phase: bool = False, white_balance: bool = False, far_slice: bool = False,
                  dump: str | None = None, field: bool = False, quadratic: bool = False,
-                 ms_rows: str | None = None) -> tuple[str, str]:
+                 ms_rows: str | None = None, tint: bool = False) -> tuple[str, str]:
     """Our medium (MediumSample in the model) in a pass's inline atmosphere
     march, and its HG phases (T9, the backscatter lobe). Options for the sky
     passes we patch instead of replacing:
@@ -975,7 +1019,10 @@ def patch_medium(text: str, no_phase: bool = False, white_balance: bool = False,
       quadratic      the march's evenly spaced segments respaced quadratically
                      (quadratic_march_edits; the multiple-scattering LUT);
       ms_rows        the multiple-scattering LUT's rows quadratic in height
-                     (MS_LUT_SUBUV): "write" (the LUT) or "read" (its readers)."""
+                     (MS_LUT_SUBUV): "write" (the LUT) or "read" (its readers);
+      tint           the camera volume's per-colour optical depth into the debug
+                     buffer every frame, for the view march's haze colour
+                     (append_tint_store, CLOUD_AP_FROM_VOLUME)."""
     ir = Ir(text)
     sites, phases = find_medium(ir, no_phase)
     if field:  # (guard_block splits each site's block as the stock IR has it)
@@ -1127,11 +1174,13 @@ def patch_medium(text: str, no_phase: bool = False, white_balance: bool = False,
     need(len({i for i, _ in edits}) == len(edits), "two edits of one line")
     for i, new_lines in sorted(edits, key=lambda e: -e[0]):
         ir.lines[i:i + 1] = new_lines
+    if tint and CLOUD_AP_FROM_VOLUME:
+        extras.append(append_tint_store(ir))
     if dump:
         append_sky_dump(ir, dump)
         extras.append(f"{dump} dump")
 
-    text = finish(ir, cloud=white_balance, debug_uav=bool(dump) or field)
+    text = finish(ir, cloud=white_balance, debug_uav=bool(dump) or field or (tint and CLOUD_AP_FROM_VOLUME))
 
     summary = (f"{len(sites)} medium site(s), {len(phases)} HG phase(s); "
                f"height {', '.join(s['h'] for s in sites)}" + (f"; {', '.join(extras)}" if extras else ""))
@@ -1232,6 +1281,58 @@ def far_slice_edits(ir: Ir) -> list:
 CAMERA_DUMP_GLOBAL = (10, 51, 52, 56, 92, 94, 117, 132, 134, 135, 136, 174, 175, 176, 177)
 DEBUG_REGION_SKY_ATMOSPHERE = 16
 DEBUG_REGION_CAMERA = 256
+
+
+def append_tint_store(ir: Ir) -> str:
+    """ch_camera_volume: each cell's optical depth per colour, -ln T (its
+    alpha is 1 - dot(T, 1/3)), to CAMVOL_TINT_REGION with the frame, at the
+    cell its texture store writes; with the 20 MB debug buffer bound
+    (DEBUG_BUFFER_TYPES) and the cell within CAMVOL_N. The view march's haze
+    colour reads it (emit_cloud_haze_colour_volume)."""
+    store_re = re.compile(r"\s+call void @dx\.op\.textureStore\.f32\(i32 67, %dx\.types\.Handle \S+, "
+                          r"i32 (\S+), i32 (\S+), i32 (\S+), float \S+, float \S+, float \S+, float (%[\w.]+), i8 15\)")
+    dot_re = re.compile(r"call float @dx\.op\.dot3\.f32\(i32 55, float (\S+), float (\S+), float (\S+), "
+                        r"float (\S+), float (\S+), float (\S+)\)")
+    # (the lines as they are now, without reindexing ir: the sky dump that follows
+    # takes its cbuffer handles as the stock IR has them)
+    cur = Ir("\n".join(ir.lines))
+    found = []
+    for i, line in enumerate(cur.lines):
+        if not (m := store_re.match(line)) or m[4] not in cur.binops:
+            continue
+        op, a, b = cur.binops[m[4]]
+        if op != "fsub" or a != "1.000000e+00" or b not in cur.defs:
+            continue
+        d = dot_re.search(cur.lines[cur.defs[b]])
+        if d and all(not d[k].startswith("%") and abs(literal_value(d[k]) - 1.0 / 3.0) < 1e-6 for k in (4, 5, 6)):
+            found.append((i, (m[1], m[2], m[3]), (d[1], d[2], d[3])))
+    need(len(found) == 1, f"{len(found)} texture stores of 1 - mean(T)")
+    at, (x, y, z), trans = found[0]
+    nx, ny, nz = CAMVOL_N
+    pre = Emitter("vt.c")
+    flags = pre.new(f"bitcast float {pre.ext(pre.load('%mod.ah', 0), 0)} to i32")
+    go = pre.new(f"icmp ne i32 {pre.new(f'and i32 {flags}, {DEBUG_BUFFER_TYPES}')}, 0")
+    for c, n in ((x, nx), (y, ny), (z, nz)):
+        go = pre.new(f"and i1 {go}, {pre.new(f'icmp ult i32 {c}, {n}')}")
+    em = Emitter("vt.b")
+    uh = em.new(f"call %dx.types.Handle @dx.op.createHandleFromBinding(i32 217, %dx.types.ResBind "
+                f"{{ i32 0, i32 0, i32 {MOD_SPACE}, i8 1 }}, i32 0, i1 false)")
+    uav = em.new(f"call %dx.types.Handle @dx.op.annotateHandle(i32 216, %dx.types.Handle {uh}, "
+                 "%dx.types.ResourceProperties { i32 4107, i32 0 })")
+    row = em.new(f"add i32 {em.new(f'mul i32 {z}, {ny}')}, {y}")
+    index = em.new(f"add i32 {em.new(f'mul i32 {row}, {nx}')}, {x}")
+    addr = em.new(f"add i32 {em.new(f'mul i32 {index}, 16')}, {CAMVOL_TINT_REGION}")
+    # -ln T = -log2(T) ln 2 (T at least 1e-30: finite)
+    tau = [em.max(em.mul(em.unary(23, em.max(t, 1e-30)), -0.6931471805599453), 0.0) for t in trans]
+    frame = em.new(f"and i32 {em.new(f'lshr i32 {flags}, 16')}, 65535")
+    stamp = em.new(f"bitcast i32 {em.new(f'or i32 {frame}, 65536')} to float")
+    em.lines.append(f"  call void @dx.op.rawBufferStore.f32(i32 140, %dx.types.Handle {uav}, i32 {addr}, i32 undef, "
+                    f"float {tau[0]}, float {tau[1]}, float {tau[2]}, float {stamp}, i8 15, i32 4)")
+    lines, _, phi_edits = guard_block(ir, at, go, em.lines, {}, "vt", entry=True)
+    for i, new_lines, n in sorted([(at, pre.lines + lines, 0)] + [(i, new, 1) for i, new in phi_edits],
+                                  key=lambda e: -e[0]):
+        ir.lines[i:i + n] = new_lines
+    return f"per-colour optical depth to {CAMVOL_TINT_REGION:#x} (T {', '.join(trans)})"
 
 
 def append_sky_dump(ir: Ir, kind: str) -> None:
@@ -1363,11 +1464,28 @@ class Emitter:
 
 CLOUD_AP_SAMPLES = 10
 CLOUD_AP_NEWTON_STEPS = 3
+# The view march's haze colour fades out as the grey transmittance nears 1 (a sample
+# with almost no haze in front: its colour differs from grey by under 0.5%) and isn't
+# computed at all above the second value: in and around a cloud most lit steps are
+# that near, and the haze colour was half of what the mod adds to each one.
+CLOUD_AP_FADE = (0.97, 0.99)
+# The haze colour's spectral shape from the camera volume (True), which marches our
+# medium per colour for each of its cells once a frame (2 (z + 1) samples), instead of
+# a CLOUD_AP_SAMPLES march at every lit step of the view march (False: as before
+# 3 Nov 2026). The volume's patch (patch_medium tint) stores each cell's optical depth
+# per colour at CAMVOL_TINT_REGION as float4(-ln T r, g, b, stamp), cell
+# (z * 32 + y) * 32 + x, stamp (frame & 0xFFFF) | 0x10000; the view march reads the
+# 8 cells around its volume lookup, and grey where they're older than
+# CAMVOL_TINT_FRESH_FRAMES frames.
+CLOUD_AP_FROM_VOLUME = True
+CAMVOL_TINT_REGION = 0x1300000
+CAMVOL_N = (32, 32, 64)
+CAMVOL_TINT_FRESH_FRAMES = 4
 LOG2E_F = 1.4426950408889634
 
 
 def emit_cloud_haze_colour(em: Emitter, u, v, depth_m, tgrey, global_binding, atmo_binding,
-                           samples: int = CLOUD_AP_SAMPLES) -> list[str]:
+                           samples: int = CLOUD_AP_SAMPLES, weight: str | None = None) -> list[str]:
     """Per-channel version of MSFS's grey aerial-perspective transmittance for a
     cloud at depth_m (metres) along the view ray through screen uv (u, v).
 
@@ -1375,7 +1493,7 @@ def emit_cloud_haze_colour(em: Emitter, u, v, depth_m, tgrey, global_binding, at
     camera to the cloud for its spectral shape, and scales that shape so the
     mean transmittance equals the volume's grey one: the volume's own
     (filtered) brightness is kept exactly and only the colour changes.
-    Blended in by mix * T11; exactly tgrey when that is 0."""
+    Blended in by weight (mix * T11 if None); exactly tgrey when that is 0."""
     gh = em.handle(global_binding, 4800)
     ah = em.handle(atmo_binding, 208)
     g = {r: em.load(gh, r) for r in (117, 132, 134, 135, 136, 174, 175, 176, 177)}
@@ -1442,7 +1560,17 @@ def emit_cloud_haze_colour(em: Emitter, u, v, depth_m, tgrey, global_binding, at
             e = em.mad(bl, brk[k], e)
             tau[k] = e if tau[k] is None else em.add(tau[k], e)
 
-    # Spectral shape from the march: tau_c = k_c * tau with mean(k) = 1. The
+    tau = [em.mul(tau[k], dt) for k in range(3)]
+    if weight is None:
+        weight = em.mul("%mod.mix", em.sat("%mod.T11"))
+    return emit_haze_tint(em, tau, tgrey, weight)
+
+
+def emit_haze_tint(em: Emitter, tau: list, tgrey, weight) -> list[str]:
+    """Per-channel transmittances with the spectral shape of the optical depths tau
+    (per colour) and the mean of the volume's grey transmittance tgrey, blended in by
+    weight (exactly tgrey at 0)."""
+    # Spectral shape: tau_c = k_c * tau with mean(k) = 1. The
     # amount comes from the volume: solve mean(exp(-k_c * t)) = T_grey for t
     # (Newton from t = -ln T_grey; the function is convex and decreasing and
     # the start is left of the root by Jensen, so it converges monotonically).
@@ -1450,7 +1578,6 @@ def emit_cloud_haze_colour(em: Emitter, u, v, depth_m, tgrey, global_binding, at
     # the horizon mixes rays that skim the clouds with rays that clear them;
     # tying the tint to it keeps the colour consistent with the dimming
     # instead of putting the exact ray's colour on a blended brightness.
-    tau = [em.mul(tau[k], dt) for k in range(3)]
     tau_mean = em.mul(em.add(em.add(tau[0], tau[1]), tau[2]), 1.0 / 3.0)
     flat = em.cmp("olt", tau_mean, 1e-6)
     inv_mean = em.div(1.0, em.max(tau_mean, 1e-6))
@@ -1464,9 +1591,53 @@ def emit_cloud_haze_colour(em: Emitter, u, v, depth_m, tgrey, global_binding, at
         t = em.max(em.add(t, em.div(f, em.max(slope, 1e-6))), 0.0)
     trans = [em.exp2(em.mul(em.mul(shape[k], t), -LOG2E_F)) for k in range(3)]
 
-    weight = em.mul("%mod.mix", em.sat("%mod.T11"))
     on = em.cmp("ogt", weight, 0.0)
     return [em.select(on, em.mad(em.sub(trans[k], tgrey), weight, tgrey), tgrey) for k in range(3)]
+
+
+def emit_cloud_haze_colour_volume(em: Emitter, u, v, w, tgrey, weight) -> list[str]:
+    """MSFS's grey aerial-perspective transmittance per channel for a cloud sample
+    at the camera volume's coordinate (u, v, w) (the stock lookup's: screen uv less
+    the volume's jitter, and sqrt(depth / range)): the spectral shape of the volume's
+    own per-colour optical depth (CAMVOL_TINT_REGION, patch_medium tint), trilinear
+    between the 8 cells around it, the amount from tgrey (emit_haze_tint). Grey where
+    those cells weren't written in the last CAMVOL_TINT_FRESH_FRAMES frames. Only
+    with the debug buffer's 20 MB bound (DEBUG_BUFFER_TYPES: the caller's guard)."""
+    flags = em.new(f"bitcast float {em.ext(em.load('%mod.ah', 0), 0)} to i32")
+    frame = em.new(f"and i32 {em.new(f'lshr i32 {flags}, 16')}, 65535")
+    uh = em.new(f"call %dx.types.Handle @dx.op.createHandleFromBinding(i32 217, %dx.types.ResBind "
+                f"{{ i32 0, i32 0, i32 {MOD_SPACE}, i8 1 }}, i32 0, i1 false)")
+    uav = em.new(f"call %dx.types.Handle @dx.op.annotateHandle(i32 216, %dx.types.Handle {uh}, "
+                 "%dx.types.ResourceProperties { i32 4107, i32 0 })")
+    nx, ny, nz = CAMVOL_N
+    f = [em.mad(c, float(n), -0.5) for c, n in ((u, nx), (v, ny), (w, nz))]
+    cell = [em.min(em.max(em.unary(27, f[k]), 0.0), float(n - 2)) for k, n in enumerate(CAMVOL_N)]
+    frac = [em.sat(em.sub(f[k], cell[k])) for k in range(3)]
+    ix, iy, iz = (em.new(f"fptoui float {c} to i32") for c in cell)
+    row = em.new(f"add i32 {em.new(f'mul i32 {iz}, {ny}')}, {iy}")
+    base = em.new(f"add i32 {em.new(f'mul i32 {row}, {nx}')}, {ix}")
+    tau, fresh = [None, None, None], None
+    for dz in (0, 1):
+        for dy in (0, 1):
+            for dx in (0, 1):
+                index = em.new(f"add i32 {base}, {(dz * ny + dy) * nx + dx}")
+                addr = em.new(f"add i32 {em.new(f'mul i32 {index}, 16')}, {CAMVOL_TINT_REGION}")
+                cv = em.new(f"call %dx.types.ResRet.f32 @dx.op.rawBufferLoad.f32(i32 139, %dx.types.Handle {uav}, "
+                            f"i32 {addr}, i32 undef, i8 15, i32 4)")
+                wgt = em.mul(em.mul(frac[0] if dx else em.sub(1.0, frac[0]), frac[1] if dy else em.sub(1.0, frac[1])),
+                             frac[2] if dz else em.sub(1.0, frac[2]))
+                for c in range(3):
+                    tc = em.mul(wgt, em.new(f"extractvalue %dx.types.ResRet.f32 {cv}, {c}"))
+                    tau[c] = tc if tau[c] is None else em.add(tau[c], tc)
+                if fresh is None:  # (the first cell: the volume writes all of them in one pass)
+                    stamp = em.new(f"bitcast float {em.new(f'extractvalue %dx.types.ResRet.f32 {cv}, 3')} to i32")
+                    written = em.new(f"icmp ne i32 {em.new(f'and i32 {stamp}, 65536')}, 0")
+                    written_at = em.new(f"and i32 {stamp}, 65535")
+                    age = em.new(f"and i32 {em.new(f'sub i32 {frame}, {written_at}')}, 65535")
+                    fresh = em.new(f"and i1 {written}, {em.new(f'icmp ule i32 {age}, {CAMVOL_TINT_FRESH_FRAMES}')}")
+    # (finite and non-negative, whatever the cells hold)
+    tau = [em.min(em.max(t, 0.0), 1e4) for t in tau]
+    return emit_haze_tint(em, tau, tgrey, em.select(fresh, weight, 0.0))
 
 
 def apply_cloud_ap(ir: Ir) -> str:
@@ -1546,22 +1717,46 @@ def apply_cloud_ap(ir: Ir) -> str:
         uses[channels.pop()] = i
     need(sorted(uses) == [0, 1, 2], f"transmittance applied to channels {sorted(uses)}")
 
+    # Only where it shows (CLOUD_AP_FADE) and is on (T11): every other lit step of the
+    # march skips it (guard_block), grey as stock.
+    pre = Emitter("ca.c")
+    lo, hi = CLOUD_AP_FADE
+    fade = pre.sat(pre.mad(tgrey, -1.0 / (hi - lo), hi / (hi - lo)))
+    weight = pre.mul(pre.mul("%mod.mix", pre.sat("%mod.T11")), fade)
+    go = pre.cmp("ogt", weight, 0.0)
     em = Emitter("ca")
-    out = emit_cloud_haze_colour(em, u, v, depth, tgrey, global_binding.pop(), atmo_binding.pop())
+    if CLOUD_AP_FROM_VOLUME:
+        # (the volume's cells only with the 20 MB debug buffer bound: a root UAV has no bounds)
+        flags = pre.new(f"bitcast float {pre.ext(pre.load('%mod.ah', 0), 0)} to i32")
+        bound = pre.new(f"icmp ne i32 {pre.new(f'and i32 {flags}, {DEBUG_BUFFER_TYPES}')}, 0")
+        go = pre.new(f"and i1 {go}, {bound}")
+        out = emit_cloud_haze_colour_volume(em, u, v, w, tgrey, weight)
+    else:
+        out = emit_cloud_haze_colour(em, u, v, depth, tgrey, global_binding.pop(), atmo_binding.pop(), weight=weight)
+    joined = [f"%mod.cah.t{c}" for c in range(3)]  # (guard_block's names for its outputs, below)
     last_phi = tphi_line
     while PHI.match(ir.lines[last_phi + 1]):
         last_phi += 1
     phis = []
     for c in range(3):
-        pairs = ", ".join(f"[ {out[c] if val == tgrey else val}, {label} ]" for val, label in incoming)
+        pairs = ", ".join(f"[ {joined[c] if val == tgrey else val}, {label} ]" for val, label in incoming)
         phis.append(f"  %mod.ca.t{c} = phi float {pairs}")
 
     edits = [(i, [re.sub(re.escape(tphi) + r"\b", f"%mod.ca.t{c}", ir.lines[i])]) for c, i in uses.items()]
     edits.append((last_phi, [ir.lines[last_phi]] + phis))
-    edits.append((ir.defs[tgrey], [ir.lines[ir.defs[tgrey]]] + em.lines))
     for i, new_lines in sorted(edits, key=lambda e: -e[0]):
         ir.lines[i:i + 1] = new_lines
-    return f"cloud AP colour: depth {depth}, uv {u} {v}, T {tgrey}; {CLOUD_AP_SAMPLES} samples"
+    ir.reindex()
+    # (after the phis above are in: the guard moves those that come from tgrey's block to its join)
+    at = ir.defs[tgrey] + 1
+    lines, names, phi_edits = guard_block(ir, at, go, em.lines, {f"t{c}": (out[c], tgrey) for c in range(3)}, "cah")
+    need(list(names.values()) == joined, f"guard outputs {names}")
+    for i, new_lines, n in sorted([(at, pre.lines + lines, 0)] + [(i, new, 1) for i, new in phi_edits],
+                                  key=lambda e: -e[0]):
+        ir.lines[i:i + n] = new_lines
+    how = (f"the camera volume's colours at {CAMVOL_TINT_REGION:#x} (w {w})" if CLOUD_AP_FROM_VOLUME
+           else f"{CLOUD_AP_SAMPLES} samples")
+    return f"cloud AP colour: depth {depth}, uv {u} {v}, T {tgrey}; {how}, where T < {hi}"
 
 
 def patch_cloud_ap(text: str) -> tuple[str, str]:
@@ -1843,6 +2038,41 @@ OPTICAL_ICE_BLEND_M = 3000.0  # the ice blend: from C18 - 3 km (liquid) to C18 (
 # was, a noise the temporal reprojection can't hide where a second cloud
 # layer shows behind (notes/cloud-shapes.md 4k). Near, short steps: no effect.
 OPTICAL_STEP_TAU = 2.0
+# The in-cloud fog around the camera (C33, apply_cloud_optical): the visibility
+# range the setting is clamped to (m), and the profile it follows below a
+# cumulus core's extinction (1/3: (sigma / 0.01)^(1/3), as C17's adiabatic).
+# It starts NEAR_FOG_INNER_M from the camera, over as much again (the cockpit
+# stays clear), is full to NEAR_FOG_FULL_M and fades out by NEAR_FOG_OUT_M
+# (smoothstep): from inside a cloud nothing shows beyond it anyway, and clouds
+# seen from farther keep their look.
+NEAR_FOG_VIS_M = (10.0, 1000.0)
+NEAR_FOG_PROFILE = 1.0 / 3.0
+NEAR_FOG_INNER_M = 1.5
+NEAR_FOG_FULL_M, NEAR_FOG_OUT_M = 100.0, 300.0
+# Where the fog starts: inside the cloud, by the view march's depth into it
+# (m, the input of MSFS's edge ramp, which fades every cloud in over ~150 m
+# about depth 0): none at NEAR_FOG_DEPTH_M[0], all from NEAR_FOG_DEPTH_M[1]
+# (smoothstep), and only where the sim's own extinction is a cloud's: none
+# below NEAR_FOG_SIGMA[0], all from NEAR_FOG_SIGMA[1] (1/m; a thin deck is
+# ~1e-3). Seen from outside or from its outer layer (skimming a deck's top),
+# a cloud looks as MSFS draws it, and its own fringe veils the fog's surface:
+# MSFS's renderer works at a reduced resolution, recalculates each pixel only
+# every few frames and steps 20 m at a time near the camera, which broke a
+# dense fog's surface right at the cloud's into bands and blocks.
+NEAR_FOG_DEPTH_M = (25.0, 75.0)
+NEAR_FOG_SIGMA = (1e-4, 5e-4)
+# Structure inside clouds (C34, apply_cloud_inside): the view march's erosion
+# noise looked up again at these periods (m; each divides 8 km, so the noise
+# frame's 8 km jumps stay whole tiles). The two octaves' difference times
+# C34 * INSIDE_DENSITY_GAIN varies the in-cloud fog's density (at least
+# INSIDE_DENSITY_MIN to INSIDE_DENSITY_MAX of it); the first octave's change over INSIDE_SUN_M toward
+# the sun times C34 * INSIDE_LIGHT_GAIN its light (within INSIDE_LIGHT_RANGE).
+INSIDE_PERIODS_M = (200.0, 80.0)
+INSIDE_SUN_M = 20.0
+INSIDE_DENSITY_GAIN, INSIDE_LIGHT_GAIN = 4.0, 4.0
+INSIDE_DENSITY_MIN, INSIDE_DENSITY_MAX = 0.05, 2.0
+INSIDE_LIGHT_RANGE = (0.3, 2.0)
+NOISE_8KM = "0x3F20624DE0000000"  # the 8 km erosion octave's coordinate scale (1 / 8000 m)
 
 
 def find_view_extinction(ir: Ir) -> dict:
@@ -1891,12 +2121,38 @@ def apply_cloud_optical(ir: Ir) -> str:
     sheets with cut-out holes. Only the view march: the
     lighting (MSFS's light volume and short sun march) is unchanged, so the
     visible surface gets more solid without darkening the cloud. At most
-    OPTICAL_STEP_TAU per march step (sigma' <= tau / step)."""
+    OPTICAL_STEP_TAU per march step (sigma' <= tau / step).
+
+    In-cloud fog (C33, independent of C16). MSFS's clouds are so thin inside
+    (hundreds of metres to kilometres of visibility, real ones 20-150 m) that
+    the aircraft never fades into them, although the march does include the
+    cloud between the camera and its wings. Around the camera, liquid clouds
+    get at least
+        sigma_n = 3 / C33 * (sigma / 0.01)^(1/3)
+    (C33: the visibility at a cumulus core), weighted by the sample's
+    distance t: sat((t - 1.5) / 1.5) (1 - smoothstep(100, 300, t)), and by
+    the liquid share 1 - the ice blend above. The extra density starts inside
+    the cloud: times smoothstep over the sample's depth into it
+    (NEAR_FOG_DEPTH_M), and only where the sim's extinction is a cloud's
+    (NEAR_FOG_SIGMA): the extinction is r sigma' + e c w max(sigma_n -
+    sigma', 0), r the view ramp. The sample is at the end of
+    its step near the camera (MSFS jitters it only beyond 40 m), so a pixel
+    on the wing integrates exactly the cloud in front of it."""
     v = find_view_extinction(ir)
     prod, sigma, h = v["prod"], v["sigma"], v["height"]
-    _, step = view_march_step(ir, find_cloud_edges(ir)["ramps"][0][0])
+    edges = find_cloud_edges(ir)
+    _, step = view_march_step(ir, edges["ramps"][0][0])
     need(ir.defs[step] < ir.defs[prod], f"{step}: the march step comes after the extinction")
+    depth = edges["depth"]  # (m into the cloud)
+    need(ir.defs[depth] < ir.defs[prod], f"{depth}: the depth into the cloud comes after the extinction")
+    t = find_ap_depth(ir)  # the sample's distance along the view ray (m)
+    need(ir.defs[t] < ir.defs[prod], f"{t}: the sample's distance comes after the extinction")
     i = ir.defs[prod]
+    _, a, b = ir.binops[prod]
+    ramp = a if b == sigma else b
+    fade_m = NEAR_FOG_OUT_M - NEAR_FOG_FULL_M
+    span = NEAR_FOG_SIGMA[1] - NEAR_FOG_SIGMA[0]
+    d0, d1 = NEAR_FOG_DEPTH_M
     lines = [
         f"  %mod.op.r = fmul fast float {sigma}, {f32(1.0 / OPTICAL_REF)}",
         "  %mod.op.l = call float @dx.op.unary.f32(i32 23, float %mod.op.r)",
@@ -1913,13 +2169,815 @@ def apply_cloud_optical(ir: Ir) -> str:
         f"  %mod.op.cap = fdiv fast float {f32(OPTICAL_STEP_TAU)}, {step}",
         "  %mod.op.mc = call float @dx.op.binary.f32(i32 36, float %mod.op.m, float %mod.op.cap)",
         f"  %mod.op.s = select i1 %mod.cooff, float {sigma}, float %mod.op.mc",
+        # the in-cloud fog around the camera (C33)
+        f"  %mod.nf.r = fmul fast float {sigma}, {f32(1.0 / OPTICAL_REF)}",
+        "  %mod.nf.l = call float @dx.op.unary.f32(i32 23, float %mod.nf.r)",
+        f"  %mod.nf.e = fmul fast float %mod.nf.l, {f32(NEAR_FOG_PROFILE)}",
+        "  %mod.nf.p = call float @dx.op.unary.f32(i32 21, float %mod.nf.e)",
+        "  %mod.nf.v = fmul fast float %mod.nf.p, %mod.cnk",
+        f"  %mod.nf.i0 = fadd fast float {t}, {f32(-NEAR_FOG_INNER_M)}",
+        f"  %mod.nf.i1 = fmul fast float %mod.nf.i0, {f32(1.0 / NEAR_FOG_INNER_M)}",
+        "  %mod.nf.wi = call float @dx.op.unary.f32(i32 7, float %mod.nf.i1)",
+        f"  %mod.nf.o0 = fadd fast float {t}, {f32(-NEAR_FOG_FULL_M)}",
+        f"  %mod.nf.o1 = fmul fast float %mod.nf.o0, {f32(1.0 / fade_m)}",
+        "  %mod.nf.x = call float @dx.op.unary.f32(i32 7, float %mod.nf.o1)",
+        "  %mod.nf.x3 = call float @dx.op.tertiary.f32(i32 46, float %mod.nf.x, float -2.000000e+00, "
+        "float 3.000000e+00)",
+        "  %mod.nf.xx = fmul fast float %mod.nf.x, %mod.nf.x",
+        "  %mod.nf.ss = fmul fast float %mod.nf.xx, %mod.nf.x3",
+        "  %mod.nf.wo = fsub fast float 1.000000e+00, %mod.nf.ss",
+        "  %mod.nf.lq = fsub fast float 1.000000e+00, %mod.op.iw",
+        "  %mod.nf.w0 = fmul fast float %mod.nf.wi, %mod.nf.wo",
+        "  %mod.nf.w = fmul fast float %mod.nf.w0, %mod.nf.lq",
+        "  %mod.nf.d0 = fsub fast float %mod.nf.v, %mod.op.s",
+        "  %mod.nf.d = call float @dx.op.binary.f32(i32 35, float %mod.nf.d0, float 0.000000e+00)",
+        "  %mod.nf.x0 = fmul fast float %mod.nf.d, %mod.nf.w",
+        f"  %mod.nf.r0 = call float @dx.op.tertiary.f32(i32 46, float {depth}, float {f32(1.0 / (d1 - d0))}, "
+        f"float {f32(-d0 / (d1 - d0))})",
+        "  %mod.nf.r1 = call float @dx.op.unary.f32(i32 7, float %mod.nf.r0)",
+        "  %mod.nf.r2 = call float @dx.op.tertiary.f32(i32 46, float %mod.nf.r1, float -2.000000e+00, "
+        "float 3.000000e+00)",
+        "  %mod.nf.r3 = fmul fast float %mod.nf.r1, %mod.nf.r1",
+        "  %mod.nf.rs = fmul fast float %mod.nf.r3, %mod.nf.r2",
+        f"  %mod.nf.c0 = call float @dx.op.tertiary.f32(i32 46, float {sigma}, float {f32(1.0 / span)}, "
+        f"float {f32(-NEAR_FOG_SIGMA[0] / span)})",
+        "  %mod.nf.cs = call float @dx.op.unary.f32(i32 7, float %mod.nf.c0)",
+        "  %mod.nf.x1 = fmul fast float %mod.nf.x0, %mod.nf.rs",
+        "  %mod.nf.x2 = fmul fast float %mod.nf.x1, %mod.nf.cs",
+        "  %mod.nf.xe = select i1 %mod.cnoff, float 0.000000e+00, float %mod.nf.x2",
     ]
-    _, a, b = ir.binops[prod]
     new = ir.lines[i].replace(f", {sigma}", ", %mod.op.s", 1) if b == sigma else \
         ir.lines[i].replace(f"float {sigma},", "float %mod.op.s,", 1)
     need(new != ir.lines[i], f"{prod}: couldn't substitute the extinction")
-    ir.lines[i:i + 1] = lines + [new]
-    return f"cloud optical thickness: {prod} = ramp * {sigma}, altitude {h}"
+    base = new.replace(f"{prod} = ", "%mod.nf.pb = ", 1)
+    ir.lines[i:i + 1] = lines + [base, f"  {prod} = fadd fast float %mod.nf.pb, %mod.nf.xe"]
+    return f"cloud optical thickness: {prod} = ramp * {sigma}, altitude {h}; in-cloud fog at distance {t}"
+
+
+def dominating_lines(ir: Ir, at: int) -> set:
+    """The line numbers whose values are available at line `at` of the
+    function: those of the blocks that dominate at's block, and the lines
+    before `at` in its own."""
+    start = next(i for i, l in enumerate(ir.lines) if l.startswith("define ")) + 1
+    end = next(i for i in range(start, len(ir.lines)) if ir.lines[i].startswith("}"))
+    blocks, label = [], "%0"  # (label, first line, last line); the entry block is %0
+    first = start
+    for i in range(start, end):
+        m = re.match(r"; <label>:(\d+)", ir.lines[i]) or re.match(r"([\w.]+):\s*$", ir.lines[i])
+        if m:
+            if i > first:
+                blocks.append((label, first, i - 1))
+            label, first = f"%{m[1]}", i
+    blocks.append((label, first, end - 1))
+    succ = {}
+    for name, a, b in blocks:
+        succ[name] = set()
+        for i in range(a, b + 1):
+            if re.match(r"\s+(br|switch) ", ir.lines[i]):
+                succ[name] |= set(re.findall(r"label (%[\w.]+)", ir.lines[i]))
+    preds = {name: {p for p, s in succ.items() if name in s} for name, _, _ in blocks}
+    names = [name for name, _, _ in blocks]
+    dom = {n: set(names) for n in names}
+    dom[names[0]] = {names[0]}
+    changed = True
+    while changed:
+        changed = False
+        for n in names[1:]:
+            new = {n} | (set.intersection(*(dom[p] for p in preds[n])) if preds[n] else set())
+            if new != dom[n]:
+                dom[n], changed = new, True
+    home = next(name for name, a, b in blocks if a <= at <= b)
+    return {i for name, a, b in blocks if name in dom[home] for i in range(a, b + 1) if name != home or i < at}
+
+
+def chain_at(ir: Ir, value: str, at: int, prefix: str, lines: list, memo: dict) -> str:
+    """value, usable at line `at`: its instructions that aren't available there
+    (dominating_lines) re-emitted into `lines` (clone_chain), the rest reused."""
+    ok = dominating_lines(ir, at)
+    subst, seen, todo = {}, set(), [value]
+    while todo:
+        v = todo.pop()
+        if v in seen or not re.fullmatch(r"%\d+", v) or v not in ir.defs:
+            continue
+        seen.add(v)
+        if ir.defs[v] in ok:
+            subst[v] = v
+            continue
+        todo += re.findall(r"%\d+\b", re.sub(r"\s+;.*$", "", ir.lines[ir.defs[v]].split(" = ", 1)[1]))
+    return clone_chain(ir, value, subst, prefix, lines, memo)
+
+
+def reaches(ir: Ir, value: str, target: str) -> bool:
+    """True if target is among value's operands, followed back without crossing phis."""
+    seen, todo = set(), [value]
+    while todo:
+        v = todo.pop()
+        if v == target:
+            return True
+        if v in seen or not re.fullmatch(r"%\d+", v) or v not in ir.defs:
+            continue
+        seen.add(v)
+        rhs = re.sub(r"\s+;.*$", "", ir.lines[ir.defs[v]].split(" = ", 1)[1])
+        if not rhs.startswith("phi "):
+            todo += re.findall(r"%\d+\b", rhs)
+    return False
+
+
+def find_inside_site(ir: Ir) -> dict:
+    """What apply_cloud_inside needs, from the stock IR: the view march's noise
+    frame w = position - Global[51] (find_noise_lookups' first group, whose
+    axes follow the view direction's, as the sun direction's), its 8 km
+    lookup's texture, sampler and lod, the sun direction (Light c0), and each
+    step's in-scattered radiance A per channel, where the march integrates
+    X = A * ext into (X - X T) / ext with T = exp(-ext dt)."""
+    groups = find_noise_lookups(ir)
+    need(groups, "no erosion-noise lookups (position - Global[51]) * scale")
+    g = groups[0]
+    ms = find_cloud_ms(ir)
+    ops = ir.dot3[ms["cos"]]
+    def light_comp(v):
+        if v in ir.extracts and ir.extracts[v][0] in ir.loads:
+            handle, reg = ir.loads[ir.extracts[v][0]]
+            if ir.cbs.get(handle, ("", 0))[1] == 176 and reg == 0:
+                return ir.extracts[v][1]
+        return None
+    if [light_comp(v) for v in ops[3:]] == [0, 1, 2]:
+        dirs, light = list(ops[:3]), list(ops[3:])
+    else:
+        need([light_comp(v) for v in ops[:3]] == [0, 1, 2], "no sun direction (Light c0) in the sun-view cos")
+        dirs, light = list(ops[3:]), list(ops[:3])
+    for k in range(3):
+        need(reaches(ir, g["w"][k], dirs[k]), f"{g['w'][k]}: the noise frame's axis {k} isn't the view's")
+    lookup = None
+    for line in ir.lines:
+        m = re.match(rf"\s+{V} = call %dx\.types\.ResRet\.f32 @dx\.op\.sampleLevel\.f32\(i32 62, %dx\.types\.Handle "
+                     rf"({V}), %dx\.types\.Handle ({V}), float ({V}), float ({V}), float ({V}), float undef, i32 0, "
+                     rf"i32 0, i32 0, float ({V})\)", line)
+        if m and (m[3], m[4], m[5], NOISE_8KM) in g["coords"]:
+            lookup = {"tex": m[1], "smp": m[2], "lod": m[6]}
+    need(lookup, "no 8 km erosion lookup in the view march")
+    # the step's transmittance T = exp2(dt * -log2(e) * ext), ext from the view extinction
+    prod = find_view_extinction(ir)["prod"]
+    found = []
+    for name, (op, arg) in ir.unary.items():
+        if op != OP_EXP or arg not in ir.binops or ir.binops[arg][0] != "fmul":
+            continue
+        a, b = ir.binops[arg][1:]
+        for scaled, ext in ((a, b), (b, a)):
+            if scaled in ir.binops and NEG_LOG2E in ir.binops[scaled][1:] and reaches(ir, ext, prod):
+                found.append((name, ext))
+    need(len(found) == 1, f"{len(found)} view-march step transmittances")
+    T, ext = found[0]
+    radiance = []
+    for y, (kind, a, b) in ir.binops.items():
+        if kind != "fmul" or T not in (a, b):
+            continue
+        x = b if a == T else a
+        xb = ir.binops.get(x)
+        if not xb or xb[0] != "fmul" or ext not in xb[1:]:
+            continue
+        subs = [z for z, (k2, p, q) in ir.binops.items() if k2 == "fsub" and p == x and q == y]
+        if not subs or not any(k3 == "fdiv" and p == subs[0] and q == ext for k3, p, q in ir.binops.values()):
+            continue
+        radiance.append((x, xb[2] if xb[1] == ext else xb[1]))
+    need(len(radiance) in (1, 3), f"{len(radiance)} channels of step radiance")
+    return {"w": g["w"], "light": light, **lookup, "ext": ext, "radiance": sorted(radiance, key=lambda r: ir.defs[r[0]])}
+
+
+def apply_cloud_inside(ir: Ir, site: dict) -> str:
+    """ch_volumetric_clouds_render: structure inside clouds (C34, with the
+    in-cloud fog C33), exactly as without it while C34 <= 0.
+
+    The sim's clouds are almost uniform inside, so the in-cloud fog is a
+    featureless veil. Within NEAR_FOG_OUT_M of the camera (in a guarded block,
+    so farther samples cost nothing), the view march's erosion noise is looked
+    up at the INSIDE_PERIODS_M, Earth-fixed through the noise frame:
+      - density: the fog's target extinction times
+        m = clamp(1 + C34 * INSIDE_DENSITY_GAIN * (n1 - n2), INSIDE_DENSITY_MIN,
+                  INSIDE_DENSITY_MAX),
+        patches and gaps that pass by as you fly;
+      - light: each step's radiance times 1 + w (f - 1), w the fog's weight and
+        f = clamp(1 + C34 * INSIDE_LIGHT_GAIN * (n1 - n1'), INSIDE_LIGHT_RANGE),
+        n1' the first octave INSIDE_SUN_M toward the sun: denser toward the
+        sun is shaded, thinner brighter, which is what makes the patches show."""
+    at = next((i for i, l in enumerate(ir.lines) if l.startswith("  %mod.nf.r = ")), None)
+    need(at is not None, "no in-cloud fog (apply_cloud_optical) to structure")
+    t = re.match(r"  %mod\.nf\.i0 = fadd fast float (\S+), ", next(l for l in ir.lines if l.startswith("  %mod.nf.i0 = ")))[1]
+    pre = Emitter("in.c.")
+    near = pre.cmp("olt", chain_at(ir, t, at, "in.t", pre.lines, {}), NEAR_FOG_OUT_M)
+    cond = pre.new(f"and i1 {near}, {pre.new('xor i1 %mod.cisoff, true')}")
+    body = Emitter("in.b.")
+    # the noise frame and the 8 km lookup's lod, where the stock march computes
+    # them only in clouds: their missing steps again inside the guarded block
+    memo = {}
+    w = [chain_at(ir, site["w"][k], at, "in.w", body.lines, memo) for k in range(3)]
+    lod = chain_at(ir, site["lod"], at, "in.w", body.lines, memo)
+    light = [chain_at(ir, site["light"][k], at, "in.w", body.lines, memo) for k in range(3)]
+    tex, smp = (chain_at(ir, site[h], at, "in.w", body.lines, memo) for h in ("tex", "smp"))
+
+    def noise(coords, lod):
+        s = body.new(f"call %dx.types.ResRet.f32 @dx.op.sampleLevel.f32(i32 62, %dx.types.Handle {tex}, "
+                     f"%dx.types.Handle {smp}, float {coords[0]}, float {coords[1]}, float {coords[2]}, "
+                     f"float undef, i32 0, i32 0, i32 0, float {lod})")
+        return body.new(f"extractvalue %dx.types.ResRet.f32 {s}, 0")
+    p1, p2 = INSIDE_PERIODS_M
+    c1 = [body.mul(w[k], 1.0 / p1) for k in range(3)]
+    c2 = [body.mul(w[k], 1.0 / p2) for k in range(3)]
+    cs = [body.mad(light[k], INSIDE_SUN_M / p1, c1[k]) for k in range(3)]
+    lod1 = body.add(lod, math.log2(8000.0 / p1))
+    lod2 = body.add(lod, math.log2(8000.0 / p2))
+    n1, n2, ns = noise(c1, lod1), noise(c2, lod2), noise(cs, lod1)
+    m = body.min(body.max(body.mad(body.sub(n1, n2), "%mod.cikd", 1.0), INSIDE_DENSITY_MIN), INSIDE_DENSITY_MAX)
+    f = body.min(body.max(body.mad(body.sub(n1, ns), "%mod.cikl", 1.0), INSIDE_LIGHT_RANGE[0]), INSIDE_LIGHT_RANGE[1])
+    lines, names, edits = guard_block(ir, at, cond, body.lines, {"m": (m, "1.000000e+00"), "f": (f, "1.000000e+00")},
+                                      "in")
+    # the fog's target extinction times m; the light factor once the fog's weight is known
+    v = next(i for i, l in enumerate(ir.lines) if l == "  %mod.nf.v = fmul fast float %mod.nf.p, %mod.cnk")
+    edits.append((v, ["  %mod.nf.v0 = fmul fast float %mod.nf.p, %mod.cnk",
+                      f"  %mod.nf.v = fmul fast float %mod.nf.v0, {names['m']}"]))
+    k = next(i for i, l in enumerate(ir.lines) if l == "  %mod.nf.w = fmul fast float %mod.nf.w0, %mod.nf.lq")
+    edits.append((k, [ir.lines[k],
+                      f"  %mod.in.f1 = fadd fast float {names['f']}, -1.000000e+00",
+                      "  %mod.in.fe = call float @dx.op.tertiary.f32(i32 46, float %mod.in.f1, float %mod.nf.w, "
+                      "float 1.000000e+00)"]))
+    for c, (x, a) in enumerate(site["radiance"]):
+        j = ir.defs[x]
+        need(j > k, f"{x}: the step radiance comes before the fog's weight")
+        new = re.sub(rf"{re.escape(a)}(?![\w.])", f"%mod.in.a{c}", ir.lines[j].split(" = ", 1)[1], count=1)
+        edits.append((j, [f"  %mod.in.a{c} = fmul fast float {a}, %mod.in.fe", f"  {x} = {new}"]))
+    edits.append((at, [*pre.lines, *lines, ir.lines[at]]))
+    for j, new_lines in sorted(edits, key=lambda e: -e[0]):
+        ir.lines[j:j + 1] = new_lines
+    return (f"inside clouds: noise frame {', '.join(site['w'])}, lod {site['lod']}, {len(site['radiance'])} radiance "
+            f"channel(s) ({', '.join(x for x, _ in site['radiance'])})")
+
+
+# The fog around the camera for see-through surfaces (patch_forward_fog): the
+# cloud renderer records, every frame, the extinction and the radiance of the
+# first march step (sample within FOG_RECORD_T_M) at FOG_POINTS on the screen,
+# in the debug buffer at FOG_REGION: per point float4(extinction 1/m, radiance
+# rgb as the renderer stores its colour: times Global[86].x), then uint
+# (frame & 0xFFFF) | 0x10000 (DebugCapture >> 16 is the frame), then the
+# sample's distance (m), 32 bytes per point. Written only with DebugCapture
+# bit 4 (the debug buffer bound). After them, at FOG_SCALE, the merge's
+# factor from the clouds' colour to the scene's (patch_fog_scale): float,
+# then the same stamp. At FOG_GRID, the merge's fog colour on a coarse grid
+# over the screen (patch_fog_scale): per cell float4(colour in the scene's
+# units, the clouds' alpha), the cell's centre pixel, rows of FOG_GRID_N[0].
+FOG_REGION = 0x3E3000
+FOG_POINTS = ((0.3, 0.3), (0.7, 0.3), (0.3, 0.7), (0.7, 0.7))
+FOG_POINT_BYTES = 32
+FOG_SCALE = FOG_REGION + len(FOG_POINTS) * FOG_POINT_BYTES
+FOG_GRID = FOG_REGION + 0x100
+FOG_GRID_N = (32, 18)
+# A cell's colour counts from this alpha of the clouds over it (less cloud: its
+# colour/alpha is noise), fully from FOG_GRID_ALPHA[1].
+FOG_GRID_ALPHA = (0.05, 0.3)
+FOG_COLOUR_MAX = 1e6       # the grid's colours are kept within 0 .. this (a NaN or infinity becomes finite)
+FOG_RAY_MAX = 3.0          # a ray's length per unit view depth, at most (the screen's corners: ~1.5 at 90 deg)
+FOG_POINT_PIXELS = 2.0     # a thread records a point within this many pixels (interleaved variants step 4)
+FOG_RECORD_T_M = 25.0      # the first step's sample (the second ends at 40 m or more)
+FOG_FRESH_FRAMES = 4      # (not synchronised with the record: this frame's or the last; frame generation counts 2)
+FOG_COCKPIT_M = 3.0       # a point whose first sample is nearer sees the cockpit (left out of the extinction)
+# The forward shader's blending and target, from the add-on (ModParams.DebugCapture
+# bits 10-12, forward_fog_mode): what fogging its output means. Refraction:
+# the refraction buffer (offsets, blur, coverage), which the fog fades.
+FOG_MODE_SHIFT = 10
+FOG_DUAL, FOG_ALPHA, FOG_PREMULTIPLIED, FOG_ADDITIVE, FOG_REFRACTION = 1, 2, 3, 4, 5
+# Developers (C35 > 0, the add-on sets this bit): what the forward fog covers
+# drawn magenta (the distance along the ray) or cyan (the view depth or the
+# light's distance alone).
+FOG_TINT_BIT = 1 << 13
+
+
+def find_screen_uv(ir: Ir) -> list:
+    """The cloud renderer's screen position per axis: uv = (pixel + 0.5) *
+    scale, pixel from the thread id (full resolution, or interleaved 4 x 4 with
+    a per-frame offset). Returns [(uv, scale)] for x and y."""
+    out = []
+    for c in (0, 1):
+        tid = re.search(rf"^\s+(%\d+) = call i32 @dx\.op\.threadId\.i32\(i32 93, i32 {c}\)", "\n".join(ir.lines), re.M)
+        need(tid, f"no thread id {c}")
+        found = []
+        for i, line in enumerate(ir.lines):
+            m = re.match(r"\s+(%\d+) = uitofp i32 (%\d+) to float", line)
+            if not m or not (m[2] == tid[1] or reaches_int(ir, m[2], tid[1])):
+                continue
+            for h, (k, a, b) in ir.binops.items():
+                if k == "fadd" and m[1] in (a, b) and "5.000000e-01" in (a, b):
+                    for uv, (k2, p, q) in ir.binops.items():
+                        if k2 == "fmul" and h in (p, q):
+                            s = q if p == h else p
+                            if s in ir.extracts:
+                                found.append((ir.defs[uv], uv, s))
+        need(found, f"no screen position for axis {c}")
+        _, uv, s = min(found)
+        out.append((uv, s))
+    return out
+
+
+def reaches_int(ir: Ir, value: str, target: str, depth: int = 4) -> bool:
+    """True if the integer value is target shifted and offset (shl/add/or, a few steps)."""
+    if value == target:
+        return True
+    if depth == 0 or value not in ir.defs:
+        return False
+    m = re.match(r"\s+%\d+ = (?:shl|add|or|mul) i32 (\S+), (\S+)", ir.lines[ir.defs[value]])
+    return bool(m) and any(reaches_int(ir, o, target, depth - 1) for o in (m[1], m[2]) if o.startswith("%"))
+
+
+def apply_cloud_fog_record(ir: Ir, site: dict) -> str:
+    """ch_volumetric_clouds_render: the fog around the camera for see-through
+    surfaces (FOG_REGION), after apply_cloud_inside: at FOG_POINTS, the first
+    march step's extinction (site["ext"], with the in-cloud fog) and radiance
+    (with the structure's light) as the renderer stores its colour, times
+    Global[86].x (the merge's factor, FOG_SCALE, takes it on to the scene's
+    units; this pass's User[0] is its resolution). A thread that doesn't
+    light its first step (no cloud) writes nothing; its point goes stale and
+    reads as clear."""
+    xs = [l for l in ir.lines if re.match(r"  %mod\.in\.a\d = fmul fast float ", l)]
+    need(xs, "no structured step radiance (apply_cloud_inside) to record")
+    last = max(i for i, l in enumerate(ir.lines) for x, _ in site["radiance"] if l.startswith(f"  {x} = "))
+    at = last + 1
+    t = re.match(r"  %mod\.nf\.i0 = fadd fast float (\S+), ", next(l for l in ir.lines if l.startswith("  %mod.nf.i0 = ")))[1]
+    uv = find_screen_uv(ir)
+    # (the first annotation, at the entry: it dominates the lighting block)
+    glob = sorted((h for h, (_, size) in ir.cbs.items() if size == 4800), key=lambda h: ir.defs[h])
+    need(glob, "no Global cbuffer")
+
+    def record(at: int, tag: str, store) -> None:
+        """At line `at`, a guarded block where a thread at one of FOG_POINTS
+        has its first step: store(body, uav, point address, stamp)."""
+        pre = Emitter(f"{tag}.c.")
+        flags = pre.new(f"bitcast float {pre.ext(pre.load('%mod.ah', 0), 0)} to i32")
+        bound = pre.new(f"icmp ne i32 {pre.new(f'and i32 {flags}, 16')}, 0")
+        first = pre.cmp("ole", t, FOG_RECORD_T_M)
+        slot = None
+        hit = None
+        for n, (px, py) in enumerate(FOG_POINTS):
+            near = [pre.cmp("olt", pre.unary(6, pre.sub(u, p)), pre.mul(s, FOG_POINT_PIXELS))
+                    for (u, s), p in zip(uv, (px, py))]
+            here = pre.new(f"and i1 {near[0]}, {near[1]}")
+            slot = pre.new(f"select i1 {here}, i32 {n}, i32 {slot if slot else 0}")
+            hit = here if hit is None else pre.new(f"or i1 {hit}, {here}")
+        cond = pre.new(f"and i1 {pre.new(f'and i1 {bound}, {first}')}, {hit}")
+        body = Emitter(f"{tag}.b.")
+        uh = body.new(f"call %dx.types.Handle @dx.op.createHandleFromBinding(i32 217, %dx.types.ResBind "
+                      f"{{ i32 0, i32 0, i32 {MOD_SPACE}, i8 1 }}, i32 0, i1 false)")
+        u = body.new(f"call %dx.types.Handle @dx.op.annotateHandle(i32 216, %dx.types.Handle {uh}, "
+                     "%dx.types.ResourceProperties { i32 4107, i32 0 })")
+        addr = body.new(f"add i32 {body.new(f'mul i32 {slot}, {FOG_POINT_BYTES}')}, {FOG_REGION}")
+        frame = body.new(f"and i32 {body.new(f'lshr i32 {flags}, 16')}, 65535")
+        stamp = body.new(f"bitcast i32 {body.new(f'or i32 {frame}, 65536')} to float")
+        store(body, u, addr, stamp)
+        lines, _, edits = guard_block(ir, at, cond, body.lines, {}, tag)
+        edits.append((at, [*pre.lines, *lines, ir.lines[at]]))
+        for j, new_lines in sorted(edits, key=lambda e: -e[0]):
+            ir.lines[j:j + 1] = new_lines
+        ir.reindex()
+
+    def lit(body, u, addr, stamp):
+        k = body.ext(body.load(glob[0], 86), 0)  # (as the march's colour, after its loop)
+        rad = [f"%mod.in.a{c}" for c in range(len(site["radiance"]))]
+        rgb = [body.mul(rad[c if len(rad) == 3 else 0], k) for c in range(3)]
+        body.lines.append(f"  call void @dx.op.rawBufferStore.f32(i32 140, %dx.types.Handle {u}, i32 {addr}, "
+                          f"i32 undef, float {site['ext']}, float {rgb[0]}, float {rgb[1]}, float {rgb[2]}, i8 15, i32 4)")
+        addr16 = body.new(f"add i32 {addr}, 16")
+        body.lines.append(f"  call void @dx.op.rawBufferStore.f32(i32 140, %dx.types.Handle {u}, i32 {addr16}, "
+                          f"i32 undef, float {stamp}, float {t}, float undef, float undef, i8 3, i32 4)")
+
+    record(at, "fr", lit)
+    return f"fog record: {len(FOG_POINTS)} points at {uv[0][0]}, {uv[1][0]}"
+
+
+
+class SkipPatch(Exception):
+    """A target variant the patch doesn't apply to (not a failure)."""
+
+
+STORE = re.compile(rf"\s+call void @dx\.op\.storeOutput\.f32\(i32 5, i32 (\d+), i32 0, i8 (\d), float ({V}|\S+)\)")
+
+
+def reads_cloud_frustum(ir: Ir) -> bool:
+    """True if the shader looks up MSFS's cloud frustum volume
+    (ch_volumetric_clouds_frustrum_pass1/2: a 3D sample whose slice
+    coordinate is sqrt(d / 50 km) - 1/128). MSFS fades every element in the
+    world by it; screen-space glare, flares and masks don't read it."""
+    for line in ir.lines:
+        m = re.search(r"@dx\.op\.sample(?:Level)?\.f32\(i32 6[02], %dx\.types\.Handle \S+, %dx\.types\.Handle \S+, "
+                      r"float \S+, float \S+, float (%[\w.]+),", line)
+        if m and m[1] in ir.binops and ir.binops[m[1]][0] == "fadd" and "-7.812500e-03" in ir.binops[m[1]][1:]:
+            return True
+    return False
+
+
+def light_distance(ir: Ir) -> str:
+    """A light shader's distance to its light: the length of one input's xyz
+    (LightPos, relative to the camera), sqrt(x x + y y + z z)."""
+    def terms(v):
+        if v in ir.binops and ir.binops[v][0] == "fadd":
+            return terms(ir.binops[v][1]) + terms(ir.binops[v][2])
+        return [v]
+    found = []
+    for name, (op, arg) in ir.unary.items():
+        if op != OP_SQRT:
+            continue
+        comps = []
+        for t in terms(arg):
+            b = ir.binops.get(t)
+            x = b[1] if b and b[0] == "fmul" and b[1] == b[2] else None
+            m = re.match(r"\s+\S+ = call float @dx\.op\.loadInput\.f32\(i32 4, i32 (\d+), i32 0, i8 (\d), i32 undef\)",
+                         ir.lines[ir.defs[x]]) if x in ir.defs else None
+            comps.append((m[1], m[2]) if m else None)
+        if len(comps) == 3 and None not in comps and len({e for e, _ in comps}) == 1 \
+                and sorted(c for _, c in comps) == ["0", "1", "2"]:
+            found.append(name)
+    if not found:  # (variants drawn before the clouds, whose fog covers them, or without a light position)
+        raise SkipPatch("no light distance")
+    need(len(found) == 1, f"{len(found)} light distances")
+    return found[0]
+
+
+def patch_forward_fog(text: str, world_only: bool = True, distance: str = "view") -> tuple[str, str]:
+    """ph_base, ph_particle, ph_billboard_lights, ph_macro_lights (drawn after
+    the clouds: glass, fan and propeller discs, light glows, particles, light
+    points): the fog around the camera on their output, by the fragment's
+    distance d: T = exp(-sigma clamp(d - NEAR_FOG_INNER_M, 0, NEAR_FOG_OUT_M)),
+    sigma the cloud renderer's record (apply_cloud_fog_record) averaged over
+    its fresh points (stale ones count as clear; those that see the cockpit,
+    their sample within FOG_COCKPIT_M, are left out). The fog colour L: the
+    merge's grid (FOG_GRID, patch_fog_scale), bilinear at the fragment's place
+    on the screen over the cells with cloud enough (FOG_GRID_ALPHA), so it is
+    the colour of the fog around it; else the record's radiance, bilinear
+    between its points (held beyond them; their average weighted by their
+    extinction without the place), times the merge's factor (FOG_SCALE). MSFS
+    draws these after the clouds, so the cloud renderer's fog never covers
+    them, and its own cloud fade (the cloud frustum volume) knows nothing of
+    our fog. By the target and blending (DebugCapture bits 10-12, set by the
+    add-on's forward_fog_mode; exactly stock otherwise):
+      - dual source (src0 + src1 dst): src0' = T src0 + L (1 - T) (1 - src1),
+        so the scene behind, fogged already, isn't fogged twice;
+      - alpha (src sa + dst (1 - sa)): rgb' = T rgb + L (1 - T);
+      - premultiplied (src + dst (1 - sa)): rgb' = T rgb + L (1 - T) a;
+      - additive (src + dst): rgb' = T rgb;
+      - refraction (the refraction buffer: offsets, blur and coverage, not
+        colour): all four times T, as MSFS fades them by its cloud.
+    world_only: only variants that look up MSFS's cloud frustum volume
+    (reads_cloud_frustum), the elements in the world; screen-space glare,
+    flares and masks are skipped. distance: "view", the fragment's view depth
+    SV_Position.w times its ray's length per unit depth, sqrt(1 + ((2u - 1) /
+    P00)^2 + ((2v - 1) / P11)^2) (u, v its place on the screen, SV_Position.xy
+    Global[105].zw; P00, P11 the projection's scale, Global[170].x and
+    Global[171].y), the view depth alone in the variants without the Global
+    cbuffer (the aerial perspective's distance, which most variants compute,
+    measures from somewhere else in the cockpit: near glass was fogged as if
+    far); "light", the light's own distance (light_distance: light points,
+    whose quads are pulled toward the camera). All but the distance runs only
+    beyond NEAR_FOG_INNER_M (guard_block), so near glass costs nothing. With
+    FOG_TINT_BIT, fogged output is magenta (along the ray) or cyan (the depth
+    or light distance alone) instead."""
+    if "@dx.op.createHandleFromBinding(" not in text or "%dx.types.ResRet.f32 = type" not in text:
+        raise SkipPatch("no resources (min/max passes, never fogged)")
+    ir = Ir(text)
+    if world_only and not reads_cloud_frustum(ir):
+        raise SkipPatch("not in the world: no cloud fade (screen glare, flares, masks)")
+    glob = {h for h, (_, size) in ir.cbs.items() if size == 4800}
+    light_d = light_distance(ir) if distance == "light" else None
+    position = position_w(ir) if light_d is None else None
+    # the Global cbuffer: the fragment's place on the screen (the ray's length, the fog's colour)
+    g = min(glob, key=lambda h: ir.defs[h]) if glob and light_d is None else None
+    # the output sites: the stores before each return
+    sites = []
+    for i, line in enumerate(ir.lines):
+        if line.strip() != "ret void":
+            continue
+        j, stores = i - 1, {}
+        while j > 0 and not re.match(r"; <label>:|[\w.]+:\s*$", ir.lines[j]):
+            if m := STORE.match(ir.lines[j]):
+                stores.setdefault((int(m[1]), int(m[2])), (j, m[3]))
+            j -= 1
+        rgb = [stores.get((0, c)) for c in range(3)]
+        if not all(rgb):  # (a constant colour too)
+            continue
+        # before the first colour store; every value the fog uses (the colour, the alpha, the
+        # second output) must be defined by then
+        first = min(j for j, _ in rgb)
+        used = [v for key in ((0, 0), (0, 1), (0, 2), (0, 3), (1, 0), (1, 1), (1, 2))
+                if key in stores and (v := stores[key][1]).startswith("%")]
+        if any(ir.defs.get(v, -1) >= first for v in used):
+            continue
+        dist_lines = []
+        if light_d is not None:
+            try:
+                dist = chain_at(ir, light_d, first, f"ff{len(sites)}.l", dist_lines, {})
+            except PatchError:
+                continue
+        else:
+            dist = None
+        sites.append((first, rgb, stores, dist, dist_lines))
+    if not sites:
+        raise SkipPatch("no colour output")
+    edits = []
+    for n, (first, rgb, stores, light_dist, dist_lines) in enumerate(sites):
+        em = Emitter(f"ff{n}.")
+        em.lines += dist_lines
+        # the fragment's distance (and its place on the screen)
+        dist, uv = f"%mod.ff{n}.d", None
+        if light_dist is not None:
+            em.lines.append(f"  {dist} = fadd fast float {light_dist}, 0.000000e+00")
+        else:
+            depth = f"%mod.ff{n}.w"
+            em.lines.append(f"  {depth} = call float @dx.op.loadInput.f32(i32 4, i32 {position}, i32 0, i8 3, "
+                            "i32 undef)")
+            if g is not None:
+                px, py = f"%mod.ff{n}.px", f"%mod.ff{n}.py"
+                em.lines += [f"  {v} = call float @dx.op.loadInput.f32(i32 4, i32 {position}, i32 0, i8 {c}, "
+                             "i32 undef)" for v, c in ((px, 0), (py, 1))]
+                r105 = em.load(g, 105)
+                uv = [em.mul(xy, em.ext(r105, 2 + k)) for k, xy in enumerate((px, py))]
+                scale_xy = [em.ext(em.load(g, 170), 0), em.ext(em.load(g, 171), 1)]
+                tan = [em.div(em.mad(uv[k], 2.0, -1.0), scale_xy[k]) for k in (0, 1)]
+                # (at most FOG_RAY_MAX: a missing projection would make near glass far; a NaN reads as it)
+                ray = em.min(em.sqrt(em.mad(tan[0], tan[0], em.mad(tan[1], tan[1], 1.0))), FOG_RAY_MAX)
+                em.lines.append(f"  {dist} = fmul fast float {depth}, {ray}")
+            else:
+                em.lines.append(f"  {dist} = fadd fast float {depth}, 0.000000e+00")
+        flags = em.new(f"bitcast float {em.ext(em.load('%mod.ah', 0), 0)} to i32")
+        mode = em.new(f"and i32 {em.new(f'lshr i32 {flags}, {FOG_MODE_SHIFT}')}, 7")
+        bound = em.new(f"icmp ne i32 {em.new(f'and i32 {flags}, 64')}, 0")
+        on = em.new(f"and i1 {bound}, {em.new(f'icmp ne i32 {mode}, 0')}")
+        # the rest only beyond NEAR_FOG_INNER_M (nearer, T = 1: exactly stock), so the cockpit's and
+        # the cabin's glass, all of the screen through a window, skip it (guard_block)
+        go = em.new(f"and i1 {on}, {em.cmp('ogt', dist, NEAR_FOG_INNER_M)}")
+        before, em = em, Emitter(f"ff{n}.b.")
+        frame = em.new(f"and i32 {em.new(f'lshr i32 {flags}, 16')}, 65535")
+        uh = em.new(f"call %dx.types.Handle @dx.op.createHandleFromBinding(i32 217, %dx.types.ResBind "
+                    f"{{ i32 0, i32 0, i32 {MOD_SPACE}, i8 1 }}, i32 0, i1 false)")
+        u = em.new(f"call %dx.types.Handle @dx.op.annotateHandle(i32 216, %dx.types.Handle {uh}, "
+                   "%dx.types.ResourceProperties { i32 4107, i32 0 })")
+        total, lsum, points = None, [None, None, None], []
+        clear_total, cockpit = None, None  # (the extinction without the points that see the cockpit)
+        for p in range(len(FOG_POINTS)):
+            def load(off):
+                return em.new(f"call %dx.types.ResRet.f32 @dx.op.rawBufferLoad.f32(i32 139, %dx.types.Handle {u}, "
+                              f"i32 {FOG_REGION + p * FOG_POINT_BYTES + off}, i32 undef, i8 15, i32 4)")
+            v, w = load(0), load(16)
+            stamp = em.new(f"bitcast float {em.new(f'extractvalue %dx.types.ResRet.f32 {w}, 0')} to i32")
+            written = em.new(f"icmp ne i32 {em.new(f'and i32 {stamp}, 65536')}, 0")
+            written_at = em.new(f"and i32 {stamp}, 65535")
+            age = em.new(f"and i32 {em.new(f'sub i32 {frame}, {written_at}')}, 65535")
+            fresh = em.new(f"and i1 {written}, {em.new(f'icmp ule i32 {age}, {FOG_FRESH_FRAMES}')}")
+            s = em.select(fresh, em.max(em.new(f"extractvalue %dx.types.ResRet.f32 {v}, 0"), 0.0), 0.0)
+            total = s if total is None else em.add(total, s)
+            t_p = em.new(f"extractvalue %dx.types.ResRet.f32 {w}, 1")
+            seen = em.new(f"and i1 {fresh}, {em.cmp('olt', t_p, FOG_COCKPIT_M)}")
+            k = em.select(seen, 1.0, 0.0)
+            cockpit = k if cockpit is None else em.add(cockpit, k)
+            s_out = em.select(seen, 0.0, s)
+            clear_total = s_out if clear_total is None else em.add(clear_total, s_out)
+            rgb_p = [em.new(f"extractvalue %dx.types.ResRet.f32 {v}, {c + 1}") for c in range(3)]
+            for c in range(3):
+                lc = em.mul(s, rgb_p[c])
+                lsum[c] = lc if lsum[c] is None else em.add(lsum[c], lc)
+            points.append((em.select(fresh, 1.0, 0.0), rgb_p))
+        sigma = em.div(clear_total, em.max(em.sub(float(len(FOG_POINTS)), cockpit), 1.0))
+        # the merge's factor to the scene's units (0 until it has run)
+        sv = em.new(f"call %dx.types.ResRet.f32 @dx.op.rawBufferLoad.f32(i32 139, %dx.types.Handle {u}, "
+                    f"i32 {FOG_SCALE}, i32 undef, i8 3, i32 4)")
+        scale_stamp = em.new(f"bitcast float {em.new(f'extractvalue %dx.types.ResRet.f32 {sv}, 1')} to i32")
+        scale_ok = em.new(f"icmp ne i32 {em.new(f'and i32 {scale_stamp}, 65536')}, 0")
+        scale = em.select(scale_ok, em.new(f"extractvalue %dx.types.ResRet.f32 {sv}, 0"), 0.0)
+        inv = em.div(scale, em.max(total, 1e-12))
+        light = [em.mul(lsum[c], inv) for c in range(3)]
+        if uv is not None:
+            # the record's radiance, bilinear between its points by the fragment's place, held beyond them
+            lo = [min(q[k] for q in FOG_POINTS) for k in (0, 1)]
+            hi = [max(q[k] for q in FOG_POINTS) for k in (0, 1)]
+            st = [em.sat(em.mad(uv[k], 1.0 / (hi[k] - lo[k]), -lo[k] / (hi[k] - lo[k]))) for k in (0, 1)]
+            weight, wsum = None, [None, None, None]
+            for (qx, qy), (fresh_p, rgb_p) in zip(FOG_POINTS, points):
+                wx = st[0] if qx == hi[0] else em.sub(1.0, st[0])
+                wy = st[1] if qy == hi[1] else em.sub(1.0, st[1])
+                w_p = em.mul(em.mul(wx, wy), fresh_p)
+                weight = w_p if weight is None else em.add(weight, w_p)
+                for c in range(3):
+                    lc = em.mul(w_p, rgb_p[c])
+                    wsum[c] = lc if wsum[c] is None else em.add(wsum[c], lc)
+            near = em.cmp("ogt", weight, 1e-4)
+            winv = em.div(scale, em.max(weight, 1e-4))
+            light = [em.select(near, em.mul(wsum[c], winv), light[c]) for c in range(3)]
+            # ... or, where the merge's grid has cloud enough around it, the fog's own colour
+            nx, ny = FOG_GRID_N
+            gxy = [em.mad(uv[0], float(nx), -0.5), em.mad(uv[1], float(ny), -0.5)]
+            cell0 = [em.min(em.max(em.unary(27, gxy[k]), 0.0), float(size - 2)) for k, size in ((0, nx), (1, ny))]
+            frac = [em.sat(em.sub(gxy[k], cell0[k])) for k in (0, 1)]
+            ix, iy = (em.new(f"fptoui float {c0} to i32") for c0 in cell0)
+            first_cell = em.new(f"add i32 {em.new(f'mul i32 {iy}, {nx}')}, {ix}")
+            gweight, gsum = None, [None, None, None]
+            span = FOG_GRID_ALPHA[1] - FOG_GRID_ALPHA[0]
+            for dy in (0, 1):
+                for dx in (0, 1):
+                    index = em.new(f"add i32 {first_cell}, {dy * nx + dx}")
+                    addr = em.new(f"add i32 {em.new(f'mul i32 {index}, 16')}, {FOG_GRID}")
+                    cv = em.new(f"call %dx.types.ResRet.f32 @dx.op.rawBufferLoad.f32(i32 139, %dx.types.Handle {u}, "
+                                f"i32 {addr}, i32 undef, i8 15, i32 4)")
+                    cloud = em.sat(em.new(f"extractvalue %dx.types.ResRet.f32 {cv}, 3"))
+                    enough = em.sat(em.mad(cloud, 1.0 / span, -FOG_GRID_ALPHA[0] / span))
+                    wx = frac[0] if dx else em.sub(1.0, frac[0])
+                    wy = frac[1] if dy else em.sub(1.0, frac[1])
+                    w_c = em.mul(em.mul(wx, wy), enough)
+                    gweight = w_c if gweight is None else em.add(gweight, w_c)
+                    for c in range(3):  # (finite and non-negative: a NaN becomes 0)
+                        cell = em.min(em.max(em.new(f"extractvalue %dx.types.ResRet.f32 {cv}, {c}"), 0.0),
+                                      FOG_COLOUR_MAX)
+                        lc = em.mul(w_c, cell)
+                        gsum[c] = lc if gsum[c] is None else em.add(gsum[c], lc)
+            from_grid = em.new(f"and i1 {scale_ok}, {em.cmp('ogt', gweight, 1e-3)}")
+            ginv = em.div(1.0, em.max(gweight, 1e-3))
+            light = [em.select(from_grid, em.mul(gsum[c], ginv), light[c]) for c in range(3)]
+        dd = em.min(em.max(em.add(dist, -NEAR_FOG_INNER_M), 0.0), NEAR_FOG_OUT_M)
+        T = em.exp2(em.mul(em.mul(sigma, dd), -1.4426950408889634))
+        haze = em.sub(1.0, T)
+        foggy = em.cmp("ogt", haze, 0.0)  # (no fog: exactly T src, whatever L)
+        alpha = stores.get((0, 3), (0, "1.000000e+00"))[1]
+        is_ = {k: em.new(f"icmp eq i32 {mode}, {k}") for k in (FOG_DUAL, FOG_ALPHA, FOG_PREMULTIPLIED, FOG_REFRACTION)}
+        marked = em.new(f"icmp ne i32 {em.new(f'and i32 {flags}, {FOG_TINT_BIT}')}, 0")
+        mark = (1.0, 0.0, 1.0) if g is not None else (0.0, 1.0, 1.0)
+        outs = []
+        for c in range(3):
+            src = rgb[c][1]
+            tint = stores.get((1, c), (0, "0.000000e+00"))[1]
+            fog = em.select(foggy, em.mul(light[c], haze), 0.0)
+            kept = em.mul(T, src)  # (additive, and the refraction buffer)
+            dual = em.mad(fog, em.sub(1.0, tint), kept)
+            plain = em.add(kept, fog)
+            pre = em.mad(fog, alpha, kept)
+            v = em.select(is_[FOG_DUAL], dual, em.select(is_[FOG_ALPHA], plain,
+                                                          em.select(is_[FOG_PREMULTIPLIED], pre, kept)))
+            outs.append(em.select(marked, mark[c], v))
+        if (0, 3) in stores:  # the refraction buffer's coverage fades too
+            outs.append(em.select(is_[FOG_REFRACTION], em.mul(T, alpha), alpha))
+        lines, joined, phi_edits = guard_block(
+            ir, first, go, em.lines, {f"o{c}": (out, stores[(0, c)][1]) for c, out in enumerate(outs)},
+            f"ff{n}", entry=True)
+        for c in range(len(outs)):  # (in place: the line numbers stay valid for the insertions below)
+            j, val = stores[(0, c)]
+            new = ir.lines[j].replace(f"float {val})", f"float {joined[f'o{c}']})", 1)
+            need(new != ir.lines[j], f"line {j}: couldn't substitute the output")
+            ir.lines[j] = new
+        edits += [(first, before.lines + lines)] + [(i, new, 1) for i, new in phi_edits]
+    for j, new_lines, *replaced in sorted(edits, key=lambda e: -e[0]):
+        ir.lines[j:j + (replaced[0] if replaced else 0)] = new_lines
+    how = ("the light's distance" if light_d is not None else
+           "view depth along the ray, colour by screen position" if g is not None else "view depth, one colour")
+    return finish(ir, debug_uav=True), f"forward fog: {how}, {len(sites)} output site(s)"
+
+
+def merge_colour(ir: Ir) -> tuple[list, str]:
+    """ph_volumetric_clouds_merge's output: per channel its colour in the
+    scene's units before the dither (the operand of RT0's final add that is
+    multiplied by Global[86].x), and the clouds' alpha (RT0.a, or its
+    saturated factor where it is that times User[0].z^2)."""
+    glob = {h for h, (_, size) in ir.cbs.items() if size == 4800}
+    stores = {(int(m[1]), int(m[2])): m[3] for line in ir.lines if (m := STORE.match(line))}
+    def g86x(v):
+        if v not in ir.extracts or ir.extracts[v][1] != 0:
+            return False
+        load = ir.extracts[v][0]
+        return load in ir.loads and ir.loads[load][0] in glob and ir.loads[load][1] == 86
+    rgb = []
+    for c in range(3):
+        v = stores.get((0, c))
+        need(v in ir.binops and ir.binops[v][0] == "fadd", f"RT0.{c}: not the dither's add")
+        picks = [x for x in ir.binops[v][1:] if x in ir.binops and ir.binops[x][0] == "fmul"
+                 and any(g86x(y) for y in ir.binops[x][1:])]
+        need(len(picks) == 1, f"RT0.{c}: {len(picks)} colours times Global[86].x")
+        rgb.append(picks[0])
+    a = stores.get((0, 3))
+    need(a and a.startswith("%"), "no alpha")
+    if a in ir.binops and ir.binops[a][0] == "fmul":
+        sat = [x for x in ir.binops[a][1:] if x in ir.unary and ir.unary[x][0] == OP_SATURATE]
+        if len(sat) == 1:
+            a = sat[0]
+    return rgb, a
+
+
+def patch_fog_scale(text: str) -> tuple[str, str]:
+    """ph_volumetric_clouds_merge, for the forward pass's fog
+    (patch_forward_fog); output unchanged:
+      - its factor from the clouds' colour to the scene's, Global[86].x
+        Global[86].y User[0].z^2 (this pass's User; the larger variants, which
+        also read User[0].x, take User[0].x User[0].z), to FOG_SCALE with the
+        frame, from the pixel at (0, 0);
+      - the fog's colour on a grid (FOG_GRID, FOG_GRID_N cells, each from the
+        pixel at its centre): the merged clouds' colour over their alpha in the
+        scene's units (merge_colour), and the alpha. That is the colour of the
+        fog in front of whatever the pixel shows, so see-through elements
+        drawn later can take on the fog around them."""
+    ir = Ir(text)
+    glob = sorted((h for h, (_, size) in ir.cbs.items() if size == 4800), key=lambda h: ir.defs[h])
+    user = sorted((h for h, (_, size) in ir.cbs.items() if size == 10528), key=lambda h: ir.defs[h])
+    need(glob and user, f"{len(glob)} Global and {len(user)} User cbuffers")
+    reg0 = {n for n, (h, reg) in ir.loads.items() if h in user and reg == 0}
+    comps = {c for _, (load, c) in ir.extracts.items() if load in reg0}
+    need(2 in comps and comps <= {0, 1, 2}, f"User[0] components {sorted(comps)}")
+    position = position_w(ir, w=False)
+    colour, alpha = merge_colour(ir)
+
+    def ret_line():
+        rets = [i for i, line in enumerate(ir.lines) if line.strip() == "ret void"]
+        need(len(rets) == 1, f"{len(rets)} returns")
+        return rets[0]
+
+    def guarded(tag, condition, body_lines):
+        at = ret_line()
+        lines, _, edits = guard_block(ir, at, condition, body_lines, {}, tag)
+        edits.append((at, [*pre.lines, *lines, ir.lines[at]]))
+        for j, new_lines in sorted(edits, key=lambda e: -e[0]):
+            ir.lines[j:j + 1] = new_lines
+        ir.reindex()
+
+    def uav(em):
+        uh = em.new(f"call %dx.types.Handle @dx.op.createHandleFromBinding(i32 217, %dx.types.ResBind "
+                    f"{{ i32 0, i32 0, i32 {MOD_SPACE}, i8 1 }}, i32 0, i1 false)")
+        return em.new(f"call %dx.types.Handle @dx.op.annotateHandle(i32 216, %dx.types.Handle {uh}, "
+                      "%dx.types.ResourceProperties { i32 4107, i32 0 })")
+
+    # the grid: each cell from the pixel at its centre
+    pre = Emitter("fg.c.")
+    flags = pre.new(f"bitcast float {pre.ext(pre.load('%mod.ah', 0), 0)} to i32")
+    bound = pre.new(f"icmp ne i32 {pre.new(f'and i32 {flags}, 64')}, 0")
+    xy = [pre.new(f"call float @dx.op.loadInput.f32(i32 4, i32 {position}, i32 0, i8 {c}, i32 undef)") for c in (0, 1)]
+    r105 = pre.load(glob[0], 105)
+    cells, hits = [], []
+    for k, n in enumerate(FOG_GRID_N):
+        cell = pre.min(pre.unary(27, pre.mul(pre.mul(xy[k], float(n)), pre.ext(r105, 2 + k))), float(n - 1))
+        centre = pre.add(pre.unary(27, pre.mul(pre.add(cell, 0.5), pre.mul(pre.ext(r105, k), 1.0 / n))), 0.5)
+        hits.append(pre.cmp("olt", pre.unary(6, pre.sub(xy[k], centre)), 0.5))
+        cells.append(pre.new(f"fptoui float {cell} to i32"))
+    on_cell = pre.new(f"and i1 {bound}, {pre.new(f'and i1 {hits[0]}, {hits[1]}')}")
+    body = Emitter("fg.b.")
+    u = uav(body)
+    index = body.new(f"add i32 {body.new(f'mul i32 {cells[1]}, {FOG_GRID_N[0]}')}, {cells[0]}")
+    addr = body.new(f"add i32 {body.new(f'mul i32 {index}, 16')}, {FOG_GRID}")
+    inv = body.div(1.0, body.max(alpha, 1e-3))
+    fog = [body.min(body.max(body.mul(colour[c], inv), 0.0), FOG_COLOUR_MAX) for c in range(3)]
+    body.lines.append(f"  call void @dx.op.rawBufferStore.f32(i32 140, %dx.types.Handle {u}, i32 {addr}, i32 undef, "
+                      f"float {fog[0]}, float {fog[1]}, float {fog[2]}, float {alpha}, i8 15, i32 4)")
+    guarded("fg", on_cell, body.lines)
+
+    # the factor, from the pixel at (0, 0)
+    pre = Emitter("fs.c.")
+    flags = pre.new(f"bitcast float {pre.ext(pre.load('%mod.ah', 0), 0)} to i32")
+    bound = pre.new(f"icmp ne i32 {pre.new(f'and i32 {flags}, 64')}, 0")
+    xy = [pre.new(f"call float @dx.op.loadInput.f32(i32 4, i32 {position}, i32 0, i8 {c}, i32 undef)") for c in (0, 1)]
+    corner = pre.new(f"and i1 {pre.cmp('olt', xy[0], 1.0)}, {pre.cmp('olt', xy[1], 1.0)}")
+    cond = pre.new(f"and i1 {bound}, {corner}")
+    body = Emitter("fs.b.")
+    g86 = body.load(glob[0], 86)
+    r0 = body.load(user[0], 0)
+    u0 = body.mul(body.ext(r0, 2), body.ext(r0, 0 if 0 in comps else 2))
+    body.lines.append(f"  %mod.fs.f = fmul fast float {body.mul(body.ext(g86, 0), body.ext(g86, 1))}, {u0}")
+    u = uav(body)
+    frame = body.new(f"and i32 {body.new(f'lshr i32 {flags}, 16')}, 65535")
+    stamp = body.new(f"bitcast i32 {body.new(f'or i32 {frame}, 65536')} to float")
+    body.lines.append(f"  call void @dx.op.rawBufferStore.f32(i32 140, %dx.types.Handle {u}, i32 {FOG_SCALE}, "
+                      f"i32 undef, float %mod.fs.f, float {stamp}, float undef, float undef, i8 3, i32 4)")
+    guarded("fs", cond, body.lines)
+    return finish(ir, debug_uav=True), (f"fog scale at {FOG_SCALE:#x}: G[86].x G[86].y U[0].z "
+                                        f"U[0].{'x' if 0 in comps else 'z'}; fog colour grid "
+                                        f"{FOG_GRID_N[0]} x {FOG_GRID_N[1]} at {FOG_GRID:#x}")
+
+
+def position_w(ir: Ir, w: bool = True) -> int:
+    """A pixel shader's SV_Position input: its signature element id, with w
+    added to the element's usage mask if w (D3D's SV_Position.w is the clip w,
+    the view depth). SkipPatch without a 4-component SV_Position."""
+    elem = None
+    for i, line in enumerate(ir.lines):
+        m = re.match(r'(!\d+) = !\{i32 (\d+), !"SV_Position", i8 \d+, i8 3, !\d+, i8 \d+, i32 \d+, i8 (\d+), '
+                     r"i32 \d+, i8 \d+, (!\d+|null)\}$", line)
+        if m:
+            elem = (i, int(m[2]), int(m[3]), m[4])
+    if elem is None or elem[2] != 4:
+        raise SkipPatch("no aerial-perspective depth and no SV_Position.w")
+    i, ident, _, props = elem
+    if not w:
+        return ident
+    pairs = []
+    if props != "null":
+        node = next(l for l in ir.lines if l.startswith(f"{props} = !{{"))
+        nums = [int(x) for x in re.findall(r"i32 (-?\d+)", node)]
+        pairs = list(zip(nums[0::2], nums[1::2]))
+    mask = dict(pairs).get(3, 0)
+    if mask & 8:
+        return ident
+    pairs = [(tag, val) for tag, val in pairs if tag != 3] + [(3, mask | 8)]
+    top = max(int(m[1]) for line in ir.lines if (m := re.match(r"!(\d+) = ", line)))
+    new = f"!{top + 1}"
+    ir.lines.append(f"{new} = !{{{', '.join(f'i32 {tag}, i32 {val}' for tag, val in pairs)}}}")
+    ir.lines[i] = ir.lines[i][:ir.lines[i].rindex(props)] + new + "}"
+    return ident
 
 
 # Untiling the erosion noise. MSFS erodes every cloud surface with one 3D noise
@@ -3039,6 +4097,7 @@ def patch_clouds(text: str) -> tuple[str, str]:
     (C3-C5) and the forward lobe (C0-C2). The order matters: each step finds the stock
     patterns the next one rewrites."""
     ir = Ir(text)
+    inside_site = find_inside_site(ir)  # (in the stock IR; applied last)
     colour = apply_cloud_ap(ir)
     ir.reindex()
     optical = apply_cloud_optical(ir)  # (before apply_cloud_shape renames the edge ramps)
@@ -3055,9 +4114,13 @@ def patch_clouds(text: str) -> tuple[str, str]:
     ms = apply_cloud_ms(ir)
     ir.reindex()
     phase = apply_cloud_phase(ir)
+    ir.reindex()
+    inside = apply_cloud_inside(ir, inside_site)
+    ir.reindex()
+    inside += "; " + apply_cloud_fog_record(ir, inside_site)
     user = append_user_dump(ir)
     return finish(ir, cloud=True, debug_uav=True), (f"{colour}; {optical}; {detail}; {shape}; {types}; {ms}; {phase}; "
-                                                    f"{user}")
+                                                    f"{inside}; {user}")
 
 
 DEBUG_REGION_SHADOW = 2048       # ch_deferred_shadows: its 720-byte shadow cbuffer, 43 registers
@@ -3913,7 +4976,7 @@ def patch_output_capture(text: str, region: int) -> tuple[str, str]:
 #   0xA01000  t2, t3 (precipitation keyframes) texels (0..255, 0..255) .x as f32, 256 KB each
 #   0xA81000  per column of the centre window: float4 (local terrain t1.x, global terrain H, the METAR
 #             anchor's weight, its distance to the station in m; 0, 0 without anchoring)
-#   3072      the cloud constants C0..C31 as the shader sees them (8 registers)
+#   3072      the cloud constants C0..C35 as the shader sees them (9 registers)
 # That is the live-weather family (flag 1: the weather map). The layer family
 # (flag 2: weather presets and injected weather such as Active Sky) has its noise in
 # t2 and its coverage curve in t3, dumped at the same places (getDimensions in
@@ -4004,6 +5067,8 @@ assert ANVIL_REGION % 16 == 0 and ANVIL_REGION + 8 * TYPES_N * TYPES_N <= 20 << 
 # column's storm base (m)), same thread (apply_cb_towers; CB_SIDE_AMBIENT).
 TOWER_REGION = ANVIL_REGION + 8 * TYPES_N * TYPES_N
 assert TOWER_REGION + 8 * TYPES_N * TYPES_N <= 20 << 20
+assert TOWER_REGION + 8 * TYPES_N * TYPES_N <= CAMVOL_TINT_REGION
+assert CAMVOL_TINT_REGION + 16 * CAMVOL_N[0] * CAMVOL_N[1] * CAMVOL_N[2] <= 20 << 20
 
 RES_CLASS = {"t": 0, "u": 1, "cb": 2, "s": 3}
 
@@ -4448,6 +5513,9 @@ CB_SIDE_REACH = 1.3
 CB_SIDE_FADE_M = 2500.0
 CB_SIDE_AMBIENT = 1.0
 CB_SIDE_RAMP_M = 2500.0
+# The towers' shapes only in the columns with a cell around them (and the storms on): the rest
+# skip them, with the same outputs (False: every column computes them, as before 3 Nov 2026).
+CB_TOWERS_SKIP = True
 # The anvil level (the equilibrium level) as a share of the tropopause, by the cell's vigour v:
 # wide, rain-heavy updrafts entrain less and rise higher (and overshoot more) than small ones,
 # v = w (CB_VIGOUR[0] + CB_VIGOUR[1] h) with h the size hash (the radius's), plus +-CB_TOP_JITTER.
@@ -4741,7 +5809,7 @@ def apply_cb_towers(ir: Ir, text: str, values: dict) -> str:
         dlon = em.div(dlat, em.max(em.unary(12, em.mul(clat, 1.0 / deg)), 0.1))
         j0 = em.unary(27, em.div(lon, dlon))
         candidates += [(row, em.add(j0, dj) if dj else j0, dlon) for dj in (-1.0, 0.0, 1.0)]
-    towers, anvils, marks = [], [], []
+    cells = []
     for ci, cj, dlon in candidates:
         # the cell: its own offset in time, then its current generation's hash (22 numbers in [0, 1))
         ii = em.new(f"fptosi float {ci} to i32")
@@ -4800,6 +5868,18 @@ def apply_cb_towers(ir: Ir, text: str, values: dict) -> str:
         exist = em.sat(em.mul(em.sub(em.mul(evidence, CB_CHANCE), hs[2]), 1.0 / CB_EXIST_SOFT))
         stage = em.div(phase, em.mad(hs[21], CB_LIFE_S[1] - CB_LIFE_S[0], CB_LIFE_S[0]))
         present = em.new(f"and i1 {em.cmp('ogt', exist, 0.0)}, {em.cmp('olt', stage, 1.0)}")
+        cells.append((hs, wx, wz, rate, est, evidence, exist, stage, present))
+    # The rest only where a cell is present around the column and the storms are on (guard_block):
+    # most of the map has none, and the rest is 70% of what this patch adds to the generator (31,000
+    # instructions per column, notes/performance.md). Without a cell every part's top is -1e9, so
+    # the outputs are fixed: x 0, y 0.5, the shares, the anvil's cover and the mark 0.
+    any_cell = cells[0][-1]
+    for cell in cells[1:]:
+        any_cell = em.new(f"or i1 {any_cell}, {cell[-1]}")
+    go = em.new(f"and i1 {any_cell}, {em.new(f'xor i1 {gate}, true')}") if CB_TOWERS_SKIP else "true"
+    pre, em = em, Emitter("cb.b.")
+    towers, anvils, marks = [], [], []
+    for hs, wx, wz, rate, est, evidence, exist, stage, present in cells:
         # its strength w from the rain (or a station's report), its size (skewed small); radius, vigour,
         # anvil level
         w = em.max(smoothstep(em, rate, *CB_RAIN), em.mul(est, CB_EVIDENCE_W))
@@ -5041,33 +6121,42 @@ def apply_cb_towers(ir: Ir, text: str, values: dict) -> str:
         frees.append(free)
     # the shares, spread one slice up and down outside the bodies: a sheet's top and bottom
     # surfaces lie between its slice and the next, which the renderer's types reach too
+    zero, half = Emitter.lit(0.0), Emitter.lit(0.5)
+    outputs = {}  # (out of the guard: its value, and the fixed one without a cell)
     for k in range(WEATHER_SLICES):
         near = [raw[j] for j in (k - 1, k + 1) if 0 <= j < WEATHER_SLICES]
         nb = near[0] if len(near) == 1 else em.max(near[0], near[1])
-        share = em.max(raw[k], em.mul(nb, frees[k]))
-        shares[k] = f"%mod.cb.ty{k}"
-        em.lines.append(f"  {shares[k]} = select i1 {gate}, float 0.000000e+00, float {share}")
-    ir.cb_type_shares = shares
-    # the anvils for the renderer's cirrus: the most-covering cell's cover and level
+        outputs[f"s{k}"] = (em.max(raw[k], em.mul(nb, frees[k])), zero)
+    # the anvils for the renderer's cirrus: the most-covering cell's cover and level (unused at cover 0)
     cov, alt = anvils[0]
     for c, lev in anvils[1:]:
         alt = em.select(em.cmp("ogt", c, cov), lev, alt)
         cov = em.max(cov, c)
-    em.lines += [f"  %mod.cb.ccov = select i1 {gate}, float 0.000000e+00, float {cov}",
-                 f"  %mod.cb.calt = fadd fast float {alt}, 0.000000e+00"]
-    ir.cb_anvil = ("%mod.cb.calt", "%mod.cb.ccov")
-    # the towers' mark and the base, for the renderer's sky light
+    outputs["cov"], outputs["alt"] = (cov, zero), (alt, zero)
+    # the towers' mark, for the renderer's sky light
     mark = marks[0]
     for m_ in marks[1:]:
         mark = em.max(mark, m_)
-    em.lines += [f"  %mod.cb.mark = select i1 {gate}, float 0.000000e+00, float {mark}",
-                 f"  %mod.cb.mbase = fadd fast float {base}, 0.000000e+00"]
+    outputs["mark"] = (mark, zero)
+    for k, (xcb, ycb) in out.items():
+        outputs[f"x{k}"], outputs[f"y{k}"] = (xcb, zero), (ycb, half)
+    # after the guard's join (its outputs %mod.cbg.<name>)
+    after = []
+    for k in range(WEATHER_SLICES):
+        shares[k] = f"%mod.cb.ty{k}"
+        after.append(f"  {shares[k]} = select i1 {gate}, float 0.000000e+00, float %mod.cbg.s{k}")
+    ir.cb_type_shares = shares
+    after += [f"  %mod.cb.ccov = select i1 {gate}, float 0.000000e+00, float %mod.cbg.cov",
+              "  %mod.cb.calt = fadd fast float %mod.cbg.alt, 0.000000e+00",
+              f"  %mod.cb.mark = select i1 {gate}, float 0.000000e+00, float %mod.cbg.mark",
+              f"  %mod.cb.mbase = fadd fast float {base}, 0.000000e+00"]
+    ir.cb_anvil = ("%mod.cb.calt", "%mod.cb.ccov")
     ir.cb_tower = ("%mod.cb.mark", "%mod.cb.mbase")
     edits = []
     for i, k, m in stores:
         if k not in out:
             continue
-        xcb, ycb = out[k]
+        xcb, ycb = f"%mod.cbg.x{k}", f"%mod.cbg.y{k}"
         xo, yo = f"%mod.cb.x{k}", f"%mod.cb.y{k}"
         edits.append((i, [
             f"  {xo}m = call float @dx.op.binary.f32(i32 35, float {m[3]}, float {xcb})",
@@ -5078,7 +6167,11 @@ def apply_cb_towers(ir: Ir, text: str, values: dict) -> str:
         ]))
     for i, new_lines in sorted(edits, key=lambda e: -e[0]):
         ir.lines[i:i + 1] = new_lines
-    ir.lines[first:first] = em.lines
+    lines, names, phi_edits = guard_block(ir, first, go, em.lines, outputs, "cbg", entry=True)
+    need(all(v == f"%mod.cbg.{n}" for n, v in names.items()), "guard outputs")
+    for i, new_lines in sorted(phi_edits, key=lambda e: -e[0]):
+        ir.lines[i:i + 1] = new_lines
+    ir.lines[first:first] = pre.lines + lines + after
     return (f"cumulonimbus towers: 9 candidates per column on a {CB_CELL_KM:.0f} km grid (leaning tower, "
             f"{CB_FLANK_N} flanking turrets, anvil; wind P[5]), rain {rain['t2']}/{rain['t3']}, "
             f"x and y of {len(out)} slices")
@@ -5821,7 +6914,9 @@ def append_user_dump(ir: Ir) -> str:
 
 PATCHES = {"medium": patch_medium, "cloud_ap": patch_cloud_ap, "clouds": patch_clouds,
            "shadow_capture": patch_shadow_capture, "output_capture": patch_output_capture,
-           "cloud_gen_capture": patch_cloud_gen_capture}
+           "cloud_gen_capture": patch_cloud_gen_capture, "forward_fog": patch_forward_fog,
+           "fog_scale": patch_fog_scale}
+PARALLEL_MIN_JOBS = 64  # fewer variants are patched in this process
 
 
 def disassemble(blob: Path, dxc: Path) -> str:
@@ -5840,46 +6935,77 @@ def patch_all(keep_ir: bool = False, root: Path | None = None, dxc: Path | None 
     reported and skipped, whatever the error."""
     root = root or ROOT
     dxc = dxc or find_dxc()
-    assembler = Assembler(dxc.parent)
     manifest = json.loads((root / "shaders" / "manifest.json").read_text())
     index = list(csv.DictReader(open(root / "extracted" / "index.csv")))
-    failures = 0
+    jobs = []  # (target, job)
     for target in manifest.get("patches", []):
         entry = target["entry"]
-        out_dir = root / "build" / ("patched" if target.get("lab_only") else "shaders")
-        out_dir.mkdir(parents=True, exist_ok=True)
         blobs = sorted({root / "extracted" / row["path"] for row in index if row["entry"] == entry})
         crcs = target.get("crcs", "all")
-        for blob in blobs:
-            crc = blob.name.split(".")[0]
-            if crcs != "all" and crc not in crcs:
+        jobs += [(target, (blob, target.get("kind", "medium"), target.get("args", {}), keep_ir, dxc))
+                 for blob in blobs if crcs == "all" or blob.name.split(".")[0] in crcs]
+    # (thousands of forward-pass variants: patched and assembled in worker processes)
+    workers = min(8, max(1, (os.cpu_count() or 2) - 1))
+    if len(jobs) >= PARALLEL_MIN_JOBS and workers > 1:
+        pool = multiprocessing.get_context("spawn").Pool(workers)
+        results = pool.imap(_patch_job, [job for _, job in jobs], chunksize=8)
+    else:
+        pool, results = None, map(_patch_job, [job for _, job in jobs])
+    failures, skipped = 0, {}
+    try:
+        for (target, _), (crc, status, message, code, ir_text) in zip(jobs, results):
+            entry = target["entry"]
+            if status == "skip":
+                skipped[entry] = skipped.get(entry, 0) + 1
                 continue
-            try:
-                patched, summary = PATCHES[target.get("kind", "medium")](disassemble(blob, dxc),
-                                                                         **target.get("args", {}))
-            except PatchError as e:
-                print(f"{entry} {crc}: NOT PATCHED: {e}")
+            if status == "error" and strict:
+                raise RuntimeError(f"{entry} {crc}:\n{message}")
+            if status != "ok":
+                print(f"{entry} {crc}: {message.strip()}")
                 failures += 1
                 continue
-            except Exception as e:  # (only with strict = False)
-                if strict:
-                    raise
-                print(f"{entry} {crc}: NOT PATCHED: {type(e).__name__}: {e}")
-                failures += 1
-                continue
+            out_dir = root / "build" / ("patched" if target.get("lab_only") else "shaders")
+            out_dir.mkdir(parents=True, exist_ok=True)
             if keep_ir:
                 ir_dir = root / "build" / "patched" / "ir"
                 ir_dir.mkdir(parents=True, exist_ok=True)
-                (ir_dir / f"{crc}.ll").write_text(patched)
+                (ir_dir / f"{crc}.ll").write_text(ir_text)
             out = out_dir / f"{crc}.cso"
-            try:
-                out.write_bytes(assembler.assemble(patched))
-            except AssemblyError as e:
-                print(f"{entry} {crc}: {e}")
-                failures += 1
-                continue
-            print(f"patched {out.relative_to(root)}  <- {entry}: {summary}")
+            out.write_bytes(code)
+            print(f"patched {out.relative_to(root)}  <- {entry}: {message}")
+    finally:
+        if pool is not None:
+            pool.terminate()
+    for entry, n in skipped.items():
+        print(f"{entry}: {n} variant(s) left as they are (the patch doesn't apply to them)")
     return failures
+
+
+_WORKER_ASSEMBLER = None
+
+
+def _patch_job(job: tuple) -> tuple:
+    """One target variant (patch_all; also in a worker process): (crc, status,
+    message, DXIL, IR), status ok, skip, fail or error (an unexpected exception,
+    its traceback in message)."""
+    global _WORKER_ASSEMBLER
+    blob, kind, args, keep_ir, dxc = job
+    crc = blob.name.split(".")[0]
+    try:
+        patched, summary = PATCHES[kind](disassemble(blob, dxc), **args)
+    except SkipPatch as e:
+        return crc, "skip", str(e), None, None
+    except PatchError as e:
+        return crc, "fail", f"NOT PATCHED: {e}", None, None
+    except Exception:
+        return crc, "error", f"NOT PATCHED: {traceback.format_exc()}", None, None
+    if _WORKER_ASSEMBLER is None:
+        _WORKER_ASSEMBLER = Assembler(dxc.parent)
+    try:
+        code = _WORKER_ASSEMBLER.assemble(patched)
+    except AssemblyError as e:
+        return crc, "fail", str(e), None, None
+    return crc, "ok", summary, code, patched if keep_ir else None
 
 
 def main() -> None:
