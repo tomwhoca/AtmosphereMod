@@ -10,8 +10,10 @@
 //   AtmosphereMod.Metar    app -> SimConnect  {time, lat, lon, ident, metar | error}
 //   AtmosphereMod.Status   app -> SimConnect  {state, detail}
 //   AtmosphereMod.Request  SimConnect -> app  {} (aircraft position), {ident} or {lat, lon}
-//   AtmosphereMod.Settings app -> add-on      {get}, {set: {T3: 4.5, ...}}, {enabled}, {reload}
-//   AtmosphereMod.State    add-on -> app      {enabled, T, C, TE, weather} (addon/src/settings_bridge.h)
+//   AtmosphereMod.Settings app -> add-on      {get}, {set: {T3: 4.5, ...}}, {enabled}, {reload}, {savePreset},
+//                                             {loadPreset, discard}, {deletePreset}
+//   AtmosphereMod.State    add-on -> app      {enabled, T, C, TE, weather, version, presets, preset, presetSaved,
+//                                             presetNote} (addon/src/settings_bridge.h)
 
 /// <reference types="@microsoft/msfs-types/js/simvar" />
 
@@ -26,11 +28,22 @@ import {
   RequiredProps,
   TVNode,
 } from "@efb/efb-api";
-import { EventBus, FacilityLoader, FacilityRepository, FSComponent, Metar, Subject, VNode } from "@microsoft/msfs-sdk";
+import {
+  EventBus,
+  FacilityLoader,
+  FacilityRepository,
+  FSComponent,
+  MappedSubject,
+  Metar,
+  Subject,
+  VNode,
+} from "@microsoft/msfs-sdk";
 
 import { EVENT_SETTINGS, EVENT_STATE, SETTINGS_CSS, SettingsModel, SettingsView } from "./Settings";
 
 declare const BASE_URL: string;
+/** The mod's version (build.js, from addon/CMakeLists.txt). */
+declare const VERSION: string;
 
 /** The SDK's /JS/Services/CommBus.js. */
 interface CommBusListener {
@@ -45,6 +58,12 @@ const EVENT_REQUEST = "AtmosphereMod.Request";
 const POLL_MS = 60_000;
 /** Until the add-on answers, the settings ask for its state this often. */
 const STATE_RETRY_MS = 3000;
+/** Narrower than this (px), the settings take the narrow layout (.atmo-narrow): a slider and its
+ * value need the room a name at 40% of the row leaves them from about here on. */
+const NARROW_PX = 800;
+/** After the tablet's size or orientation changes, the app's width is measured again this late,
+ * once the EFB has laid it out. */
+const RELAYOUT_MS = 250;
 
 interface MetarRequest {
   ident?: string;
@@ -73,7 +92,8 @@ function loadScript(src: string): Promise<void> {
 /** Fetches the sim's METAR near the aircraft and sends it to SimConnect clients. */
 class WeatherBridge {
   public readonly status = Subject.create("starting");
-  public readonly lastMetar = Subject.create("(none yet)");
+  /** The METAR of the airport nearest the aircraft ("" before the first). */
+  public readonly airport = Subject.create("");
   private commBus?: CommBusListener;
   private loader?: FacilityLoader;
   private started = false;
@@ -112,6 +132,8 @@ class WeatherBridge {
   }
 
   private async poll(request: MetarRequest): Promise<void> {
+    // (no place and no station: the aircraft's, its nearest airport)
+    const atAircraft = request.lat === undefined && request.lon === undefined && !request.ident;
     const lat = request.lat ?? (SimVar.GetSimVarValue("PLANE LATITUDE", "degree latitude") as number);
     const lon = request.lon ?? (SimVar.GetSimVarValue("PLANE LONGITUDE", "degree longitude") as number);
     const message: Record<string, unknown> = { time: new Date().toISOString(), lat, lon, ident: request.ident ?? null };
@@ -120,11 +142,13 @@ class WeatherBridge {
         ? await this.loader!.getMetar(request.ident)
         : await this.loader!.searchMetar(lat, lon);
       message.metar = metar ?? null;
-      this.lastMetar.set(metar ? metar.metarString : "no METAR returned");
       this.status.set(`running, last poll ${message.time}`);
+      if (atAircraft) {
+        this.airport.set(metar?.metarString ?? "No METAR near the aircraft");
+      }
     } catch (e) {
       message.error = String(e);
-      this.lastMetar.set(`error: ${e}`);
+      this.status.set(`running, last poll failed: ${e}`);
     }
     this.send(EVENT_METAR, message);
   }
@@ -153,33 +177,68 @@ setInterval(() => {
 }, STATE_RETRY_MS);
 
 const style = document.createElement("style");
+// (the link's status and the version, at the end of the page)
 style.textContent = SETTINGS_CSS + `
-.atmo-link { padding: 0 32px 104px; opacity: 0.6; font-size: 15px; }
-.atmo-link pre { white-space: pre-wrap; font-family: monospace; margin: 4px 0 0; }
+.atmo-link { padding-top: 24px; opacity: 0.6; font-size: 21px; }
 `;
 document.head.appendChild(style);
 
+/** The mod's version, and the add-on's in the sim where it differs (a partial update). */
+const versionLine = MappedSubject.create(
+  ([connected, addon]) => (!connected || addon === VERSION ? `AtmosphereMod ${VERSION}`
+    : `AtmosphereMod ${VERSION} (EFB app); the add-on in the sim: ${addon || "an older version"}`),
+  settings.connected,
+  settings.addonVersion,
+);
+
 class AtmoWeatherView extends AppView<RequiredProps<AppViewProps, "bus">> {
+  private readonly root = FSComponent.createRef<HTMLDivElement>();
+  private readonly narrow = Subject.create(false);
+
+  public onAfterRender(node: VNode): void {
+    super.onAfterRender(node);
+    // the tablet's size and orientation (the EFB's settings)
+    const panel = window.PanelInfo;
+    panel?.size.width.sub(() => this.relayout());
+    panel?.size.height.sub(() => this.relayout());
+    panel?.orientation.sub(() => this.relayout());
+    this.relayout();
+  }
+
   public onOpen(): void {
     super.onOpen();
     settings.requestState();
+    this.relayout();
   }
 
   public onResume(): void {
     super.onResume();
     settings.requestState();
+    this.relayout();
+  }
+
+  /** The layout for the app's width: now, and again once the EFB has laid it out. */
+  private relayout(): void {
+    this.measure();
+    setTimeout(() => this.measure(), RELAYOUT_MS);
+  }
+
+  private measure(): void {
+    const width = this.root.getOrDefault()?.offsetWidth || window.PanelInfo?.size.width.get() || 0;
+    if (width > 0) {
+      this.narrow.set(width < NARROW_PX);
+    }
   }
 
   public render(): VNode {
     return (
-      <div style="height: 100%; display: flex; flex-direction: column;">
-        <div style="flex: 1 1 auto; min-height: 0;">
-          <SettingsView model={settings} />
-        </div>
-        <div class="atmo-link">
-          METAR link: {bridge.status}
-          <pre>{bridge.lastMetar}</pre>
-        </div>
+      <div ref={this.root} class={{ "atmo-app": true, "atmo-narrow": this.narrow }}>
+        <SettingsView model={settings} metar={bridge.airport}>
+          <div class="atmo-link">
+            <div>METAR link: {bridge.status}</div>
+            <div>{versionLine}</div>
+          </div>
+        </SettingsView>
       </div>
     );
   }

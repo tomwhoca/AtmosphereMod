@@ -6,7 +6,8 @@ shaders/replicas.json (the developer's HLSL replicas of patched passes, for
 atmolab) goes to build/replicas instead. Also writes
 build/shader_names.tsv (crc32 -> entry) so the add-on can name what it logs,
 and copies shaders/tunables.ini to build/ for the add-on to read (made from
-shaders/tunables.defaults.ini, the shipping defaults, if missing). Then runs
+shaders/tunables.defaults.ini, the shipping defaults, if missing), and the
+defaults to build/presets/Default.ini (the EFB app's Default preset). Then runs
 tools/patch_dxil.py for the stock shaders we patch instead of replace.
 
     python tools/build_shaders.py            # build all
@@ -63,6 +64,9 @@ def main() -> None:
     if not tunables.exists():
         shutil.copy2(ROOT / "shaders" / "tunables.defaults.ini", tunables)
     shutil.copy2(tunables, ROOT / "build" / "tunables.ini")
+    # the EFB app's Default preset, as the installer writes it (install.py)
+    (ROOT / "build" / "presets").mkdir(parents=True, exist_ok=True)
+    shutil.copy2(ROOT / "shaders" / "tunables.defaults.ini", ROOT / "build" / "presets" / "Default.ini")
     dxc = find_dxc()
     manifest = json.loads((ROOT / "shaders" / "manifest.json").read_text())
     jobs = [(shader, OUT) for shader in manifest["shaders"]]

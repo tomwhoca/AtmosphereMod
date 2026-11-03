@@ -27,14 +27,16 @@ PACKAGE = ROOT / "build" / "efb" / "atmospheremod-weather"
 APP_DIR = "html_ui/efb_ui/efb_apps/AtmoWeather"
 DEFAULTS_INI = ROOT / "shaders" / "tunables.defaults.ini"
 DEFAULTS_TS = APP / "src" / "defaults.ts"
-VERSION = "0.5.1"
+# the mod's version, as the add-on's (tools/make_release.py): the package's, and shown in the app
+VERSION = re.search(r"project\(AtmosphereMod VERSION (\d+\.\d+\.\d+)",
+                    (ROOT / "addon" / "CMakeLists.txt").read_text(encoding="utf-8"))[1]
 
 # Windows FILETIME epoch (1601-01-01) to Unix epoch, in 100 ns units.
 FILETIME_UNIX_OFFSET = 116444736000000000
 
 
 def npm(*args: str, cwd: Path) -> None:
-    env = {**os.environ, "PATH": f"{NODE.parent};{os.environ['PATH']}"}
+    env = {**os.environ, "PATH": f"{NODE.parent};{os.environ['PATH']}", "ATMO_VERSION": VERSION}
     subprocess.run([str(NODE), str(NPM_CLI), *args], cwd=cwd, check=True, env=env)
 
 

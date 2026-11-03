@@ -34,6 +34,7 @@
 #include <d3d12.h>
 
 #include "cloud_stations.h"
+#include "file_dialog.h"
 #include "ozone_climatology.h"
 #include "settings_bridge.h"
 #include "weather_feed.h"
@@ -625,6 +626,19 @@ fs::path tunables_path()
     if (reshade::get_config_value(nullptr, "ATMOSPHEREMOD", "TunablesPath", value, &size) && value[0] != '\0')
         return fs::path(std::u8string(reinterpret_cast<const char8_t *>(value)));
     return g_data_dir / "tunables.ini";
+}
+
+// The EFB app's presets (settings_bridge.h): <DataPath>/presets, Default.ini from the installer.
+fs::path presets_dir()
+{
+    return g_data_dir / "presets";
+}
+
+// The tunables the add-on reads: T0..T15 (T14, T15 its own), R0..R13, C0..C35.
+bool known_tunable(char prefix, unsigned index)
+{
+    return (prefix == 'T' && index < kTunableCount + 2) || (prefix == 'R' && index < kTunableCount) ||
+           (prefix == 'C' && index < kCloudTunableCount);
 }
 
 // tunables.ini: lines of "<prefix><index> = <value>", T for the atmosphere,
@@ -2816,12 +2830,52 @@ void update_effective_tunables()
     g_effective_cloud_tunables = cloud;
 }
 
+// The presets the app lists, the one the settings are, as of the files' stamp, and why its last preset
+// request failed (present thread only).
+std::vector<std::string> g_preset_names;
+std::map<std::string, std::vector<std::string>> g_presets_missing;
+settings::presets::Current g_preset_current;
+std::string g_presets_stamp;
+std::string g_preset_note;
+
+// A JSON string's content (quotes and backslashes escaped).
+std::string json_text(const std::string &text)
+{
+    std::string out;
+    for (const char c : text)
+        out += c == '"' || c == '\\' ? std::string("\\") + c : std::string(1, c);
+    return out;
+}
+
 // The state the EFB app's settings show (settings_bridge.h): tunables.ini's T
 // and C values, the atmosphere tunables the shaders get (TE, rounded: they
-// drift while the METAR's haze is smoothed in), the Ctrl+Shift+F9 switch and
-// the METAR's haze in a line.
-std::string settings_state()
+// drift while the METAR's haze is smoothed in), the Ctrl+Shift+F9 switch, the
+// METAR's haze in a line, the add-on's version, the presets and the one the
+// settings are (listed and matched again when a file changed); not saved while
+// changes wait to be saved into tunables.ini (`pending`).
+std::string settings_state(bool pending)
 {
+    const fs::path dir = presets_dir(), tunables = tunables_path();
+    if (std::string stamp = settings::presets::stamp(dir, tunables); stamp != g_presets_stamp)
+    {
+        g_presets_stamp = std::move(stamp);
+        g_preset_names = settings::presets::list(dir);
+        g_presets_missing = settings::presets::missing(dir, known_tunable);
+        g_preset_current = settings::presets::current(dir, tunables, known_tunable);
+    }
+    std::string presets = "[";
+    for (const std::string &name : g_preset_names)
+        presets += (presets.size() > 1 ? ",\"" : "\"") + json_text(name) + "\"";
+    presets += "]";
+    std::string missing = "{";
+    for (const auto &[name, keys] : g_presets_missing)
+    {
+        missing += (missing.size() > 1 ? ",\"" : "\"") + json_text(name) + "\":[";
+        for (size_t i = 0; i < keys.size(); ++i)
+            missing += (i > 0 ? ",\"" : "\"") + keys[i] + "\"";
+        missing += "]";
+    }
+    missing += "}";
     std::array<float, kTunableCount> ini, effective;
     std::array<float, kCloudTunableCount> cloud;
     {
@@ -2841,18 +2895,90 @@ std::string settings_state()
         }
         return s + "]";
     };
-    std::string weather;
-    for (const char c : weather::summary())
-        weather += c == '"' || c == '\\' ? std::string("\\") + c : std::string(1, c);
     return std::string("{\"enabled\":") + (g_enabled ? "true" : "false") + ",\"T\":" + list(ini, false) +
-           ",\"C\":" + list(cloud, false) + ",\"TE\":" + list(effective, true) + ",\"weather\":\"" + weather + "\"}";
+           ",\"C\":" + list(cloud, false) + ",\"TE\":" + list(effective, true) + ",\"weather\":\"" +
+           json_text(weather::summary()) + "\",\"version\":\"" ATMOSPHEREMOD_VERSION "\",\"presets\":" + presets +
+           ",\"preset\":\"" + json_text(g_preset_current.name) + "\",\"presetSaved\":" +
+           (g_preset_current.saved && !pending ? "true" : "false") + ",\"presetsMissing\":" + missing +
+           ",\"presetNote\":\"" + json_text(g_preset_note) + "\"}";
+}
+
+// The app's preset requests (settings_bridge.h presets): saved, loaded or deleted, in the event log;
+// why one failed in g_preset_note. Returns whether a preset was loaded (tunables.ini changed: reload).
+bool apply_preset_requests(const settings::Requests &requests)
+{
+    namespace presets = settings::presets;
+    const fs::path dir = presets_dir(), tunables = tunables_path();
+    bool loaded = false;
+    std::string error, done;
+    g_preset_note.clear();
+    if (requests.save_preset)
+    {
+        if (presets::save(dir, *requests.save_preset, tunables, error))
+            done += " saved \"" + presets::valid_name(*requests.save_preset) + "\"";
+        else
+            g_preset_note = error;
+    }
+    if (requests.load_preset)
+    {
+        if (const size_t n = presets::load(dir, *requests.load_preset, tunables, known_tunable, requests.discard,
+                                           requests.fill, error))
+        {
+            loaded = true;
+            done += " loaded \"" + presets::valid_name(*requests.load_preset) + "\" (" + std::to_string(n) +
+                    " settings" +
+                    (requests.fill == settings::Fill::defaults ? ", the ones it lacked added from Default"
+                     : requests.fill == settings::Fill::current ? ", the ones it lacked added from the settings before"
+                                                                : "") +
+                    (requests.discard ? ", the settings before not saved" : "") + ")";
+        }
+        else
+            g_preset_note = error;
+    }
+    if (requests.delete_preset)
+    {
+        if (presets::remove(dir, *requests.delete_preset, error))
+            done += " deleted \"" + presets::valid_name(*requests.delete_preset) + "\"";
+        else
+            g_preset_note = error;
+    }
+    event(reshade::log::level::info, "presets (" + dir.string() + "):" + done +
+          (g_preset_note.empty() ? "" : " " + g_preset_note));
+    return loaded;
+}
+
+// The app's preset import (settings_bridge.h presets::import): a file dialog over the sim's window
+// (file_dialog.h), then the file chosen added as a preset; what happened in g_preset_note and the event
+// log. Returns whether the note changed (publish).
+bool sync_import(bool asked, void *window)
+{
+    if (asked)
+    {
+        if (!file_dialog::open(window))
+            return false;  // (it's open: its note stands)
+        g_preset_note = "Choose the file in the window that opened";
+        return true;
+    }
+    const std::optional<fs::path> chosen = file_dialog::take();
+    if (!chosen)
+        return false;
+    const std::u8string from = chosen->u8string();
+    std::string error, name;
+    if (!chosen->empty())
+        name = settings::presets::import(presets_dir(), *chosen, known_tunable, error);
+    g_preset_note = chosen->empty() ? "" : !name.empty() ? "Imported \"" + name + "\"" : error;
+    event(reshade::log::level::info, "presets: import " +
+          (chosen->empty() ? std::string("cancelled") : std::string(from.begin(), from.end()) + ": " + g_preset_note));
+    return true;
 }
 
 // The EFB app's settings: applies what it asked for, saves the changes into
-// tunables.ini once they have rested for a second (at once before a reload),
-// and publishes the state it shows, twice a second. Returns whether to reload
-// (Ctrl+Shift+F10 pressed, or the app's Reload button).
-bool sync_settings(bool reload_key)
+// tunables.ini once they have rested for a second (at once before a reload or
+// a preset request: a preset saves what the app shows, a load starts from it),
+// handles its presets (an import's dialog owned by `window`, the game's), and
+// publishes the state it shows, twice a second. Returns whether to reload
+// (Ctrl+Shift+F10 pressed, the app's Reload button, or a preset loaded).
+bool sync_settings(bool reload_key, void *window)
 {
     using namespace std::chrono_literals;
     static std::vector<settings::Change> unsaved;
@@ -2882,7 +3008,8 @@ bool sync_settings(bool reload_key)
         }
         last_change = now;
     }
-    if (!unsaved.empty() && (flush || now - last_change >= 1s))
+    const bool preset = requests.save_preset || requests.load_preset || requests.delete_preset;
+    if (!unsaved.empty() && (flush || preset || now - last_change >= 1s))
     {
         const fs::path path = tunables_path();
         if (settings::save(path, unsaved))
@@ -2892,12 +3019,14 @@ bool sync_settings(bool reload_key)
             event(reshade::log::level::warning, "couldn't save the EFB app's settings to " + path.string());
         unsaved.clear();
     }
-    if (!requests.set.empty() || requests.enabled || now - last_publish >= 500ms)
+    const bool loaded = preset && apply_preset_requests(requests);
+    const bool imported = sync_import(requests.import_preset, window);
+    if (!requests.set.empty() || requests.enabled || preset || imported || now - last_publish >= 500ms)
     {
         last_publish = now;
-        settings::publish(settings_state());
+        settings::publish(settings_state(!unsaved.empty()));
     }
-    return flush;
+    return flush || loaded;
 }
 
 void on_present(effect_runtime *runtime)
@@ -2921,7 +3050,7 @@ void on_present(effect_runtime *runtime)
         event(reshade::log::level::info, g_enabled ? "replacements ON" : "replacements OFF (stock shaders)");
     }
     // (the EFB app's unsaved changes go to tunables.ini before the reload reads it)
-    if (sync_settings(modifiers && runtime->is_key_pressed(VK_F10)))
+    if (sync_settings(modifiers && runtime->is_key_pressed(VK_F10), runtime->get_hwnd()))
         reload(runtime->get_device());
     if ((modifiers && runtime->is_key_pressed(VK_F11)) || g_auto_capture_due.exchange(false))
         request_capture(frame);

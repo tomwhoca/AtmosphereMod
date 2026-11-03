@@ -32,7 +32,7 @@ esbuild.buildSync({
   logLevel: "error",
 });
 global.window = { setTimeout, clearTimeout };
-const { TABS, SettingsModel } = require(out);
+const { TABS, SettingsModel, PRESET_DEFAULT, presetChar, presetName, sameName, missingText } = require(out);
 const { DEFAULTS } = require(outDefaults);
 
 let failures = 0;
@@ -105,6 +105,71 @@ check(model.value("T3").get() === 4 && model.effectiveValue("T3").get() === 7.5,
   check(JSON.stringify(sent[1]) === '{"enabled":true}' && model.enabled.get(), "the master switch");
   model.reload();
   check(JSON.stringify(sent[2]) === '{"reload":true}', "the Reload button");
+
+  // presets
+  check(!model.hasPresets.get() && model.presets.get().length === 0, "presets: none from an add-on without them");
+  const presets = ["Default", "Summer"];
+  model.onState(JSON.stringify({ T, C, TE, presets, preset: "Summer", presetSaved: false,
+                                 presetNote: "Not loaded: your settings aren't saved" }));
+  check(model.hasPresets.get() && model.presets.get().join() === "Default,Summer" &&
+        model.preset.get() === "Summer" && !model.presetSaved.get() &&
+        model.presetNote.get() === "Not loaded: your settings aren't saved", "presets: listed, the current one, the note");
+  const listed = model.presets.get();
+  model.onState(JSON.stringify({ T, C, TE, presets, preset: "Summer", presetSaved: true }));
+  check(model.presets.get() === listed && model.presetSaved.get() && model.presetNote.get() === "",
+        "presets: the same list again isn't a change");
+  sent.length = 0;
+  model.set("C2", 0.4);
+  model.savePreset("Winter");
+  check(sent.length === 2 && JSON.stringify(sent[0]) === '{"set":{"C2":0.4}}' &&
+        JSON.stringify(sent[1]) === '{"savePreset":"Winter"}', "save: the change still waiting is sent first");
+  await new Promise((r) => setTimeout(r, 150));
+  check(sent.length === 2, "... and not again");
+  model.set("C2", 0.45);
+  check(model.unsent(), "unsent: a change waiting");
+  model.loadPreset("Default", true);
+  check(sent.length === 4 && JSON.stringify(sent[2]) === '{"set":{"C2":0.45}}' &&
+        JSON.stringify(sent[3]) === '{"loadPreset":"Default","discard":true}' && !model.unsent(),
+        "load: the change still waiting is sent first; discarding");
+  const loaded = C.slice();
+  loaded[2] = 0.5;
+  model.onState(JSON.stringify({ T, C: loaded, TE, presets }));
+  check(model.value("C2").get() === 0.5, "load: the preset's values show at once, though C2 was just edited");
+  check(model.preset.get() === "" && !model.presetSaved.get(), "presets: none current without the fields");
+  model.loadPreset("Summer");
+  check(JSON.stringify(sent[4]) === '{"loadPreset":"Summer"}', "load: not discarding unless asked");
+  model.deletePreset("Summer");
+  check(JSON.stringify(sent[5]) === '{"deletePreset":"Summer"}', "delete");
+  model.importPreset();
+  check(JSON.stringify(sent[6]) === '{"importPreset":true}', "import");
+
+  // settings a preset lacks
+  model.onState(JSON.stringify({ T, C, TE, presets, presetsMissing: { Summer: ["C33", "T14"] } }));
+  const gaps = model.presetMissing.get();
+  check(gaps.Summer.join() === "C33,T14", "missing: per preset");
+  model.onState(JSON.stringify({ T, C, TE, presets, presetsMissing: { Summer: ["C33", "T14"] } }));
+  check(model.presetMissing.get() === gaps, "missing: the same again isn't a change");
+  model.loadPreset("Summer", true, "defaults");
+  model.loadPreset("Summer", false, "current");
+  check(JSON.stringify(sent[7]) === '{"loadPreset":"Summer","discard":true,"fill":"defaults"}' &&
+        JSON.stringify(sent[8]) === '{"loadPreset":"Summer","fill":"current"}', "load: filling in what it lacks");
+  const said = (keys, want) => {
+    const got = missingText("Atmo", keys);
+    check(got === want, `missing in a line: ${got}`);
+  };
+  said(["C9"], '"Atmo" has no value for 1 setting: Glory.');
+  said(["C34", "C33", "T14", "C32"], '"Atmo" has no value for 4 settings: Visibility inside clouds, Structure inside '
+    + "clouds, Thunderstorms (experimental) and 1 the app doesn't show.");
+  said(["C2", "C1", "C9", "C12", "C3", "C5", "T14"], '"Atmo" has no value for 7 settings: Silver lining strength, '
+    + "Silver lining size, Glory, Your aircraft's shadow on clouds and 3 more.");
+  said(["T14", "C35"], "\"Atmo\" has no value for 2 settings the app doesn't show.");
+  check(presetName("  My set (2) ") === "My set (2)" && presetName("XP12-like, v2 + haze 'b'") !== "" &&
+        presetName("a/b") === "" && presetName(".x") === "" && presetName("x.") === "" &&
+        presetName("x".repeat(41)) === "" && presetName("x".repeat(40)) !== "",
+        "names: trimmed; a slash, dots at the ends and over 40 characters refused");
+  check(presetChar("a") && presetChar("'") && presetChar(" ") && !presetChar("\\") && !presetChar("\"") &&
+        !presetChar("ä") && !presetChar(":"), "names: the characters the add-on takes");
+  check(sameName("default", PRESET_DEFAULT), "names: case doesn't count");
 
   fs.rmSync(out, { force: true });
   fs.rmSync(outDefaults, { force: true });

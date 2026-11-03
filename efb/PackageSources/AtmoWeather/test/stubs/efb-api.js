@@ -7,5 +7,6 @@ module.exports = {
   Slider: Component,
   Switch: Component,
   TabSelector: Component,
+  TextBox: Component,
   TTButton: Component,
 };

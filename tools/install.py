@@ -616,6 +616,20 @@ def install(args) -> None:
     else:
         tunables.write_text(defaults, encoding="utf-8")
         say("Settings: tunables.ini installed")
+    # the EFB app's presets: Default, this version's defaults (every install); the user's own get the
+    # settings new in this version, as tunables.ini does (then settings that were a preset's still are)
+    presets = data / "presets"
+    presets.mkdir(exist_ok=True)
+    shutil.copy2(payload / "tunables.ini", presets / "Default.ini")
+    for preset in presets.glob("*.ini"):
+        if preset.name.lower() == "default.ini":
+            continue
+        try:
+            merged, added = merge_tunables(defaults, preset.read_text(encoding="utf-8"))
+            if added:
+                preset.write_text(merged, encoding="utf-8")
+        except (OSError, UnicodeError) as e:
+            say(f"Settings: couldn't add the new settings to the preset {preset.stem} ({e})")
 
     # the add-on and ReShade.ini
     shutil.copy2(payload / ADDON, sim / ADDON)
@@ -670,7 +684,7 @@ def uninstall(args) -> None:
         linked = remove_package(community / EFB)
         say(f"removed {community / EFB}" + (f" (a link: the folder it pointed to, {linked}, wasn't touched;"
                                             " delete it there if you no longer need it)" if linked else ""))
-    if data.exists() and ask(f"Also delete {data} (patched shaders, logs and your tunables.ini)?", args.yes):
+    if data.exists() and ask(f"Also delete {data} (patched shaders, logs, your tunables.ini and presets)?", args.yes):
         shutil.rmtree(data)
         say(f"removed {data}")
     say("Uninstalled.")

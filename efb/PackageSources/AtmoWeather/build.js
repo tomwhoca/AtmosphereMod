@@ -21,7 +21,9 @@ esbuild
     minify: false,
     logLevel: "info",
     target: "es2017",
-    define: { BASE_URL: `"coui://html_ui/efb_ui/efb_apps/AtmoWeather"` },
+    // VERSION: the mod's (tools/build_efb.py passes it from addon/CMakeLists.txt)
+    define: { BASE_URL: `"coui://html_ui/efb_ui/efb_apps/AtmoWeather"`,
+              VERSION: JSON.stringify(process.env.ATMO_VERSION || "dev") },
     plugins: [
       // The EFB provides the MSFS SDK as a global; bundling our own copy would
       // create a second, disconnected instance.

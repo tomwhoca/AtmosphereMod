@@ -53,7 +53,8 @@ rendering, and consists of several components:
 
 Taken on 26 October 2026 (the thunderstorms on 29 October) with live weather,
 each pair a few seconds apart with the mod off and on.
-The settings were the shipping ones except for solid clouds 4 (2 by default),
+The settings were the shipping ones except for solid clouds 4 (2 by default
+then, 0.5 since 0.5.2),
 crisper cloud edges 2 (off by default) and small changes to the cloud
 lighting.
 
@@ -691,6 +692,29 @@ from the METAR, the manual haze sliders are greyed out and show what the METAR
 set. Hover over a setting's name for an explanation of what it does. The app's
 "Reload tunables.ini" button does what Ctrl+Shift+F10 does.
 
+**Presets.** The app's fifth tab saves all your settings (every value in
+`tunables.ini`, also the ones the app doesn't show) under a name, and loads
+them again:
+- The tab shows the active preset, and marks it **unsaved changes** once you
+  change a setting. **Save changes** writes them into that preset. Settings that
+  match no preset show as **unsaved settings**.
+- Loading a preset while your settings aren't saved asks first: save them, or
+  tap Load again to discard them.
+- **Default** is the mod's own settings, renewed at every install. It can be
+  loaded but not replaced or deleted.
+- Replacing or deleting a preset takes a second tap.
+- **Import from a file** opens a Windows file window in front of the sim
+  (Downloads at first): pick a preset someone shared, and it's added to the list
+  under its file's name, never over one of yours. In VR, the window is on your
+  desktop monitor.
+- A preset without some settings (one from an older version of the mod, say)
+  names them when you load it, and asks whether to fill them in with the mod's
+  defaults or with your current values. They're added to the preset, so it asks
+  only once.
+- Presets are in `%LOCALAPPDATA%\AtmosphereMod\presets`, one `.ini` file each,
+  in the same format as `tunables.ini`. Installing again keeps your own presets
+  and `tunables.ini`, and adds a new version's new settings to them.
+
 Every setting, including the ones the app doesn't show, is in `tunables.ini`,
 where each one is explained; edits there take effect with Ctrl+Shift+F10. The
 ones you're most likely to touch:
@@ -721,8 +745,8 @@ ones you're most likely to touch:
 
 Close the sim and double-click **`Uninstall AtmosphereMod.cmd`**. It removes the
 add-on, the EFB app and the `[ATMOSPHEREMOD]` section from `ReShade.ini`, and
-asks before deleting `%LOCALAPPDATA%\AtmosphereMod` (the patched shaders, logs
-and your `tunables.ini`). ReShade itself stays installed.
+asks before deleting `%LOCALAPPDATA%\AtmosphereMod` (the patched shaders, logs,
+your `tunables.ini` and presets). ReShade itself stays installed.
 
 ## Troubleshooting
 
