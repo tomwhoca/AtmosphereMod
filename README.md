@@ -772,6 +772,7 @@ Search `ReShade.log` for `add-on` to see which one and why:
 | Line in `ReShade.log` | Fix |
 |---|---|
 | `Skipped loading add-on … because this build of ReShade has only limited add-on functionality` | This is the standard ReShade build: a ReShade update or another mod's installer may have replaced yours. Install ReShade **with full add-on support** over it, then run `Install AtmosphereMod.cmd` again. |
+| `Searching for add-ons (*.addon, *.addon64) in '…'` names a folder other than the sim's | `AddonPath` under `[ADDON]` in `ReShade.ini` sends ReShade to that folder, as another mod's setup may do, and it looks nowhere else. From 0.6.1 the installer also puts the add-on there. Before that, copy `AtmosphereMod.addon64` there yourself, or remove the `AddonPath` line if nothing else needs it. |
 | `Failed to load add-on … with error code …` | Windows couldn't load the file. Security software may have blocked or removed it: check Windows Security's protection history, allow `AtmosphereMod.addon64`, and run the installer again. With error code 126, also repair the Microsoft Visual C++ 2015–2022 Redistributable (x64). |
 | `Failed to register add-on, because the requested API version … is not supported` | ReShade is older than 6.8: update it. |
 | `Failed to register add-on, because another one with the same name ("AtmosphereMod") was already registered` | ReShade found two copies of the add-on. Keep only the one next to `FlightSimulator2024.exe`. |
@@ -808,7 +809,7 @@ a few seconds after a flight loads. If it stays:
    | `connected; waiting for METARs …`, then lines starting with station names | The add-on is fine; see step 4. |
    | `waiting for SimConnect`, and nothing after it | The add-on can't connect to the sim. A possible cause is a `SimConnect.cfg` from a network setup (in Documents or the sim's folder) that sends SimConnect clients elsewhere: rename it to test. |
    | `weather feed stopped by an error: …` | A bug: please report it. |
-   | No `weather feed starting` for that session | The add-on didn't load: back to step 2. |
+   | No `weather feed starting` for that session, or no `weather.log` at all | The add-on didn't load: back to step 2. |
 
 4. **Connected, but still waiting:** the line at the bottom of the app's page
    starts with "METAR link:". If it says "CommBus unavailable", the app itself

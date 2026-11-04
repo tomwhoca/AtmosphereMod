@@ -64,6 +64,9 @@ SECTION = "ATMOSPHEREMOD"
 ISSUES = "https://github.com/tomwhoca/AtmosphereMod/issues"
 BACKUP = "ReShade.ini.atmospheremod.bak"
 RESHADE_LIBRARY = "ReShade64.dll"  # ReShade loaded by another program (OptiShade)
+# What the standard ReShade build logs when it skips an add-on: in that build's DLL, not in the build with
+# full add-on support (checked on 6.8.0), so it tells them apart before the sim has run.
+LIMITED_RESHADE = b"only limited add-on functionality"
 # Microsoft's DirectX Shader Compiler release the patcher was written against
 # (the Windows SDK 10.0.26100's dxc is the same version). The disassembly's
 # text format can change between versions, so this one is pinned.
@@ -281,6 +284,22 @@ def reshade_version(sim: Path) -> str | None:
         if m:
             return m[1]
     return None
+
+
+def reshade_limited(sim: Path) -> bool:
+    """Whether ReShade here is the standard build, which skips add-ons like this one (issue #15)."""
+    return any(LIMITED_RESHADE in (sim / dll).read_bytes() for dll in ("dxgi.dll", RESHADE_LIBRARY)
+               if (sim / dll).exists())
+
+
+def addon_folder(sim: Path) -> Path:
+    """Where ReShade looks for add-ons: only [ADDON] AddonPath in ReShade.ini if it's set (relative to
+    ReShade's folder; another mod's setup may point it elsewhere, issue #15), else the sim's folder."""
+    ini = sim / "ReShade.ini"
+    section = re.search(r"^\[ADDON\][^\[]*", read_config(ini), re.M) if ini.exists() else None
+    value = re.search(r"^AddonPath[ \t]*=(.*)$", section[0], re.M) if section else None
+    path = value[1].strip().strip('"') if value else ""
+    return sim / path if path else sim
 
 
 def community_folder(sim: Path | None = None) -> Path | None:
@@ -531,6 +550,21 @@ def patch(pak: Path, dxc: Path, work: Path, shaders: Path, log) -> tuple[int, in
     return len(made), failed, [r["crc32"] for r in rows]
 
 
+def install_addon(payload: Path, sim: Path) -> Path:
+    """The add-on in the sim's folder, and in ReShade's add-on folder if that's another; returns that folder."""
+    shutil.copy2(payload / ADDON, sim / ADDON)
+    folder = addon_folder(sim)
+    if folder.resolve() != sim.resolve():
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(payload / ADDON, folder / ADDON)
+            say(f"ReShade loads add-ons from {folder} (AddonPath in ReShade.ini): the add-on is there too.")
+        except OSError as e:
+            say(f"Warning: ReShade loads add-ons from {folder} (AddonPath in ReShade.ini), and the add-on couldn't "
+                f"be copied there ({e}). The mod won't load until you copy {sim / ADDON} there, or remove that line.")
+    return folder
+
+
 def install(args) -> None:
     payload = args.payload or HERE.parent / "payload"
     if not (payload / ADDON).exists():
@@ -571,6 +605,13 @@ def install(args) -> None:
     if reshade_note:
         say()
         say(reshade_note)
+    if reshade_limited(sim):
+        say()
+        say("This ReShade is the standard build, which skips add-ons like AtmosphereMod: the mod wouldn't load.")
+        say(f'Install ReShade "with full add-on support" from https://reshade.me over it, for {EXE}, then run')
+        say("this installer again. (A ReShade update or another mod's installer may have replaced yours.)")
+        if not ask("Install anyway?", args.yes, default=False):
+            raise InstallError("ReShade with full add-on support is needed")
     say()
     say(DISCLAIMER)
     say()
@@ -632,7 +673,7 @@ def install(args) -> None:
             say(f"Settings: couldn't add the new settings to the preset {preset.stem} ({e})")
 
     # the add-on and ReShade.ini
-    shutil.copy2(payload / ADDON, sim / ADDON)
+    addons = install_addon(payload, sim)
     ini = sim / "ReShade.ini"
     if ini.exists() and not (sim / BACKUP).exists():
         shutil.copy2(ini, sim / BACKUP)
@@ -648,8 +689,8 @@ def install(args) -> None:
         install_efb(payload, community)
 
     record = {"version": version(), "date": f"{datetime.now():%Y-%m-%d %H:%M}", "sim": str(sim), "reshade": reshade,
-              "community": str(community) if community else None, "data": str(data), "pak": pak.name,
-              "patched": patched, "failed": failed}
+              "addons": str(addons), "community": str(community) if community else None, "data": str(data),
+              "pak": pak.name, "patched": patched, "failed": failed}
     (data / "install.json").write_text(json.dumps(record, indent=2))
     say()
     say("Done. Start the sim; Ctrl+Shift+F9 switches between the mod and stock, Ctrl+Shift+F10 reloads")
@@ -673,9 +714,11 @@ def uninstall(args) -> None:
     if not ask("Uninstall AtmosphereMod?", args.yes):
         raise InstallError("cancelled")
     for s in sims:
-        if (s / ADDON).exists():
-            (s / ADDON).unlink()
-            say(f"removed {s / ADDON}")
+        # (also from ReShade's add-on folder, as it is now and as it was at the install)
+        for folder in dict.fromkeys([s, addon_folder(s)] + ([Path(record["addons"])] if record.get("addons") else [])):
+            if (folder / ADDON).exists():
+                (folder / ADDON).unlink()
+                say(f"removed {folder / ADDON}")
         ini = s / "ReShade.ini"
         if ini.exists() and f"[{SECTION}]" in read_ini(ini):
             ini.write_text(remove_section(read_ini(ini)), encoding="utf-8")
