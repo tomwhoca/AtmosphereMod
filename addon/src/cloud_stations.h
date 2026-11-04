@@ -23,6 +23,7 @@
 #include <cstring>
 #include <functional>
 #include <string>
+#include <unordered_map>
 #include <utility>
 
 namespace anchor
@@ -72,6 +73,7 @@ struct HazeBlend
 constexpr double kFadeInS = 180.0;       // a new station
 constexpr double kFadeOutS = 180.0;      // a station left far behind
 constexpr double kRoomFadeS = 60.0;      // a station making room for a nearer one
+constexpr double kRoomHoldS = 120.0;     // ... after which only a nearer station gets the slot for this long (the survey comes round every 105 s)
 constexpr double kCrossfadeS = 300.0;    // a station's new METAR
 constexpr double kPositionWaitS = 10.0;  // for a station's facility data (position, elevation)
 constexpr double kDropKm = 200.0;        // stations farther from the aircraft fade out ...
@@ -93,11 +95,13 @@ public:
     using Log = std::function<void(const std::string &)>;
     explicit StationSet(Log log) : log_(std::move(log)) {}
 
-    // Forget every station; the next ones appear at once (a new connection, a jump).
+    // Forget every station; the next ones appear at once (a new connection, a
+    // jump). Their positions are kept: airports don't move.
     void restart()
     {
         for (Station &s : slots_)
             s = Station();
+        room_until_ = -1.0;
         instant_pending_ = true;
         instant_until_ = -1.0;
     }
@@ -107,16 +111,25 @@ public:
     // the station's position doesn't arrive, the request's stands in, with
     // ground_m (the terrain under the aircraft) for its elevation; a station
     // surveyed elsewhere is used only once its position is known. Returns true
-    // for a new station: ask for its facility data (on_position). A new
-    // station may have to wait for a slot (allocate): false, as for a known one.
+    // for a new station whose position isn't known yet: ask for its facility
+    // data (on_position). A new station may have to wait for a slot (allocate),
+    // and one known to be out of range stays out: false, as for a known one.
     bool on_metar(const haze::Metar &m, double request_lat, double request_lon, bool at_aircraft, double ground_m,
                   double local_hour, double aircraft_lat, double aircraft_lon, double now)
     {
         Station *s = find(m.icao);
         const bool fresh = s == nullptr;
+        const auto known = positions_.find(m.icao);
+        const bool position_known = known != positions_.end();
         if (fresh)
         {
-            s = allocate(aircraft_lat, aircraft_lon, request_lat, request_lon, m.icao, now);
+            // Judged by where the station is, once that's known: the nearest
+            // station to a survey point can be far from the point.
+            const double lat = position_known ? known->second.lat : request_lat;
+            const double lon = position_known ? known->second.lon : request_lon;
+            if (position_known && distance_km(aircraft_lat, aircraft_lon, lat, lon) > kDropKm)
+                return false;
+            s = allocate(aircraft_lat, aircraft_lon, lat, lon, m.icao, now);
             if (s == nullptr)
                 return false;
             *s = Station();
@@ -126,19 +139,28 @@ public:
             s->request_lat = request_lat;  // kept: the aircraft moves on, the station doesn't
             s->request_lon = request_lon;
             s->ground_m = ground_m;
+            if (position_known)
+            {
+                s->lat = lat;
+                s->lon = lon;
+                s->elevation_m = known->second.elevation_m;
+            }
         }
         s->metar = m;
         s->at_aircraft |= at_aircraft;
         s->local_hour = local_hour;
         rebuild(*s, now, fresh ? (at_aircraft ? "new, nearest the aircraft" : "new, surveyed") : nullptr);
-        return fresh;
+        return fresh && !position_known;
     }
 
     // A station's facility data: its position and elevation.
     void on_position(const std::string &icao, double lat, double lon, double elevation_m, double now)
     {
+        if (!std::isfinite(lat) || !std::isfinite(lon))
+            return;
+        positions_[icao] = { lat, lon, elevation_m };
         Station *s = find(icao);
-        if (s == nullptr || !std::isfinite(lat) || !std::isfinite(lon))
+        if (s == nullptr)
             return;
         s->lat = lat;
         s->lon = lon;
@@ -160,7 +182,13 @@ public:
                 continue;
             if (s.ready < 0.0)
             {
-                if (s.known() || (s.at_aircraft && now - s.added >= kPositionWaitS))
+                const double position_km = s.known() ? distance_km(aircraft_lat, aircraft_lon, s.lat, s.lon) : NAN;
+                if (position_km > kDropKm)  // (on_metar keeps it out from now on)
+                {
+                    note(s, i, "too far (" + std::to_string(std::lround(position_km)) + " km): not used");
+                    s = Station();
+                }
+                else if (s.known() || (s.at_aircraft && now - s.added >= kPositionWaitS))
                     make_ready(s, i, now);
                 else if (now - s.added >= kPositionWaitS)
                 {
@@ -400,31 +428,45 @@ private:
         return nullptr;
     }
 
-    // A free slot. With all in use, a station asked for nearer the aircraft
-    // than the farthest one in use makes that one fade out (kRoomFadeS); the
-    // new station gets the slot with a later METAR (the survey asks again within
-    // a minute). A station in use is never dropped at once: that changed the
-    // clouds abruptly.
+    // A free slot. With all in use, a station nearer the aircraft than the
+    // farthest one in use makes that one fade out (kRoomFadeS); the new station
+    // gets the slot with a later METAR (the survey comes round within two
+    // minutes). A station in use is never dropped at once: that changed the
+    // clouds abruptly. For kRoomHoldS the freed slot goes only to a station
+    // nearer than the one that left: given to the next METAR, it went back to
+    // that one, which then made room again, for ever. Every swap now brings the
+    // set closer to the aircraft, so it settles.
     Station *allocate(double aircraft_lat, double aircraft_lon, double lat, double lon, const std::string &for_icao,
                       double now)
     {
+        const double km = distance_km(aircraft_lat, aircraft_lon, lat, lon);
+        Station *free_slot = nullptr;
+        size_t free_slots = 0;
         for (Station &s : slots_)
             if (!s.used)
-                return &s;
+            {
+                free_slot = free_slot != nullptr ? free_slot : &s;
+                ++free_slots;
+            }
+        if (free_slot != nullptr)
+        {
+            const bool open = now >= room_until_ || free_slots > 1 ||
+                              km < distance_km(aircraft_lat, aircraft_lon, room_lat_, room_lon_);
+            return open ? free_slot : nullptr;
+        }
         size_t farthest = kStations;
         double farthest_km = -1.0;
         for (size_t i = 0; i < kStations; ++i)
         {
             if (slots_[i].leaving)
                 return nullptr;  // one is making room already
-            const double km = distance_km(aircraft_lat, aircraft_lon, slots_[i].pos_lat(), slots_[i].pos_lon());
-            if (km > farthest_km)
+            const double slot_km = distance_km(aircraft_lat, aircraft_lon, slots_[i].pos_lat(), slots_[i].pos_lon());
+            if (slot_km > farthest_km)
             {
                 farthest = i;
-                farthest_km = km;
+                farthest_km = slot_km;
             }
         }
-        const double km = distance_km(aircraft_lat, aircraft_lon, lat, lon);
         if (farthest == kStations || !(km < farthest_km))  // (NAN: the aircraft's position unknown)
             return nullptr;
         Station &f = slots_[farthest];
@@ -439,6 +481,9 @@ private:
         f.leaving = true;
         fade(f, 0.0, kRoomFadeS, now);
         note(f, farthest, "making room" + why + ": fading out over " + std::to_string(std::lround(kRoomFadeS)) + " s");
+        room_lat_ = f.pos_lat();
+        room_lon_ = f.pos_lon();
+        room_until_ = now + kRoomFadeS + kRoomHoldS;
         return nullptr;
     }
 
@@ -497,8 +542,16 @@ private:
         log_("cloud anchor " + s.icao + " [station " + std::to_string(i) + "]: " + what);
     }
 
+    struct Position
+    {
+        double lat, lon, elevation_m;
+    };
+
     Log log_;
     std::array<Station, kStations> slots_ = {};
+    std::unordered_map<std::string, Position> positions_;  // facility data, kept after a station leaves its slot
+    double room_lat_ = NAN, room_lon_ = NAN;               // where the station that last made room was ...
+    double room_until_ = -1.0;                             // ... and until when a free slot only goes to one nearer
     bool instant_pending_ = true;
     double instant_until_ = -1.0;
 };

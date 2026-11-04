@@ -2,11 +2,12 @@
 // its rows (cloud_anchor.h); tools/test_cloud_stations.py builds and runs it.
 //   cloud_stations_test --rows   the rows of test_cloud_gen_capture.py's three
 //                                stations, for comparison with its reference
-//   cloud_stations_test          fades, crossfades, waiting for positions,
-//                                drops, making room and CB layers over simulated time
+//   cloud_stations_test          fades, crossfades, waiting for positions, drops,
+//                                making room (and settling) and CB layers over simulated time
 
 #include "cloud_stations.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -474,6 +475,284 @@ int haze_scenario()
     printf(g_fails ? "%d check(s) failed\n" : "all checks passed\n", g_fails);
     return g_fails ? 1 : 0;
 }
+
+size_t lines_with(const std::vector<std::string> &log, const std::string &what)
+{
+    return static_cast<size_t>(std::count_if(log.begin(), log.end(), [&](const std::string &line) {
+        return line.find(what) != std::string::npos;
+    }));
+}
+
+// The set must settle, whatever order the survey's answers come in. The two loops
+// seen in weather.log, 2026-11-04: CYQG (94 km) making room for KARB (49 km) every
+// 105 s, because the freed slot went to whichever METAR came next, and that was
+// CYQG's; and CYQV (220 km, nearest a survey point 110 km ahead) new, left behind,
+// faded out and new again every 210 s.
+int churn_scenario()
+{
+    using anchor::kFadeInS, anchor::kRoomFadeS, anchor::kStations;
+    std::vector<std::string> log;
+    Table t;
+    const haze::Metar sky = metar("XXXX", { { 2000.0, 4, -1 } });
+    const auto named = [&sky](const std::string &icao) {
+        haze::Metar m = sky;
+        m.icao = icao;
+        return m;
+    };
+    struct Place
+    {
+        std::string icao;
+        double lat, lon;
+    };
+    const double lat = 42.63, lon = -83.98;
+
+    printf("no loop making room\n");
+    {
+        anchor::StationSet set([&log](const std::string &line) { log.push_back(line); });
+        // seven stations nearer than CYQG, known and in use; CYQG the farthest, KARB nearer
+        std::vector<Place> places;
+        for (size_t i = 0; i + 1 < kStations; ++i)
+            places.push_back({ "ST0" + std::to_string(i), lat + 0.1 + 0.05 * i, lon });
+        const Place cyqg{ "CYQG", 42.276, -82.958 }, karb{ "KARB", 42.223, -83.746 };
+        places.push_back(cyqg);
+        double now = 0.0;
+        for (const Place &p : places)
+        {
+            set.on_metar(named(p.icao), p.lat, p.lon, false, 0.0, 12.0, lat, lon, now);
+            set.on_position(p.icao, p.lat, p.lon, 200.0, now);
+        }
+        set.tick(lat, lon, 1.0);
+        check(set.in_use() == kStations, "all slots in use");
+        // the survey: 7 points, one every 15 s, so each answers every 105 s: KARB at 0 s and
+        // CYQG at 75 s, in that order, as in the log; the others are known stations
+        const std::array<Place, 7> answers = { karb, places[0], places[1], places[2], places[3], cyqg, places[4] };
+        size_t asked_positions = 0;
+        for (int step = 0; step < 1800; ++step)
+        {
+            now = 2.0 + step;
+            if (step % 15 == 0)
+            {
+                const Place &p = answers[(step / 15) % answers.size()];
+                if (set.on_metar(named(p.icao), p.lat, p.lon, false, 0.0, 12.0, lat, lon, now))
+                {
+                    ++asked_positions;
+                    set.on_position(p.icao, p.lat, p.lon, 200.0, now + 0.5);
+                }
+            }
+            set.tick(lat, lon, now);
+        }
+        check(lines_with(log, "making room for KARB") == 1,
+              "CYQG makes room for KARB once in 30 minutes: " + std::to_string(lines_with(log, "making room for KARB")));
+        check(lines_with(log, "CYQG [station 7]: faded out") == 1 && lines_with(log, "new, surveyed") == kStations + 1,
+              "CYQG isn't back: only the first eight and KARB were ever new: " + std::to_string(lines_with(log, "new, surveyed")));
+        check(asked_positions == 1, "KARB's facility data is asked for once: " + std::to_string(asked_positions));
+        set.table(now, t.bytes.data());
+        check(set.in_use() == kStations && t.weight(kStations - 1) == 1.0f, "KARB in CYQG's slot, faded in");
+        const size_t settled = log.size();
+        // CYQG, farther than everything now in use, stays out however often it answers
+        for (int step = 0; step < 600; step += 15)
+        {
+            set.on_metar(named(cyqg.icao), cyqg.lat, cyqg.lon, false, 0.0, 12.0, lat, lon, now + step);
+            set.tick(lat, lon, now + step);
+        }
+        check(log.size() == settled, "settled: nothing more to log");
+    }
+
+    printf("the freed slot goes to a nearer station, for a while\n");
+    {
+        const auto fill = [&](anchor::StationSet &set) {
+            for (size_t i = 0; i < kStations; ++i)
+            {
+                const std::string icao = "ST0" + std::to_string(i);
+                set.on_metar(named(icao), lat + 0.1 * (i + 1), lon, false, 0.0, 12.0, lat, lon, 0.0);
+                set.on_position(icao, lat + 0.1 * (i + 1), lon, 200.0, 0.0);
+            }
+            set.tick(lat, lon, 1.0);
+        };
+        anchor::StationSet a([](const std::string &) {});
+        fill(a);
+        const double near_lat = lat + 0.15;  // nearer than the farthest, ST07 at 0.8 deg
+        a.on_metar(named("NEAR"), near_lat, lon, false, 0.0, 12.0, lat, lon, 10.0);  // ST07 makes room
+        a.tick(lat, lon, 10.0 + kRoomFadeS + 1.0);
+        check(a.in_use() == kStations - 1, "ST07's slot is free");
+        a.on_metar(named("ST07"), lat + 0.8, lon, false, 0.0, 12.0, lat, lon, 10.0 + kRoomFadeS + 2.0);
+        check(a.in_use() == kStations - 1, "the station that left doesn't get it back");
+        a.on_metar(named("FARR"), lat + 0.95, lon, false, 0.0, 12.0, lat, lon, 10.0 + kRoomFadeS + 3.0);
+        check(a.in_use() == kStations - 1, "nor does one farther than it");
+        a.on_metar(named("NEA2"), lat + 0.5, lon, false, 0.0, 12.0, lat, lon, 10.0 + kRoomFadeS + 4.0);
+        check(a.in_use() == kStations, "any station nearer than it does, not only the one that asked: in flight, that one may be long past");
+        a.on_metar(named("NEAR"), near_lat, lon, false, 0.0, 12.0, lat, lon, 10.0 + kRoomFadeS + 5.0);
+        check(a.in_use() == kStations, "and the one that asked, with no slot left, starts another swap");
+
+        anchor::StationSet b([](const std::string &) {});
+        fill(b);
+        b.on_metar(named("GONE"), near_lat, lon, false, 0.0, 12.0, lat, lon, 10.0);  // ... and never heard of again
+        const double later = 10.0 + kRoomFadeS + anchor::kRoomHoldS + 1.0;
+        b.tick(lat, lon, later);
+        b.on_metar(named("FARR"), lat + 0.95, lon, false, 0.0, 12.0, lat, lon, later);
+        check(b.in_use() == kStations, "the slot isn't kept for ever: after a while any station takes it");
+    }
+
+    printf("the distance that counts is the station's own\n");
+    {
+        log.clear();
+        anchor::StationSet set([&log](const std::string &line) { log.push_back(line); });
+        for (size_t i = 0; i < kStations; ++i)
+        {
+            const std::string icao = "ST0" + std::to_string(i);
+            set.on_metar(named(icao), lat + 0.1 * (i + 1), lon, false, 0.0, 12.0, lat, lon, 0.0);
+            set.on_position(icao, lat + 0.1 * (i + 1), lon, 200.0, 0.0);
+        }
+        // known to be farther than the farthest in use, though asked for close by
+        set.on_position("FARR", lat + 1.2, lon, 200.0, 0.0);
+        set.tick(lat, lon, 1.0);
+        check(!set.on_metar(named("FARR"), lat + 0.05, lon, false, 0.0, 12.0, lat, lon, 2.0) &&
+                  lines_with(log, "making room") == 0,
+              "a station whose position is known isn't judged by where it was asked for");
+    }
+
+    printf("no loop for a station beyond the range\n");
+    {
+        log.clear();
+        anchor::StationSet set([&log](const std::string &line) { log.push_back(line); });
+        const double far_lat = 51.899, far_lon = -103.799, ac_lat = 51.899, ac_lon = -100.6;  // ~220 km
+        const double ask_lat = 51.899, ask_lon = -102.2;                                      // ~110 km ahead
+        size_t asked = 0;
+        for (int step = 0; step < 1800; ++step)
+        {
+            const double now = step;
+            if (step % 60 == 0 && set.on_metar(named("CYQV"), ask_lat, ask_lon, false, 0.0, 12.0, ac_lat, ac_lon, now))
+            {
+                ++asked;
+                set.on_position("CYQV", far_lat, far_lon, 560.0, now + 0.5);
+            }
+            set.tick(ac_lat, ac_lon, now);
+        }
+        check(asked == 1, "its facility data is asked for once: " + std::to_string(asked));
+        check(lines_with(log, "left behind") == 0, "it's never 'left behind': " + std::to_string(lines_with(log, "left behind")));
+        check(lines_with(log, "too far") == 1, "it's noted once: " + std::to_string(lines_with(log, "too far")));
+        check(lines_with(log, "new, surveyed") == 1, "and added once: " + std::to_string(lines_with(log, "new, surveyed")));
+        check(set.in_use() == 0, "it holds no slot");
+        // the aircraft comes closer: it counts, with no new request
+        const double closer = -102.6;  // ~83 km
+        check(!set.on_metar(named("CYQV"), ask_lat, ask_lon, false, 0.0, 12.0, ac_lat, closer, 2000.0), "known: no request");
+        check(set.in_use() == 1, "within range it takes a slot");
+        set.tick(ac_lat, closer, 2001.0);
+        set.table(2001.0 + kFadeInS, t.bytes.data());
+        check(t.weight(0) == 1.0f, "and fades in");
+    }
+
+    printf(g_fails ? "%d check(s) failed\n" : "all checks passed\n", g_fails);
+    return g_fails ? 1 : 0;
+}
+
+// Longer runs among many stations, with weather_feed.cpp's survey: stations every
+// 0.4 deg, the nearest to the aircraft asked for every minute, and the nearest to one
+// survey point every 15 s. Sitting still the set must settle; flying, the station
+// under the aircraft must always count, and no station may keep coming and going.
+int soak_scenario()
+{
+    using anchor::kStations;
+    constexpr double kPi = 3.14159265358979323846;
+    struct Point
+    {
+        double bearing_deg, km;
+    };
+    constexpr Point kSurvey[] = { { 0.0, 50.0 }, { 0.0, 110.0 }, { -60.0, 60.0 }, { 60.0, 60.0 }, { -125.0, 80.0 }, { 125.0, 80.0 }, { 180.0, 70.0 } };
+    const auto icao_at = [](int i, int j) { return "G" + std::to_string(i) + "_" + std::to_string(j); };
+    const haze::Metar sky = metar("XXXX", { { 2000.0, 4, -1 } });
+    // heading east, degrees: returns aircraft-relative point
+    const auto ahead = [](double lat, double lon, const Point &p, double &out_lat, double &out_lon) {
+        const double b = p.bearing_deg * 3.14159265358979323846 / 180.0 + 3.14159265358979323846 / 2;
+        out_lat = lat + p.km / 111.2 * std::cos(b);
+        out_lon = lon + p.km / (111.2 * std::cos(lat * 3.14159265358979323846 / 180.0)) * std::sin(b);
+    };
+    const auto run = [&](const char *name, double speed_deg_per_s, int seconds, std::vector<std::string> &log, double &worst_km) {
+        anchor::StationSet set([&log](const std::string &line) { log.push_back(line); });
+        Table t;
+        const double lat = 45.0;
+        double lon = 10.0;
+        size_t next_point = 0;
+        worst_km = 0.0;
+        const auto answer = [&](double qlat, double qlon, bool at_aircraft, double now) {
+            const int i = static_cast<int>(std::lround(qlat / 0.4)), j = static_cast<int>(std::lround(qlon / 0.4));
+            haze::Metar m = sky;
+            m.icao = icao_at(i, j);
+            if (set.on_metar(m, qlat, qlon, at_aircraft, 0.0, 12.0, lat, lon, now))
+                set.on_position(m.icao, i * 0.4, j * 0.4, 100.0, now + 0.5);
+        };
+        for (int s = 0; s < seconds; ++s)
+        {
+            const double now = s;
+            lon += speed_deg_per_s;
+            if (s % 60 == 0)
+                answer(lat, lon, true, now);
+            if (s % 15 == 5)
+            {
+                double qlat, qlon;
+                ahead(lat, lon, kSurvey[next_point++ % std::size(kSurvey)], qlat, qlon);
+                answer(qlat, qlon, false, now);
+            }
+            set.tick(lat, lon, now);
+            if (s < 600)
+                continue;
+            // the nearest counting station, from the table the generator reads
+            set.table(now, t.bytes.data());
+            double best = 1e9;
+            for (size_t i = 0; i < kStations; ++i)
+            {
+                if (t.weight(i) < 0.5f)
+                    continue;
+                float v[3];
+                std::memcpy(v, t.bytes.data() + 16 + 16 * i, sizeof(v));
+                const double slat = std::asin(v[2]) * 180.0 / kPi, slon = std::atan2(v[1], v[0]) * 180.0 / kPi;
+                best = std::min(best, anchor::distance_km(lat, lon, slat, slon));
+            }
+            worst_km = std::max(worst_km, best);
+        }
+        printf("  %s: %zu log lines, %zu making room, %zu new, nearest counting station at worst %.1f km\n", name, log.size(),
+               lines_with(log, "making room"), lines_with(log, ": new,"), worst_km);
+    };
+
+    printf("soak: sitting still among many stations\n");
+    {
+        std::vector<std::string> log;
+        double worst = 0.0;
+        run("still", 0.0, 7200, log, worst);
+        check(lines_with(log, "making room") <= kStations, "a few swaps at most, then settled: " + std::to_string(lines_with(log, "making room")));
+        check(worst < 40.0, "a station near the aircraft counts throughout: worst " + std::to_string(worst) + " km");
+    }
+    printf("soak: flying across them at 250 m/s\n");
+    {
+        std::vector<std::string> log;
+        double worst = 0.0;
+        run("flying", 0.25 / (111.2 * std::cos(45.0 * kPi / 180.0)), 7200, log, worst);
+        check(worst < 77.0, "a station near the aircraft counts throughout, no farther than before the fix (76.7 km): " + std::to_string(worst) + " km");
+        check(lines_with(log, "making room") <= 78, "no more swaps than before the fix (78, normal progress in flight): " + std::to_string(lines_with(log, "making room")));
+        // no station comes and goes: new at most twice each
+        size_t worst_new = 0;
+        std::string who;
+        for (const std::string &line : log)
+        {
+            const size_t a = line.find("cloud anchor "), b = line.find(' ', a + 13);
+            if (a == std::string::npos || line.find(": new,") == std::string::npos)
+                continue;
+            const std::string icao = line.substr(a + 13, b - a - 13);
+            const size_t count = lines_with(log, "cloud anchor " + icao + " ") == 0 ? 0 : static_cast<size_t>(std::count_if(log.begin(), log.end(), [&](const std::string &l) {
+                return l.find("cloud anchor " + icao + " ") != std::string::npos && l.find(": new,") != std::string::npos;
+            }));
+            if (count > worst_new)
+            {
+                worst_new = count;
+                who = icao;
+            }
+        }
+        check(worst_new <= 2, "no station keeps coming back: " + who + " new " + std::to_string(worst_new) + " times");
+    }
+
+    printf(g_fails ? "%d check(s) failed\n" : "all checks passed\n", g_fails);
+    return g_fails ? 1 : 0;
+}
 } // namespace
 
 int main(int argc, char **argv)
@@ -481,5 +760,7 @@ int main(int argc, char **argv)
     if (argc > 1 && std::strcmp(argv[1], "--rows") == 0)
         return rows();
     const int clouds = scenario();
-    return haze_scenario() | clouds;
+    const int churn = churn_scenario();
+    const int soak = soak_scenario();
+    return haze_scenario() | clouds | churn | soak;
 }
