@@ -392,6 +392,7 @@ std::array<float, kCloudTunableCount> g_cloud_tunables = {};       // tunables.i
 std::array<float, kCloudTunableCount> g_effective_cloud_tunables = {};  // pushed: C13-C15 = the aircraft (SimConnect)
 // C32 <= 0: no thunderstorm cells (DebugCapture bit 8 to the cloud generator)
 std::atomic<bool> g_storms_off{true};
+std::atomic<bool> g_cloud_tilt_view{false};  // T17 > 0 (developers): DebugCapture bit 14, patch_dxil.py DEBUG_CLOUD_TILT
 std::atomic<bool> g_fog_tint{false};  // C35 > 0: DebugCapture bit 13 on graphics draws
 std::atomic<bool> g_forward_fog_off{false};  // C35 < 0: no fog on the forward pass (bits 10-12 left 0)
 constexpr float kFallbackFreezingLevel = 3000.0f;  // m, R4 = 0 before the first METAR
@@ -1065,6 +1066,7 @@ void reload(device *dev)
     const float ozone_setting = load_tunables<kTunableCount + 1>()[kTunableCount];  // T14
     weather::set_haze_field(load_tunable('T', 15, 1.0f) > 0.0f);
     weather::set_haze_strength(load_tunable('T', 16, 1.0f));
+    g_cloud_tilt_view.store(load_tunable('T', 17, 0.0f) > 0.0f, std::memory_order_relaxed);
     struct Job
     {
         uint64_t handle;
@@ -1381,6 +1383,8 @@ void push_mod_args(command_list *cmd_list, const TrackedPipeline &info, const st
     // Inverted so that shaders under an add-on without C32 keep them.
     if (g_storms_off.load(std::memory_order_relaxed))
         p.debug_capture |= 256;
+    if (g_cloud_tilt_view.load(std::memory_order_relaxed))
+        p.debug_capture |= 1u << 14;
     // bit 5: MSFS's TLAS is bound (t0 space50): ch_deferred_shadows traces the
     // aircraft into the shadow window, for Raytraced Shadows
     const uint64_t tlas = g_tlas_va.load(std::memory_order_relaxed);
@@ -3113,6 +3117,7 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE re
     g_ozone_setting = load_tunables<kTunableCount + 1>()[kTunableCount];  // T14
     weather::set_haze_field(load_tunable('T', 15, 1.0f) > 0.0f);
     weather::set_haze_strength(load_tunable('T', 16, 1.0f));
+    g_cloud_tilt_view.store(load_tunable('T', 17, 0.0f) > 0.0f, std::memory_order_relaxed);
     g_effective_tunables = g_tunables;
     g_radar_tunables = load_tunables('R');
     g_cloud_tunables = load_tunables<kCloudTunableCount>('C');

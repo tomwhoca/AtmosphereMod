@@ -4095,6 +4095,156 @@ def shadow_sample_lines(em: Emitter, pix: dict, cos: str, dirs, light, t: str, s
                   f"float 1.000000e+00)")
 
 
+# Developers, experiment/cloud-detail (tunables.ini T17 > 0, the add-on sets this bit): each view sample
+# shows the slope of the clouds' depth field toward the sun, mu0 = (depth here - depth toward the sun) /
+# distance, from the short march's own samples. If field * 8000 is a true distance in metres, mu0 is the cosine
+# of the surface's tilt to the sun: half-Lambert grey, 0.5 + 0.5 mu0. Red: the slope's over +1, blue: under -1
+# (steeper than a distance can be). Dim green: the march didn't run there.
+DEBUG_CLOUD_TILT = 1 << 14
+TILT_RANGE_M = (100.0, 400.0)  # the short march's samples averaged (notes/xplane/phys: "avg", so that one lump doesn't decide)
+TILT_BRIGHTNESS = 0.16         # of the sun's irradiance, about a sunlit cloud's radiance
+
+
+def find_sun_march(ir: Ir, ms: dict) -> dict | None:
+    """The short march toward the sun, from the stock IR. Variants differ (8 steps of 37.5 i m, 12 of
+    25 i m, the sum reaching 1350 or 1950 m). Each lookup is at the sum of the earlier steps plus this step times f,
+    f = |1 - exp(-0.81 x)| from the view sample's own depth. None without a march."""
+    edges = find_cloud_edges(ir)
+    if len(edges["ramps"]) < 2:
+        return None
+    x = edges["ramps"][1][0]
+    depth_q = ir.binops[x][1] if ir.binops.get(x, ("",))[0] == "fdiv" else None
+    if depth_q not in ir.binops or "8.000000e+03" not in ir.binops[depth_q][1:]:
+        return None
+    at = ir.defs[x]
+    found = next((m for i in range(at, max(at - 200, 0), -1)
+                  if (m := re.match(rf"\s+({V}) = uitofp i32 ({V}) to float", ir.lines[i]))), None)
+    if not found:
+        return None
+    index_f, index = found[1], found[2]
+    if not re.match(rf"\s+{re.escape(index)} = phi i32 \[ 1, ", ir.lines[ir.defs[index]]):
+        return None
+    steps = [float(literal_value(b if a == index_f else a)) for k, a, b in ir.binops.values()
+             if k == "fmul" and index_f in (a, b) and not (b if a == index_f else a).startswith("%")]
+    need(steps, f"{index_f}: no step length")
+    step = max(steps)
+    # (light * step) * index, then that times f for the lookup
+    scales = set()
+    for name, (k, a, b) in ir.binops.items():
+        if k == "fmul" and index_f in (a, b) and (b if a == index_f else a).startswith("%"):
+            scales |= {(q if p == name else p) for k2, p, q in ir.binops.values() if k2 == "fmul" and name in (p, q)}
+    need(len(scales) == 1, f"{index_f}: {len(scales)} scales of the march's step")
+    along = [step * i * (i + 1) / 2 for i in range(1, 33)]
+    picked = [i + 1 for i, a in enumerate(along) if TILT_RANGE_M[0] <= a <= TILT_RANGE_M[1]]
+    need(picked, f"none of the march's samples in {TILT_RANGE_M}")
+    sun = []
+    for a in ms["adds"]:
+        users = [ir.def_name(i) for i in ir.users(a) if DEFINE.match(ir.lines[i])]
+        sun += [(ir.defs[u], [o for o in ir.binops[u][1:] if o != a][0]) for u in users
+                if ir.binops.get(u, ("",))[0] == "fmul"]
+    need(sun, "no sun irradiance times the sun phase")
+    return {"index": index, "index_f": index_f, "step": step, "scale": scales.pop(), "depth": edges["depth"],
+            "depth_q": depth_q, "first": picked[0], "last": picked[-1], "sun": [v for _, v in sorted(sun)]}
+
+
+def apply_cloud_tilt_view(ir: Ir, march: dict | None, site: dict) -> str:
+    """ch_volumetric_clouds_render: the view of the depth field's slope toward the sun (DEBUG_CLOUD_TILT),
+    each step's radiance as without it while that bit is off."""
+    if march is None:
+        return "tilt view: no short march"
+    index, index_f = march["index"], march["index_f"]
+    head = ir.defs[index]
+    m = re.match(rf"\s+{re.escape(index)} = phi i32 \[ \S+, ({V}) \], \[ \S+, ({V}) \]", ir.lines[head])
+    need(m, f"{index}: unexpected form {ir.lines[head].strip()}")
+    before, latch = m[1], m[2]
+    n = next((i for i, l in enumerate(ir.lines) if re.match(rf"\s+{V} = add nuw nsw i32 {re.escape(index)}, 1$", l)), None)
+    need(n is not None, f"{index}: no increment")
+    need(march["depth_q"] in ir.defs and ir.defs[march["depth_q"]] < n, f"{march['depth_q']}: gone from the march")
+    k = n
+    while not re.match(r"\s+br ", ir.lines[k]):
+        k += 1
+    m = re.match(r"\s+br i1 \S+, label (\S+), label (\S+)", ir.lines[k])
+    need(m, f"{index}: the march doesn't end in a conditional branch")
+    i = head
+    while not (ir.lines[i].startswith("; <label>:") or re.match(r"[\w.]+:$", ir.lines[i])):
+        i -= 1
+    top = "%" + (ir.lines[i].split(":")[1].split()[0] if ir.lines[i].startswith(";") else ir.lines[i].rstrip(":"))
+    leave = [l for l in (m[1], m[2]) if l != top]
+    need(len(leave) == 1, f"{index}: the march's exit from {top}")
+
+    def block(label):
+        tops = [j for j, l in enumerate(ir.lines)
+                if re.match(rf"; <label>:{re.escape(label[1:])}\b", l) or l.rstrip() == f"{label[1:]}:"]
+        need(len(tops) == 1, f"no block {label}")
+        return tops[0]
+    k = block(leave[0])
+    while not re.match(r"\s+(br|ret|switch) ", ir.lines[k]):
+        k += 1
+    m = re.match(r"\s+br label (\S+)", ir.lines[k])
+    need(m, f"{leave[0]}: doesn't go on to one block")
+    merge = block(m[1])
+    labels = re.findall(r"\[ [^\[\]]+?, (%[\w.]+) \]", ir.lines[merge + 1])
+    need(leave[0] in labels and " = phi " in ir.lines[merge + 1], f"{m[1]}: no phi from {leave[0]}")
+
+    em = Emitter("tv.m")
+    full = em.mul(em.mul(index_f, em.add(index_f, -1.0)), march["step"] / 2.0)
+    along = em.max(em.mad(em.mul(index_f, march["step"]), march["scale"], full), 1.0)
+    outside = em.sub(0.0, along)
+    slope = em.div(em.sub(em.max(march["depth"], outside), em.max(march["depth_q"], outside)), along)
+    clamped = em.max(em.min(slope, 1.0), -1.0)
+    raw = em.div(em.sub(march["depth"], march["depth_q"]), along)
+    from_first = em.new(f"icmp uge i32 {index}, {march['first']}")
+    to_last = em.new(f"icmp ule i32 {index}, {march['last']}")
+    used = em.new(f"and i1 {from_first}, {to_last}")
+    share = 1.0 / (march["last"] - march["first"] + 1)
+    mu_next = em.add("%mod.tv.mu0", em.select(used, em.mul(clamped, share), 0.0))
+    raw_next = em.add("%mod.tv.raw0", em.select(used, em.mul(raw, share), 0.0))
+    zero = "0.000000e+00"
+    edits = [(n, [*em.lines, ir.lines[n]]),
+             (head, [ir.lines[head],
+                     f"  %mod.tv.mu0 = phi float [ {zero}, {before} ], [ {mu_next}, {latch} ]",
+                     f"  %mod.tv.raw0 = phi float [ {zero}, {before} ], [ {raw_next}, {latch} ]"])]
+    def phi(name, value):
+        pairs = ", ".join(f"[ {value if l == leave[0] else zero}, {l} ]" for l in labels)
+        return f"  {name} = phi float {pairs}"
+    edits.append((merge, [ir.lines[merge], phi("%mod.tv.mu", mu_next), phi("%mod.tv.raw", raw_next),
+                          phi("%mod.tv.ran", "1.000000e+00")]))
+
+    first = min(ir.defs[x] for x, _ in site["radiance"])
+    need(first > merge, "the step radiance comes before the march's end")
+    col = Emitter("tv.c")
+    flags = col.new(f"bitcast float {col.ext(col.load('%mod.ah', 0), 0)} to i32")
+    on = col.new(f"icmp ne i32 {col.new(f'and i32 {flags}, {DEBUG_CLOUD_TILT}')}, 0")
+    grey = col.sat(col.mad("%mod.tv.mu", 0.5, 0.5))
+    over, under = col.cmp("ogt", "%mod.tv.raw", 1.0), col.cmp("olt", "%mod.tv.raw", -1.0)
+    ran = col.cmp("ogt", "%mod.tv.ran", 0.5)
+    channels = site["radiance"]
+    # per channel: (over, under, no march) for R, G, B; grey variants show the shade alone
+    looks = [(1.0, 0.0, 0.0), (0.0, 0.0, 0.1), (0.0, 1.0, 0.0)] if len(channels) == 3 else [(grey, grey, 0.1)]
+    edits_x = []
+    for c, ((x, a), (hi, lo, none)) in enumerate(zip(channels, looks)):
+        shade = col.select(ran, col.select(over, hi, col.select(under, lo, grey)), none)
+        sun = march["sun"][min(c, len(march["sun"]) - 1)]
+        colour = col.mul(col.mul(shade, sun), TILT_BRIGHTNESS)
+        j = ir.defs[x]
+        current = f"%mod.in.a{c}" if f"%mod.in.a{c}" in ir.lines[j] else a
+        new = re.sub(rf"{re.escape(current)}(?![\w.])", f"%mod.tv.a{c}", ir.lines[j].split(" = ", 1)[1], count=1)
+        need(new != ir.lines[j].split(" = ", 1)[1], f"{x}: unexpected form {ir.lines[j].strip()}")
+        edits_x.append((j, [f"  %mod.tv.a{c} = select i1 {on}, float {colour}, float {current}", f"  {x} = {new}"]))
+    edits.append((first, [*col.lines, ir.lines[first]]))
+    # (the first channel's line takes both: the colours, then its own edit)
+    merged = {}
+    for j, new_lines in edits + edits_x:
+        if j in merged:
+            merged[j] = merged[j][:-1] + new_lines
+        else:
+            merged[j] = new_lines
+    for j, new_lines in sorted(merged.items(), key=lambda e: -e[0]):
+        ir.lines[j:j + 1] = new_lines
+    return (f"tilt view: march of {march['step']:g} i m, samples {march['first']}-{march['last']}, "
+            f"{len(channels)} channel(s)")
+
+
 def patch_clouds(text: str) -> tuple[str, str]:
     """ch_volumetric_clouds_render: the haze colour (T11), the build-up of
     bounced light, crisper edges and the glory (C6-C11), multiple scattering
@@ -4102,6 +4252,7 @@ def patch_clouds(text: str) -> tuple[str, str]:
     patterns the next one rewrites."""
     ir = Ir(text)
     inside_site = find_inside_site(ir)  # (in the stock IR; applied last)
+    march = find_sun_march(ir, find_cloud_ms(ir))  # (likewise)
     colour = apply_cloud_ap(ir)
     ir.reindex()
     optical = apply_cloud_optical(ir)  # (before apply_cloud_shape renames the edge ramps)
@@ -4122,6 +4273,8 @@ def patch_clouds(text: str) -> tuple[str, str]:
     inside = apply_cloud_inside(ir, inside_site)
     ir.reindex()
     inside += "; " + apply_cloud_fog_record(ir, inside_site)
+    ir.reindex()
+    inside += "; " + apply_cloud_tilt_view(ir, march, inside_site)
     user = append_user_dump(ir)
     return finish(ir, cloud=True, debug_uav=True), (f"{colour}; {optical}; {detail}; {shape}; {types}; {ms}; {phase}; "
                                                     f"{inside}; {user}")

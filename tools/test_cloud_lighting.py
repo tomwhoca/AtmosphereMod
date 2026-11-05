@@ -567,6 +567,62 @@ def check_untile(stock: str, patched: str, failures: list) -> float:
     return worst
 
 
+def check_tilt_view(stock: str, patched: str, failures: list) -> None:
+    """The view of the depth field's slope toward the sun (T17, DEBUG_CLOUD_TILT): the slope from the march's
+    samples, and each channel's colour, the step's radiance untouched with the bit off."""
+    ir = P.Ir(stock)
+    march = P.find_sun_march(ir, P.find_cloud_ms(ir))
+    if march is None:
+        if "%mod.tv." in patched:
+            failures.append("tilt view: patched without a march")
+        return
+    n = 4000
+    rng = np.random.default_rng(11)
+    next_of = lambda name: re.search(rf"{name} = phi float \[ \S+, \S+ \], \[ (\S+), ", patched)[1]
+    index = rng.integers(1, 13, n)
+    dep, q = rng.uniform(-300, 800, n).astype(F), rng.uniform(-1000, 800, n).astype(F)
+    f = rng.uniform(0, 1, n).astype(F)
+    seeds = {march["index"]: index.astype(np.int64), march["index_f"]: index.astype(F), march["scale"]: f,
+             march["depth"]: dep, march["depth_q"]: q, "%mod.tv.mu0": np.zeros(n, F), "%mod.tv.raw0": np.zeros(n, F)}
+    cbs = {"b1 space50": np.zeros((P.CLOUD_PARAMS_SIZE // 16, 4)), "b0 space50": np.zeros((4, 4))}
+    got = Evaluator(patched, cbs, seeds)
+    step = march["step"]
+    along = np.maximum(step * index * (index - 1) / 2 + step * index * f.astype(np.float64), 1.0)
+    used = (index >= march["first"]) & (index <= march["last"])
+    share = 1.0 / (march["last"] - march["first"] + 1)
+    d64, q64 = dep.astype(np.float64), q.astype(np.float64)
+    slope = np.clip((np.maximum(d64, -along) - np.maximum(q64, -along)) / along, -1.0, 1.0)
+    for name, want in ((next_of("%mod.tv.mu0"), np.where(used, slope * share, 0.0)),
+                       (next_of("%mod.tv.raw0"), np.where(used, (d64 - q64) / along * share, 0.0))):
+        err = float(np.max(np.abs(got(name).astype(np.float64) - want)))
+        if err > 1e-3:
+            failures.append(f"tilt view {name}: off by {err:.1e}")
+    # the colours
+    channels = len(P.find_inside_site(P.Ir(stock))["radiance"])
+    mu = rng.uniform(-1, 1, n).astype(F)
+    raw = rng.uniform(-2, 2, n).astype(F)
+    ran = (rng.uniform(0, 1, n) > 0.2).astype(F)
+    sun = rng.uniform(0.1, 20, n).astype(F)
+    seeds = {"%mod.tv.mu": mu, "%mod.tv.raw": raw, "%mod.tv.ran": ran, **{name: sun for name in march["sun"]}}
+    plain = rng.uniform(0, 5, n).astype(F)
+    for c in range(channels):
+        seeds[f"%mod.in.a{c}"] = plain
+    mod = np.zeros((4, 4))
+    mod[0, 0] = np.uint32(P.DEBUG_CLOUD_TILT).view(np.float32)
+    on, off = Evaluator(patched, {**cbs, "b0 space50": mod}, seeds), Evaluator(patched, cbs, seeds)
+    grey = np.clip(0.5 * mu.astype(np.float64) + 0.5, 0, 1)
+    over, under, none = raw > 1.0, raw < -1.0, ran < 0.5
+    looks = [(1.0, 0.0, 0.0), (0.0, 0.0, 0.1), (0.0, 1.0, 0.0)] if channels == 3 else [(grey, grey, 0.1)]
+    for c, (hi, lo, missing) in enumerate(looks):
+        shade = np.where(none, missing, np.where(over, hi, np.where(under, lo, grey)))
+        want = shade * sun.astype(np.float64) * P.TILT_BRIGHTNESS
+        err = float(np.max(np.abs(on(f"%mod.tv.a{c}").astype(np.float64) - want)))
+        if err > 1e-3:
+            failures.append(f"tilt view channel {c}: off by {err:.1e}")
+        if not np.array_equal(off(f"%mod.tv.a{c}"), plain):
+            failures.append(f"tilt view channel {c}: not the step's radiance with the bit off")
+
+
 def check(crc: str, stock: str) -> list[str]:
     ir = P.Ir(stock)
     blends = P.find_phase_blends(ir)
@@ -610,6 +666,10 @@ def check(crc: str, stock: str) -> list[str]:
         return copy if re.search(rf"{re.escape(copy)} = ", patched) else name
     frame = irng.uniform(-300, 300, (N, 3)).astype(F)
     inside_seeds = {as_used(inside["lod"]): np.zeros(N, F)}
+    inside_seeds.update({name: np.zeros(N, F) for name in ("%mod.tv.mu", "%mod.tv.raw", "%mod.tv.ran")})  # (the march's results)
+    tilt_march = P.find_sun_march(P.Ir(stock), P.find_cloud_ms(P.Ir(stock)))
+    if tilt_march:
+        inside_seeds.update({name: np.ones(N, F) for name in tilt_march["sun"]})
     for k3 in range(3):
         inside_seeds[as_used(inside["w"][k3])] = frame[:, k3]
         inside_seeds[as_used(inside["light"][k3])] = np.full(N, sun[k3], dtype=F)
@@ -1071,6 +1131,7 @@ def check(crc: str, stock: str) -> list[str]:
           f"{len(softs)} soft transmittance(s), {len(edges['ramps'])} edge ramp(s); "
           f"worst p99.9 rel. error {worst:.1e}; shadow max abs. error {worst_shadow:.1e}; "
           f"untiling max error {worst_untile:.2f} m")
+    check_tilt_view(stock, patched, failures)
     return failures
 
 
