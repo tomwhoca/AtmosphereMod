@@ -79,6 +79,8 @@ DXC_SIZE = 26346851
 # (2026-10-23, build 1.8.2502.8). The installer checks both.
 DXC_SHA256 = "70b1913a1bfce4a3e1a5311d16246f4ecdf3a3e613abec8aa529e57668426f85"
 DXC_FILES = ("dxc.exe", "dxcompiler.dll", "dxil.dll")
+MAX_PATCH_WORKERS = 4
+UNFINISHED_MARKER = "patching.unfinished"
 
 
 DISCLAIMER = """\
@@ -405,15 +407,30 @@ def dxc_version(dxc: Path) -> str:
     return m[1] if m else "?"
 
 
-def signed_by_microsoft(folder: Path) -> bool:
+def powershell() -> str | None:
+    """Windows PowerShell, by its full path: its folder isn't always on PATH."""
+    usual = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+    return str(usual) if usual.exists() else shutil.which("powershell") or shutil.which("pwsh")
+
+
+def signed_by_microsoft(folder: Path) -> bool | None:
     """dxc.exe, dxcompiler.dll and dxil.dll carry valid Microsoft Corporation
-    Authenticode signatures (checked before running anything downloaded)."""
-    script = ("$ok = $true; foreach ($f in @(" + ", ".join(f"'{folder / n}'" for n in DXC_FILES) + ")) { "
+    Authenticode signatures (checked before running anything downloaded).
+    None: it can't be checked here, there's no PowerShell to run."""
+    shell = powershell()
+    if shell is None:
+        return None
+    # (in a PowerShell string, a ' is written twice: a user name can have one)
+    files = ", ".join("'" + str(folder / n).replace("'", "''") + "'" for n in DXC_FILES)
+    script = ("$ok = $true; foreach ($f in @(" + files + ")) { "
               "$s = Get-AuthenticodeSignature -LiteralPath $f; "
               "if ($s.Status -ne 'Valid' -or $s.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') "
               "{ $ok = $false } }; if ($ok) { 'valid' }")
-    out = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
-                         capture_output=True, encoding="utf-8", errors="replace").stdout
+    try:
+        out = subprocess.run([shell, "-NoProfile", "-NonInteractive", "-Command", script],
+                             capture_output=True, encoding="utf-8", errors="replace").stdout
+    except OSError:
+        return None
     return out.strip() == "valid"
 
 
@@ -422,10 +439,13 @@ def find_dxc(data: Path, given: Path | None, yes: bool) -> Path:
     candidates = []
     if given:
         candidates.append(given / "dxc.exe" if given.is_dir() else given)
-    for folder in (HERE / "dxc" / "bin" / "x64",   # the release's own copy
-                   data / "dxc" / "bin" / "x64"):  # an earlier download
-        if (folder / "dxc.exe").exists() and signed_by_microsoft(folder):
-            candidates.append(folder / "dxc.exe")
+    own = HERE / "dxc" / "bin" / "x64"             # the release's own copy
+    for folder in (own, data / "dxc" / "bin" / "x64"):  # an earlier download
+        if (folder / "dxc.exe").exists():
+            signed = signed_by_microsoft(folder)
+            # (unable to check: the release's copy is as trusted as this installer beside it; a download is fetched again)
+            if signed or (signed is None and folder == own):
+                candidates.append(folder / "dxc.exe")
     kits = Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "Windows Kits" / "10" / "bin"
     candidates += sorted(kits.glob("10.*/x64/dxc.exe"), reverse=True)
     others = []
@@ -464,12 +484,14 @@ def download_dxc(data: Path) -> Path:
         z.extractall(target)
     zip_path.unlink()
     dxc = target / "bin" / "x64" / "dxc.exe"
-    if not dxc.exists() or not signed_by_microsoft(dxc.parent):
+    signed = signed_by_microsoft(dxc.parent) if dxc.exists() else False
+    if signed is False:
         shutil.rmtree(target, ignore_errors=True)
         raise InstallError("the downloaded compiler isn't signed by Microsoft: removed it")
     if dxc_version(dxc) != DXC_VERSION:
         raise InstallError(f"the downloaded compiler isn't version {DXC_VERSION}")
-    say(f"DirectX Shader Compiler {DXC_VERSION} in {target} (checksum and Microsoft signatures verified)")
+    verified = "checksum and Microsoft signatures verified" if signed else "checksum verified; no PowerShell to check the signatures"
+    say(f"DirectX Shader Compiler {DXC_VERSION} in {target} ({verified})")
     return dxc
 
 
@@ -523,7 +545,29 @@ def merge_tunables(new: str, old: str) -> tuple[str, list[str]]:
 
 # ---------------------------------------------------------------- the steps
 
-def patch(pak: Path, dxc: Path, work: Path, shaders: Path, log) -> tuple[int, int, list[str]]:
+def worker_count(given: int | None, last_run_unfinished: bool) -> int:
+    """Processes for patching: what the user asked for; one at a time after a run
+    that never finished (it may have frozen the PC); else at most half the
+    logical cores and 4, so a PC under this load stays usable."""
+    if given is not None:
+        return max(1, given)
+    if last_run_unfinished:
+        return 1
+    return max(1, min(MAX_PATCH_WORKERS, (os.cpu_count() or 2) // 2))
+
+
+@contextlib.contextmanager
+def unfinished_marker(path: Path):
+    """A file that exists only while patching. A freeze or a power cut leaves it
+    behind, which is how the next run knows; an error is reported as usual."""
+    path.write_text(f"patching started {datetime.now():%Y-%m-%d %H:%M}\n")
+    try:
+        yield
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def patch(pak: Path, dxc: Path, work: Path, shaders: Path, log, workers: int) -> tuple[int, int, list[str]]:
     """Extract the pack into work/, patch, move the results into shaders/.
     Returns (patched, failed, crcs in the pack)."""
     if work.exists():
@@ -537,10 +581,10 @@ def patch(pak: Path, dxc: Path, work: Path, shaders: Path, log) -> tuple[int, in
     log.write(res.stdout + res.stderr)
     if res.returncode != 0:
         raise InstallError(f"extracting the shaders failed:\n{res.stderr.strip()}")
-    say("Patching them (about a minute) ...")
+    say("Patching them, one at a time (several minutes) ..." if workers == 1 else "Patching them (a minute or two) ...")
     import patch_dxil
     with contextlib.redirect_stdout(log):
-        failed = patch_dxil.patch_all(root=work, dxc=dxc, strict=False)
+        failed = patch_dxil.patch_all(root=work, dxc=dxc, strict=False, workers=workers)
     made = sorted((work / "build" / "shaders").glob("*.cso"))
     for f in made:
         shutil.move(str(f), shaders / f.name)
@@ -628,10 +672,19 @@ def install(args) -> None:
         shutil.rmtree(shaders)  # (stale patches from an older sim version)
     shaders.mkdir()
     work = data / "work"
+    marker = data / UNFINISHED_MARKER
+    last_run_unfinished = marker.exists()
+    workers = worker_count(args.workers, last_run_unfinished)
+    if last_run_unfinished and args.workers is None:
+        say("The last install stopped while patching shaders: if your PC froze or restarted, that may be why.")
+        say("This time they're patched one at a time, as a lighter load. (--workers N chooses another number.)")
     with open(data / "logs" / "install.log", "w", encoding="utf-8") as log:
         log.write(f"AtmosphereMod {version()} installer, {datetime.now():%Y-%m-%d %H:%M}\nsim {sim}\npak {pak}\n"
-                  f"reshade {rv or 'unknown'} ({reshade})\ndxc {dxc}\n\n")
-        patched, failed, pack = patch(pak, dxc, work, shaders, log)
+                  f"reshade {rv or 'unknown'} ({reshade})\ndxc {dxc}\nworkers {workers}"
+                  f"{' (the last run did not finish)' if last_run_unfinished else ''}\n\n")
+        log.flush()
+        with unfinished_marker(marker):
+            patched, failed, pack = patch(pak, dxc, work, shaders, log, workers)
     shutil.rmtree(work, ignore_errors=True)  # (the extracted game shaders aren't kept)
 
     # (a release may also carry replacement shaders of its own, for the variants this sim has)
@@ -761,6 +814,8 @@ def main() -> int:
     ap.add_argument("--data", type=Path, default=Path(os.environ.get("LOCALAPPDATA", ".")) / "AtmosphereMod",
                     help="where the patched shaders, settings and logs go")
     ap.add_argument("--dxc", type=Path, help="a folder with dxc.exe, dxcompiler.dll and dxil.dll")
+    ap.add_argument("--workers", type=int, help="processes for patching the shaders, 1 = one at a time, the lightest "
+                    "load (default: up to 4; 1 after a run that never finished)")
     ap.add_argument("--payload", type=Path, help=argparse.SUPPRESS)
     ap.add_argument("--yes", action="store_true", help="don't ask")
     ap.add_argument("--uninstall", action="store_true")

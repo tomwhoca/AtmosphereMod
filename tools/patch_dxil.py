@@ -33,7 +33,9 @@ in atmolab) to build/patched/<crc>.cso.
 """
 
 import argparse
+import concurrent.futures
 import csv
+import ctypes
 import json
 import math
 import multiprocessing
@@ -43,6 +45,8 @@ import struct
 import subprocess
 import sys
 import traceback
+from concurrent.futures.process import BrokenProcessPool
+from ctypes import wintypes
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -6917,6 +6921,7 @@ PATCHES = {"medium": patch_medium, "cloud_ap": patch_cloud_ap, "clouds": patch_c
            "cloud_gen_capture": patch_cloud_gen_capture, "forward_fog": patch_forward_fog,
            "fog_scale": patch_fog_scale}
 PARALLEL_MIN_JOBS = 64  # fewer variants are patched in this process
+BELOW_NORMAL_PRIORITY_CLASS = 0x4000
 
 
 def disassemble(blob: Path, dxc: Path) -> str:
@@ -6926,13 +6931,61 @@ def disassemble(blob: Path, dxc: Path) -> str:
     return out.stdout
 
 
+def _process_priority(new: int | None = None) -> int:
+    """This process's priority class, set to new if given. Child processes (dxc) inherit a below-normal class."""
+    kernel32 = ctypes.WinDLL("kernel32")
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.GetPriorityClass.argtypes = [wintypes.HANDLE]
+    kernel32.GetPriorityClass.restype = wintypes.DWORD
+    kernel32.SetPriorityClass.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    process = kernel32.GetCurrentProcess()
+    old = kernel32.GetPriorityClass(process)
+    if new is not None:
+        kernel32.SetPriorityClass(process, new)
+    return old
+
+
+def _lower_priority() -> None:
+    _process_priority(BELOW_NORMAL_PRIORITY_CLASS)
+
+
+def run_jobs(function, jobs: list, workers: int):
+    """function(job) for every job, results in order, below normal priority so
+    the PC stays usable. In worker processes if workers > 1; if those stop (a
+    crash, or they can't even start) the rest run here, one at a time.
+    (Not multiprocessing.Pool: it restarts workers that die, without end and
+    without an error, and its results never arrive.)"""
+    done = 0
+    if workers > 1 and len(jobs) >= PARALLEL_MIN_JOBS:
+        pool = concurrent.futures.ProcessPoolExecutor(workers, mp_context=multiprocessing.get_context("spawn"),
+                                                      initializer=_lower_priority)
+        try:
+            for result in pool.map(function, jobs, chunksize=8):
+                yield result
+                done += 1
+        except BrokenProcessPool:
+            print(f"The worker processes stopped after {done} of {len(jobs)} shaders: "
+                  "patching the rest one at a time, which takes longer ...", file=sys.stderr, flush=True)
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
+    if done == len(jobs):
+        return
+    before = _process_priority(BELOW_NORMAL_PRIORITY_CLASS)
+    try:
+        for job in jobs[done:]:
+            yield function(job)
+    finally:
+        _process_priority(before)
+
+
 def patch_all(keep_ir: bool = False, root: Path | None = None, dxc: Path | None = None,
-              strict: bool = True) -> int:
+              strict: bool = True, workers: int | None = None) -> int:
     """Patch every manifest target; returns the number of failures. root holds
     shaders/manifest.json and extracted/ and receives build/ (the project by
     default; the installer passes its work folder and its dxc).
     strict = False: a target the patterns don't recognise (a sim update) is
-    reported and skipped, whatever the error."""
+    reported and skipped, whatever the error.
+    workers: processes to use (default: up to 8, one core spare)."""
     root = root or ROOT
     dxc = dxc or find_dxc()
     manifest = json.loads((root / "shaders" / "manifest.json").read_text())
@@ -6945,12 +6998,9 @@ def patch_all(keep_ir: bool = False, root: Path | None = None, dxc: Path | None 
         jobs += [(target, (blob, target.get("kind", "medium"), target.get("args", {}), keep_ir, dxc))
                  for blob in blobs if crcs == "all" or blob.name.split(".")[0] in crcs]
     # (thousands of forward-pass variants: patched and assembled in worker processes)
-    workers = min(8, max(1, (os.cpu_count() or 2) - 1))
-    if len(jobs) >= PARALLEL_MIN_JOBS and workers > 1:
-        pool = multiprocessing.get_context("spawn").Pool(workers)
-        results = pool.imap(_patch_job, [job for _, job in jobs], chunksize=8)
-    else:
-        pool, results = None, map(_patch_job, [job for _, job in jobs])
+    if workers is None:
+        workers = min(8, max(1, (os.cpu_count() or 2) - 1))
+    results = run_jobs(_patch_job, [job for _, job in jobs], workers)
     failures, skipped = 0, {}
     try:
         for (target, _), (crc, status, message, code, ir_text) in zip(jobs, results):
@@ -6974,8 +7024,7 @@ def patch_all(keep_ir: bool = False, root: Path | None = None, dxc: Path | None 
             out.write_bytes(code)
             print(f"patched {out.relative_to(root)}  <- {entry}: {message}")
     finally:
-        if pool is not None:
-            pool.terminate()
+        results.close()
     for entry, n in skipped.items():
         print(f"{entry}: {n} variant(s) left as they are (the patch doesn't apply to them)")
     return failures
