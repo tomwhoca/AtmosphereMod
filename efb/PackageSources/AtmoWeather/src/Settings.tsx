@@ -1001,7 +1001,8 @@ export class SettingsView extends DisplayComponent<SettingsViewProps> {
  * an ancestor (a narrow tablet), each slider's name goes above it and its value. Those rows are
  * plain blocks, with no flex-wrap: a slider has no width of its own, so wrapped, it stayed at 0 px
  * on its name's full line and only its thumb showed (measured in the live EFB, 5 Nov 2026; check
- * this layout with the sim's UI debugger, a browser preview doesn't show it). */
+ * this layout with the sim's UI debugger, a browser preview doesn't show it). That engine also
+ * ignores gap on a flex box, so groups of buttons are spaced by margins. */
 export const SETTINGS_CSS = `
 .atmo-app { position: absolute; top: 0; right: 0; bottom: 0; left: 0; overflow: hidden; }
 .atmo-settings { position: absolute; top: 96px; right: 0; bottom: 96px; left: 0; overflow-y: auto;
@@ -1022,23 +1023,25 @@ export const SETTINGS_CSS = `
 .atmo-hint { opacity: 0.6; font-size: 22px; }
 .atmo-weather { opacity: 0.8; font-size: 24px; margin-bottom: 20px; }
 .atmo-metar { opacity: 0.8; font-size: 21px; font-family: monospace; white-space: pre-wrap; margin: -12px 0 20px; }
-.atmo-tabs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.atmo-tabs { display: flex; flex-wrap: wrap; margin-bottom: 12px; }
 .atmo-hidden { display: none; }
 .atmo-more { font-size: 25px; }
-.atmo-buttons { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 20px; }
-.atmo-current { gap: 12px; flex-wrap: wrap; margin-top: 4px; }
-.atmo-current-name { flex: 1 1 auto; overflow-wrap: anywhere; }
+.atmo-buttons { display: flex; flex-wrap: wrap; margin-top: 20px; }
+.atmo-app .atmo-buttons > *, .atmo-app .atmo-ask-buttons > * { margin: 0 12px 12px 0; }
+.atmo-current { flex-wrap: wrap; margin-top: 4px; }
+.atmo-current-name { flex: 1 1 auto; margin-right: 12px; overflow-wrap: anywhere; }
 .atmo-unsaved { color: #f0b429; }
-.atmo-save { gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
-.atmo-save-name { flex: 1 1 400px; }
+.atmo-save { flex-wrap: wrap; margin-bottom: 12px; }
+.atmo-save-name { flex: 1 1 400px; margin-right: 12px; }
 .atmo-save-name > .textbox { width: 100%; }
-.atmo-preset { gap: 12px; flex-wrap: wrap; border-top: 1px solid rgba(255, 255, 255, 0.12); padding: 6px 0; }
+.atmo-preset { flex-wrap: wrap; border-top: 1px solid rgba(255, 255, 255, 0.12); padding: 6px 0; }
 .atmo-preset-name { flex: 1 1 auto; overflow-wrap: anywhere; }
-.atmo-preset-buttons { display: flex; flex-wrap: wrap; gap: 12px; margin-left: auto; }
+.atmo-preset-buttons { display: flex; flex-wrap: wrap; margin-left: auto; }
+.atmo-app .atmo-preset-buttons > * { margin: 3px 0 3px 12px; }
 .atmo-ask { flex: 1 0 100%; box-sizing: border-box; margin: 4px 0 8px; padding: 14px 18px; border-radius: 6px;
   border: 1px solid rgba(240, 180, 41, 0.6); background-color: rgba(240, 180, 41, 0.08); }
 .atmo-ask-text { font-size: 24px; line-height: 1.35; margin-bottom: 14px; }
-.atmo-ask-buttons { display: flex; flex-wrap: wrap; gap: 12px; }
+.atmo-ask-buttons { display: flex; flex-wrap: wrap; margin-bottom: -12px; }
 .atmo-note { margin-top: 16px; font-size: 24px; opacity: 0.8; }
 .atmo-narrow .atmo-settings { padding-left: 20px; padding-right: 20px; }
 .atmo-narrow .atmo-label { flex: 1 1 auto; }
