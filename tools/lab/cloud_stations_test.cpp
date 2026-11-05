@@ -662,17 +662,21 @@ int soak_scenario()
     const auto icao_at = [](int i, int j) { return "G" + std::to_string(i) + "_" + std::to_string(j); };
     const haze::Metar sky = metar("XXXX", { { 2000.0, 4, -1 } });
     // heading east, degrees: returns aircraft-relative point
-    const auto ahead = [](double lat, double lon, const Point &p, double &out_lat, double &out_lon) {
-        const double b = p.bearing_deg * 3.14159265358979323846 / 180.0 + 3.14159265358979323846 / 2;
+    const auto ahead = [](double lat, double lon, double turned_deg, const Point &p, double &out_lat, double &out_lon) {
+        const double b = (p.bearing_deg + turned_deg) * 3.14159265358979323846 / 180.0 + 3.14159265358979323846 / 2;
         out_lat = lat + p.km / 111.2 * std::cos(b);
         out_lon = lon + p.km / (111.2 * std::cos(lat * 3.14159265358979323846 / 180.0)) * std::sin(b);
     };
-    const auto run = [&](const char *name, double speed_deg_per_s, int seconds, std::vector<std::string> &log, double &worst_km) {
+    // stop_after_s >= 0: flies that long, then stays, circling in orbit_km if > 0 (a 4-minute hold).
+    // swaps_per_10min: the swaps in each 10 minutes after that.
+    const auto run = [&](const char *name, double speed_deg_per_s, int seconds, std::vector<std::string> &log, double &worst_km,
+                         int stop_after_s = -1, double orbit_km = 0.0, std::vector<size_t> *swaps_per_10min = nullptr) {
         anchor::StationSet set([&log](const std::string &line) { log.push_back(line); });
         Table t;
-        const double lat = 45.0;
+        double lat = 45.0;
         double lon = 10.0;
-        size_t next_point = 0;
+        double hold_lon = 0.0, turned_deg = 0.0;
+        size_t next_point = 0, swaps_before = 0;
         worst_km = 0.0;
         const auto answer = [&](double qlat, double qlon, bool at_aircraft, double now) {
             const int i = static_cast<int>(std::lround(qlat / 0.4)), j = static_cast<int>(std::lround(qlon / 0.4));
@@ -684,13 +688,35 @@ int soak_scenario()
         for (int s = 0; s < seconds; ++s)
         {
             const double now = s;
-            lon += speed_deg_per_s;
+            if (stop_after_s < 0 || s < stop_after_s)
+                lon += speed_deg_per_s;
+            else
+            {
+                if (s == stop_after_s)
+                {
+                    hold_lon = lon;
+                    swaps_before = lines_with(log, "making room");
+                }
+                else if (swaps_per_10min && (s - stop_after_s) % 600 == 0)
+                {
+                    const size_t swaps = lines_with(log, "making room");
+                    swaps_per_10min->push_back(swaps - swaps_before);
+                    swaps_before = swaps;
+                }
+                if (orbit_km > 0.0)
+                {
+                    const double a = (s - stop_after_s) / 240.0 * 2.0 * kPi;
+                    lat = 45.0 + orbit_km / 111.2 * std::sin(a);
+                    lon = hold_lon + orbit_km / (111.2 * std::cos(45.0 * kPi / 180.0)) * (std::cos(a) - 1.0);
+                    turned_deg = (s - stop_after_s) / 240.0 * 360.0;
+                }
+            }
             if (s % 60 == 0)
                 answer(lat, lon, true, now);
             if (s % 15 == 5)
             {
                 double qlat, qlon;
-                ahead(lat, lon, kSurvey[next_point++ % std::size(kSurvey)], qlat, qlon);
+                ahead(lat, lon, turned_deg, kSurvey[next_point++ % std::size(kSurvey)], qlat, qlon);
                 answer(qlat, qlon, false, now);
             }
             set.tick(lat, lon, now);
@@ -721,6 +747,30 @@ int soak_scenario()
         run("still", 0.0, 7200, log, worst);
         check(lines_with(log, "making room") <= kStations, "a few swaps at most, then settled: " + std::to_string(lines_with(log, "making room")));
         check(worst < 40.0, "a station near the aircraft counts throughout: worst " + std::to_string(worst) + " km");
+    }
+    // The test flight of 5 Nov 2026: at cruise speed, then a hold. Stopped, the set settles. Circling, which
+    // stations are nearest keeps changing, so a few far ones keep swapping (5 in 8 minutes on that flight);
+    // before the fix it was 61 in these 110 minutes, stopped or circling.
+    for (const double orbit_km : { 0.0, 8.0 })
+    {
+        printf("soak: flying for 30 minutes, then %s\n", orbit_km > 0.0 ? "holding (8 km circle, 4 minutes a turn)" : "stopping dead");
+        std::vector<std::string> log;
+        std::vector<size_t> swaps;
+        double worst = 0.0;
+        run(orbit_km > 0.0 ? "hold" : "stop", 0.25 / (111.2 * std::cos(45.0 * kPi / 180.0)), 1800 + 7200, log, worst, 1800, orbit_km, &swaps);
+        printf("  swaps per 10 minutes after that:");
+        size_t total = 0, after_first = 0;
+        for (size_t i = 0; i < swaps.size(); ++i)
+        {
+            printf(" %zu", swaps[i]);
+            total += swaps[i];
+            after_first += i > 0 ? swaps[i] : 0;
+        }
+        printf("\n");
+        if (orbit_km > 0.0)
+            check(total <= 38, "in a hold, fewer swaps than before the fix (61): " + std::to_string(total));
+        else
+            check(after_first == 0, "stopped, settled within 10 minutes: " + std::to_string(after_first) + " swaps after that");
     }
     printf("soak: flying across them at 250 m/s\n");
     {
