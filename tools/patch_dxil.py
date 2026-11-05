@@ -294,6 +294,10 @@ def cloud_prologue_lines() -> list[str]:
         "  %mod.cfon1 = fcmp fast ogt float %mod.cmix, 0.000000e+00",
         "  %mod.cfon = and i1 %mod.cfon0, %mod.cfon1",
         "  %mod.cfk = select i1 %mod.cfon, float %mod.cfr, float 2.500000e-01",
+        # plane-cloud light (experiment, apply_cloud_tilt_view): C0 * sat(C36), which arrives as C35's slot
+        "  %mod.cpl0 = call float @dx.op.unary.f32(i32 7, float %mod.C35)",
+        "  %mod.cpl = fmul fast float %mod.cmix, %mod.cpl0",
+        "  %mod.cploff = fcmp fast ole float %mod.cpl, 0.000000e+00",
         # build-up of bounced light (apply_cloud_shape): strength C0 * C6, depth C7 (m, 100 if <= 0)
         "  %mod.cpw0 = call float @dx.op.unary.f32(i32 7, float %mod.C6)",
         "  %mod.cpw = fmul fast float %mod.cmix, %mod.cpw0",
@@ -4098,11 +4102,31 @@ def shadow_sample_lines(em: Emitter, pix: dict, cos: str, dirs, light, t: str, s
 # Developers, experiment/cloud-detail (tunables.ini T17 > 0, the add-on sets this bit): each view sample
 # shows the slope of the clouds' depth field toward the sun, mu0 = (depth here - depth toward the sun) /
 # distance, from the short march's own samples. If field * 8000 is a true distance in metres, mu0 is the cosine
-# of the surface's tilt to the sun: half-Lambert grey, 0.5 + 0.5 mu0. Red: the slope's over +1, blue: under -1
-# (steeper than a distance can be). Dim green: the march didn't run there.
+# of the surface's tilt to the sun: half-Lambert grey, 0.5 + 0.5 mu0. Steeper than a distance can be, in bands:
+# over +1 yellow, +2 red, +4 magenta; under -1 cyan, -2 blue. Green: the march didn't run there.
 DEBUG_CLOUD_TILT = 1 << 14
 TILT_RANGE_M = (100.0, 400.0)  # the short march's samples averaged (notes/xplane/phys: "avg", so that one lump doesn't decide)
-TILT_BRIGHTNESS = 0.16         # of the sun's irradiance, about a sunlit cloud's radiance
+TILT_BRIGHTNESS = 0.05         # of the sun's irradiance. (At 0.16 the tone curve clipped: the grey was the same whatever the sun.)
+TILT_BANDS = ((1.0, (1.0, 1.0, 0.0)), (2.0, (1.0, 0.0, 0.0)), (4.0, (1.0, 0.0, 1.0)),  # (in order: a later band wins)
+              (-1.0, (0.0, 1.0, 1.0)), (-2.0, (0.0, 0.0, 1.0)))
+TILT_NO_MARCH = (0.0, 0.5, 0.0)
+
+# Experiment: front-lit cloud as plane-cloud theory has it (tunables.ini C36, 0 = off, the add-on pushes it as the
+# slot of C35, which no cloud shader reads). A sunlit surface of thick cloud reflects, per unit of sun irradiance,
+#   R / pi, R = f (A + B (mu + f) + C mu f + P) / (4 (mu + f))
+# (van de Hulst, King, Kokhanovsky; notes/xplane/phys/cheap.py, checked against Monte Carlo), f the cosine of the
+# sun on the surface, mu of the view. It takes the place of the sim's sun term by
+#   lit = C36 * sat(f / 0.1) * exp(-kappa 0.136 d) * layer visibility * the short march's weight,
+# d the march's optical depth toward the sun, kappa how much thicker real cloud is than the sim's. Nothing was
+# fitted to brightness. f comes from the depth field's slope toward the sun, which the sim made steeper than a
+# distance: 98 % of its cloud area within 2 (measured in flight, 5 Nov 2026), hence PLANE_SLOPE_DIV.
+# mu is fixed: in the model any way of getting it gives the same match to physics (renders/mu_test.txt).
+PLANE_A, PLANE_B, PLANE_C = 1.247, 1.186, 5.157
+PLANE_P = 0.5           # the droplets' backscatter, 4 pi p(180 - ish), as the model's "avg" set
+PLANE_MU = 0.7
+PLANE_KAPPA = 8.0
+PLANE_SLOPE_DIV = 2.0
+PLANE_F_MIN = 0.05      # (the surface barely lit: the formula's limit)
 
 
 def find_sun_march(ir: Ir, ms: dict) -> dict | None:
@@ -4149,8 +4173,53 @@ def find_sun_march(ir: Ir, ms: dict) -> dict | None:
         if any(o.startswith("%") and any(reaches(ir, o, add) for add in ms["adds"]) for o in others):
             sun[comp] = name
     need(len(sun) == 3, f"{len(sun)} channels of the sun's irradiance")
+    # the march's optical depth, once summed (soft transmittance's input)
+    end = next(i for i, l in enumerate(ir.lines) if re.match(rf"\s+{V} = add nuw nsw i32 {re.escape(index)}, 1$", l))
+    sums = [x for x, _ in ms["softs"] if ir.defs[index] < ir.defs.get(x, -1) < end]
+    need(len(sums) == 1, f"{len(sums)} optical depths in the march")
+    # S = layer visibility * the soft transmittance (a phi: 0 where the volume wasn't read)
+    visible = ir.unary[ms["s"]][1]
+    layer = None  # (variants without the layer map: S is the transmittance alone)
+    if ir.binops.get(visible, ("",))[0] == "fmul":
+        factors = ir.binops[visible][1:]
+        is_phi = [bool(PHI.match(ir.lines[ir.defs[o]])) if o in ir.defs else False for o in factors]
+        need(sum(is_phi) == 1, f"{visible}: {sum(is_phi)} of its factors are the transmittance")
+        layer = factors[0] if is_phi[1] else factors[1]
+    # the march's weight: it runs if (S > 0 and w > 0)
+    k = ir.defs[index]
+    while not re.match(r"\s+br label ", ir.lines[k]):
+        k -= 1
+    k2 = k
+    while not re.match(r"\s+br i1 ", ir.lines[k2]):
+        k2 -= 1
+    m = re.match(r"\s+br i1 (\S+), ", ir.lines[k2])
+    m2 = re.match(rf"\s+{re.escape(m[1])} = and i1 ({V}), ({V})", ir.lines[ir.defs[m[1]]])
+    need(m2, f"{m[1]}: the march's condition isn't an and")
+    weights = []
+    for c in (m2[1], m2[2]):
+        m3 = re.match(rf"\s+{re.escape(c)} = fcmp fast ogt float ({V}), 0\.000000e\+00", ir.lines[ir.defs[c]])
+        need(m3, f"{c}: not a test of a value above 0")
+        if m3[1] != visible:
+            weights.append(m3[1])
+    need(len(weights) == 1, f"{len(weights)} weights of the march")
+    # each channel's E * P * S'
+    terms = []
+    for c in range(3):
+        found = []
+        for ep, (k3, a, b) in ir.binops.items():
+            if k3 != "fmul" or sun[c] not in (a, b):
+                continue
+            phase = b if a == sun[c] else a
+            if not (phase.startswith("%") and any(reaches(ir, phase, add) for add in ms["adds"])):
+                continue
+            for eps, (k4, p, q) in ir.binops.items():
+                if k4 == "fmul" and ep in (p, q):
+                    found.append((eps, ep, q if p == ep else p))
+        need(len(found) == 1, f"channel {c}: {len(found)} products of the sun term")
+        terms.append(found[0])
     return {"index": index, "index_f": index_f, "step": step, "scale": scales.pop(), "depth": edges["depth"],
-            "depth_q": depth_q, "first": picked[0], "last": picked[-1], "sun": [sun[0], sun[1], sun[2]]}
+            "depth_q": depth_q, "first": picked[0], "last": picked[-1], "sun": [sun[0], sun[1], sun[2]],
+            "optical": sums[0], "layer": layer, "weight": weights[0], "terms": terms, "phases": len(ms["adds"])}
 
 
 def apply_cloud_tilt_view(ir: Ir, march: dict | None, site: dict) -> str:
@@ -4205,16 +4274,55 @@ def apply_cloud_tilt_view(ir: Ir, march: dict | None, site: dict) -> str:
     share = 1.0 / (march["last"] - march["first"] + 1)
     mu_next = em.add("%mod.tv.mu0", em.select(used, em.mul(clamped, share), 0.0))
     raw_next = em.add("%mod.tv.raw0", em.select(used, em.mul(raw, share), 0.0))
+    scaled = em.max(em.min(em.div(slope, PLANE_SLOPE_DIV), 1.0), -1.0)
+    f_next = em.add("%mod.tv.f0", em.select(used, em.mul(scaled, share), 0.0))
     zero = "0.000000e+00"
     edits = [(n, [*em.lines, ir.lines[n]]),
              (head, [ir.lines[head],
                      f"  %mod.tv.mu0 = phi float [ {zero}, {before} ], [ {mu_next}, {latch} ]",
-                     f"  %mod.tv.raw0 = phi float [ {zero}, {before} ], [ {raw_next}, {latch} ]"])]
+                     f"  %mod.tv.raw0 = phi float [ {zero}, {before} ], [ {raw_next}, {latch} ]",
+                     f"  %mod.tv.f0 = phi float [ {zero}, {before} ], [ {f_next}, {latch} ]"])]
     def phi(name, value):
         pairs = ", ".join(f"[ {value if l == leave[0] else zero}, {l} ]" for l in labels)
         return f"  {name} = phi float {pairs}"
     edits.append((merge, [ir.lines[merge], phi("%mod.tv.mu", mu_next), phi("%mod.tv.raw", raw_next),
-                          phi("%mod.tv.ran", "1.000000e+00")]))
+                          phi("%mod.tv.ran", "1.000000e+00"), phi("%mod.tv.f", f_next),
+                          phi("%mod.tv.d", march["optical"])]))
+
+    # the formula, in place of each channel's E * P * S'
+    pl = Emitter("pl.")
+    f = pl.max("%mod.tv.f", PLANE_F_MIN)
+    num0 = PLANE_A + PLANE_B * PLANE_MU + PLANE_P
+    num1 = PLANE_B + PLANE_C * PLANE_MU
+    reflect = pl.div(pl.mul(f, pl.mad(num1, f, num0)), pl.mul(pl.add(f, PLANE_MU), 4.0))
+    over_pi = pl.mul(reflect, 1.0 / math.pi)
+    # (DXIL's Exp is base 2)
+    blocked = pl.exp2(pl.mul("%mod.tv.d", -0.136 * PLANE_KAPPA / math.log(2.0)))
+    facing = pl.sat(pl.div("%mod.tv.f", 0.1))
+    lit = pl.mul(facing, blocked)
+    if march["layer"]:
+        lit = pl.mul(lit, march["layer"])
+    lit = pl.mul(pl.mul(lit, march["weight"]), "%mod.cpl")
+    first_term = min(ir.defs[eps] for eps, _, _ in march["terms"])
+    need(first_term > merge, "the sun term comes before the march's end")
+    edits.append((first_term, [*pl.lines, ir.lines[first_term]]))  # (its channel's edit takes that last line's place)
+    terms_x = []
+    for c, (eps, ep, sprime) in enumerate(march["terms"]):
+        j = ir.defs[eps]
+        k = c if march["phases"] == 3 else 0
+        sun = march["sun"][c]
+        terms_x.append((j, [
+            ir.lines[j].replace(f"{eps} = ", f"%mod.pl.o{c} = ", 1),
+            f"  %mod.pl.gs{c} = fmul fast float %mod.gl.t{k}, {sprime}",
+            f"  %mod.pl.g{c} = select i1 %mod.cgloff, float 0.000000e+00, float %mod.pl.gs{c}",
+            f"  %mod.pl.r{c} = fadd fast float {over_pi}, %mod.pl.g{c}",
+            f"  %mod.pl.a{c} = fmul fast float %mod.pl.r{c}, %mod.sh.f",
+            f"  %mod.pl.e{c} = fmul fast float %mod.pl.a{c}, {sun}",
+            f"  %mod.pl.d{c} = fsub fast float %mod.pl.e{c}, %mod.pl.o{c}",
+            f"  %mod.pl.m{c} = call float @dx.op.tertiary.f32(i32 46, float %mod.pl.d{c}, float {lit}, float %mod.pl.o{c})",
+            f"  {eps} = select i1 %mod.cploff, float %mod.pl.o{c}, float %mod.pl.m{c}",
+        ]))
+    edits += terms_x
 
     first = min(ir.defs[x] for x, _ in site["radiance"])
     need(first > merge, "the step radiance comes before the march's end")
@@ -4222,14 +4330,16 @@ def apply_cloud_tilt_view(ir: Ir, march: dict | None, site: dict) -> str:
     flags = col.new(f"bitcast float {col.ext(col.load('%mod.ah', 0), 0)} to i32")
     on = col.new(f"icmp ne i32 {col.new(f'and i32 {flags}, {DEBUG_CLOUD_TILT}')}, 0")
     grey = col.sat(col.mad("%mod.tv.mu", 0.5, 0.5))
-    over, under = col.cmp("ogt", "%mod.tv.raw", 1.0), col.cmp("olt", "%mod.tv.raw", -1.0)
+    bands = [(col.cmp("ogt" if limit > 0 else "olt", "%mod.tv.raw", limit), colour) for limit, colour in TILT_BANDS]
     ran = col.cmp("ogt", "%mod.tv.ran", 0.5)
     channels = site["radiance"]
-    # per channel: (over, under, no march) for R, G, B; grey variants show the shade alone
-    looks = [(1.0, 0.0, 0.0), (0.0, 0.0, 0.1), (0.0, 1.0, 0.0)] if len(channels) == 3 else [(grey, grey, 0.1)]
     edits_x = []
-    for c, ((x, a), (hi, lo, none)) in enumerate(zip(channels, looks)):
-        shade = col.select(ran, col.select(over, hi, col.select(under, lo, grey)), none)
+    for c, (x, a) in enumerate(channels):
+        shade = grey
+        if len(channels) == 3:  # (a one-channel variant shows the grey alone)
+            for hit, colour in bands:
+                shade = col.select(hit, colour[c], shade)
+        shade = col.select(ran, shade, TILT_NO_MARCH[c if len(channels) == 3 else 1])
         sun = march["sun"][min(c, len(march["sun"]) - 1)]
         colour = col.mul(col.mul(shade, sun), TILT_BRIGHTNESS)
         j = ir.defs[x]

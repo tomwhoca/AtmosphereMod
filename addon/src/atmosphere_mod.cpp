@@ -393,6 +393,7 @@ std::array<float, kCloudTunableCount> g_effective_cloud_tunables = {};  // pushe
 // C32 <= 0: no thunderstorm cells (DebugCapture bit 8 to the cloud generator)
 std::atomic<bool> g_storms_off{true};
 std::atomic<bool> g_cloud_tilt_view{false};  // T17 > 0 (developers): DebugCapture bit 14, patch_dxil.py DEBUG_CLOUD_TILT
+std::atomic<float> g_cloud_plane_light{0.0f};  // C36 (experiment, 0..1): pushed as C35's slot, patch_dxil.py PLANE_*
 std::atomic<bool> g_fog_tint{false};  // C35 > 0: DebugCapture bit 13 on graphics draws
 std::atomic<bool> g_forward_fog_off{false};  // C35 < 0: no fog on the forward pass (bits 10-12 left 0)
 constexpr float kFallbackFreezingLevel = 3000.0f;  // m, R4 = 0 before the first METAR
@@ -1067,6 +1068,7 @@ void reload(device *dev)
     weather::set_haze_field(load_tunable('T', 15, 1.0f) > 0.0f);
     weather::set_haze_strength(load_tunable('T', 16, 1.0f));
     g_cloud_tilt_view.store(load_tunable('T', 17, 0.0f) > 0.0f, std::memory_order_relaxed);
+    g_cloud_plane_light.store(std::clamp(load_tunable('C', 36, 0.0f), 0.0f, 1.0f), std::memory_order_relaxed);
     struct Job
     {
         uint64_t handle;
@@ -2830,6 +2832,7 @@ void update_effective_tunables()
     g_storms_off.store(!(cloud[32] > 0.0f), std::memory_order_relaxed);
     g_fog_tint.store(cloud[35] > 0.0f, std::memory_order_relaxed);
     g_forward_fog_off.store(cloud[35] < 0.0f, std::memory_order_relaxed);
+    cloud[35] = g_cloud_plane_light.load(std::memory_order_relaxed);  // (C35 itself goes no further; no cloud shader read its slot)
 
     const std::unique_lock lock(g_mutex);
     g_effective_tunables = effective;
@@ -3118,6 +3121,7 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE re
     weather::set_haze_field(load_tunable('T', 15, 1.0f) > 0.0f);
     weather::set_haze_strength(load_tunable('T', 16, 1.0f));
     g_cloud_tilt_view.store(load_tunable('T', 17, 0.0f) > 0.0f, std::memory_order_relaxed);
+    g_cloud_plane_light.store(std::clamp(load_tunable('C', 36, 0.0f), 0.0f, 1.0f), std::memory_order_relaxed);
     g_effective_tunables = g_tunables;
     g_radar_tunables = load_tunables('R');
     g_cloud_tunables = load_tunables<kCloudTunableCount>('C');

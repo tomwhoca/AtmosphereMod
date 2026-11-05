@@ -600,7 +600,7 @@ def check_tilt_view(stock: str, patched: str, failures: list) -> None:
     # the colours
     channels = len(P.find_inside_site(P.Ir(stock))["radiance"])
     mu = rng.uniform(-1, 1, n).astype(F)
-    raw = rng.uniform(-2, 2, n).astype(F)
+    raw = rng.uniform(-6, 6, n).astype(F)
     ran = (rng.uniform(0, 1, n) > 0.2).astype(F)
     sun = rng.uniform(0.1, 20, n).astype(F)
     seeds = {"%mod.tv.mu": mu, "%mod.tv.raw": raw, "%mod.tv.ran": ran, **{name: sun for name in march["sun"]}}
@@ -611,16 +611,70 @@ def check_tilt_view(stock: str, patched: str, failures: list) -> None:
     mod[0, 0] = np.uint32(P.DEBUG_CLOUD_TILT).view(np.float32)
     on, off = Evaluator(patched, {**cbs, "b0 space50": mod}, seeds), Evaluator(patched, cbs, seeds)
     grey = np.clip(0.5 * mu.astype(np.float64) + 0.5, 0, 1)
-    over, under, none = raw > 1.0, raw < -1.0, ran < 0.5
-    looks = [(1.0, 0.0, 0.0), (0.0, 0.0, 0.1), (0.0, 1.0, 0.0)] if channels == 3 else [(grey, grey, 0.1)]
-    for c, (hi, lo, missing) in enumerate(looks):
-        shade = np.where(none, missing, np.where(over, hi, np.where(under, lo, grey)))
+    none = ran < 0.5
+    for c in range(channels):
+        shade = grey
+        if channels == 3:
+            for limit, colour in P.TILT_BANDS:
+                shade = np.where(raw > limit if limit > 0 else raw < limit, colour[c], shade)
+        shade = np.where(none, P.TILT_NO_MARCH[c if channels == 3 else 1], shade)
         want = shade * sun.astype(np.float64) * P.TILT_BRIGHTNESS
         err = float(np.max(np.abs(on(f"%mod.tv.a{c}").astype(np.float64) - want)))
         if err > 1e-3:
             failures.append(f"tilt view channel {c}: off by {err:.1e}")
         if not np.array_equal(off(f"%mod.tv.a{c}"), plain):
             failures.append(f"tilt view channel {c}: not the step's radiance with the bit off")
+
+
+def check_plane_light(stock: str, patched: str, failures: list) -> None:
+    """Front-lit cloud from plane-cloud theory (C36, in C35's slot): each channel's sun term, exactly
+    the sim's while off; with it on, a blend toward the formula by f, the march's optical depth, the layer's
+    visibility and the march's weight, with the glory and the aircraft's shadow kept."""
+    ir = P.Ir(stock)
+    march = P.find_sun_march(ir, P.find_cloud_ms(ir))
+    if march is None:
+        return
+    n = 4000
+    rng = np.random.default_rng(13)
+    u = lambda a, b: rng.uniform(a, b, n).astype(F)
+    f, d, layer, weight, shadow = u(-1, 1), u(0, 10), u(0, 1), u(0, 1), u(0, 1)
+    seeds = {"%mod.tv.f": f, "%mod.tv.d": d, march["weight"]: weight, "%mod.sh.f": shadow}
+    if march["layer"]:
+        seeds[march["layer"]] = layer
+    else:
+        layer = np.ones(n, F)
+    glory = [u(0, 0.1) for _ in range(march["phases"])]
+    for k, g in enumerate(glory):
+        seeds[f"%mod.gl.t{k}"] = g
+    parts = []
+    visibility = u(0, 2)  # (the channels share S')
+    for c, (eps, ep, sprime) in enumerate(march["terms"]):
+        parts.append((u(0, 2), visibility, u(0.5, 20)))
+        seeds[ep], seeds[sprime], seeds[march["sun"][c]] = parts[-1]
+    for strength, glory_on in ((0.0, False), (0.0, True), (0.6, False), (0.6, True), (1.0, True)):
+        cloud = np.zeros((P.CLOUD_PARAMS_SIZE // 16, 4))
+        cloud[0, 0] = 1.0
+        cloud[2, 1] = 0.5 if glory_on else 0.0  # C9
+        cloud[8, 3] = strength  # C35's slot
+        got = Evaluator(patched, {"b1 space50": cloud, "b0 space50": np.zeros((4, 4))}, seeds)
+        fm = np.maximum(f.astype(np.float64), P.PLANE_F_MIN)
+        mu = P.PLANE_MU
+        reflect = fm * (P.PLANE_A + P.PLANE_B * (mu + fm) + P.PLANE_C * mu * fm + P.PLANE_P) / (4 * (mu + fm))
+        lit = (np.clip(f.astype(np.float64) / 0.1, 0, 1) * np.exp(-0.136 * P.PLANE_KAPPA * d.astype(np.float64))
+               * layer.astype(np.float64) * weight.astype(np.float64) * strength)
+        for c, (eps, ep, sprime) in enumerate(march["terms"]):
+            e_p, s_p, sun = (x.astype(np.float64) for x in parts[c])
+            stock_term = e_p * s_p
+            g = glory[c if march["phases"] == 3 else 0].astype(np.float64) * s_p if glory_on else 0.0
+            want = stock_term + ((reflect / math.pi + g) * shadow.astype(np.float64) * sun - stock_term) * lit
+            value = got(eps).astype(np.float64)
+            if strength == 0.0:
+                if not np.array_equal(got(eps), (parts[c][0] * parts[c][1]).astype(F)):
+                    failures.append(f"plane light off, channel {c}: not the sim's sun term")
+            else:
+                err = float(np.max(np.abs(value - want) / np.maximum(np.abs(want), 1e-3)))
+                if err > 1e-3:
+                    failures.append(f"plane light {strength} glory {glory_on}, channel {c}: rel. error {err:.1e}")
 
 
 def check(crc: str, stock: str) -> list[str]:
@@ -1132,6 +1186,7 @@ def check(crc: str, stock: str) -> list[str]:
           f"worst p99.9 rel. error {worst:.1e}; shadow max abs. error {worst_shadow:.1e}; "
           f"untiling max error {worst_untile:.2f} m")
     check_tilt_view(stock, patched, failures)
+    check_plane_light(stock, patched, failures)
     return failures
 
 
