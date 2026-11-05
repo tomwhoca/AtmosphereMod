@@ -257,7 +257,7 @@ public:
             const Haze h = effective_haze(s, now);
             const auto mixed = [&](size_t k) { return blend->ini[k] + (h[k] - blend->ini[k]) * blend->mix; };
             const float haze_rows[8] = { mixed(0), mixed(2), mixed(3), mixed(4), mixed(5), mixed(7),
-                                         haze_counts(s) ? 1.0f : 0.0f, 0.0f };
+                                         static_cast<float>(counts_share(s, now)), 0.0f };
             std::memcpy(out + kHazeOffset + kHazeRowBytes * i, haze_rows, sizeof(haze_rows));
         }
     }
@@ -272,7 +272,7 @@ public:
         size_t n = 0;
         for (const Station &s : slots_)
         {
-            const double w = s.used && haze_counts(s) ? weight(s, now) : 0.0;
+            const double w = s.used ? weight(s, now) * counts_share(s, now) : 0.0;
             if (!(w > 0.0))
                 continue;
             const double km = distance_km(lat, lon, s.pos_lat(), s.pos_lon());
@@ -311,6 +311,9 @@ private:
         Haze haze_from = {}, haze_to = {}; // ... and of the haze, which changes on its own
         double haze_change = -1e9;
         double haze_hour = NAN;            // the local hour haze_to is for
+        double open_from = 0.0, open_to = 0.0;     // the report's visibility is open-ended (1), crossfaded with the haze ...
+        double counts_from = 0.0, counts_to = 0.0; // ... and it has one (1)
+        double kind_change = -1e9;                 // ... from this moment
         double fade_from = 0.0, fade_to = 0.0, fade_start = 0.0, fade_len = 0.0;
         std::string described;
 
@@ -355,11 +358,24 @@ private:
         return out;
     }
 
-    // A METAR without a visibility gives haze only from humidity: such a
-    // station stays out of the haze field (its clouds still count).
-    static bool haze_counts(const Station &s)
+    // How far a change in the report's kind of visibility has come, smoothstepped like the haze's.
+    static double kind_progress(const Station &s, double now)
     {
-        return std::isfinite(s.metar.vis_m);
+        const double t = std::clamp((now - s.kind_change) / kCrossfadeS, 0.0, 1.0);
+        return t * t * (3.0 - 2.0 * t);
+    }
+
+    // A METAR without a visibility gives haze only from humidity: such a
+    // station stays out of the haze field (its clouds still count). Crossfaded:
+    // going by the latest report alone changed the haze in one frame (issue 19).
+    static double counts_share(const Station &s, double now)
+    {
+        return s.counts_from + (s.counts_to - s.counts_from) * kind_progress(s, now);
+    }
+
+    static double open_share(const Station &s, double now)
+    {
+        return s.open_from + (s.open_to - s.open_from) * kind_progress(s, now);
     }
 
     // The haze's crossfade, smoothstepped like the rows'.
@@ -380,7 +396,8 @@ private:
     Haze effective_haze(const Station &s, double now) const
     {
         Haze h = current_haze(s, now);
-        if (!s.metar.vis_open)
+        const double open_part = open_share(s, now);
+        if (!(open_part > 0.0))
             return h;
         // (haze_mapping.h: the surface aerosol T3 + T4 = sigma / kStockMieExtinction, sigma = 3 / V - Rayleigh)
         const auto sigma_at = [](double km) { return 3.0 / km - haze::kRayleigh550; };
@@ -388,7 +405,7 @@ private:
         double pull = 0.0;
         for (const Station &o : slots_)
         {
-            const double w = &o != &s && o.used && haze_counts(o) && !o.metar.vis_open ? weight(o, now) : 0.0;
+            const double w = &o != &s && o.used ? weight(o, now) * counts_share(o, now) * (1.0 - open_share(o, now)) : 0.0;
             if (!(w > 0.0))
                 continue;
             const Haze ho = current_haze(o, now);
@@ -396,9 +413,10 @@ private:
             const double km = distance_km(s.pos_lat(), s.pos_lon(), o.pos_lat(), o.pos_lon());
             pull = std::max(pull, w * thicker * std::exp(-(km / kOpenPullKm) * (km / kOpenPullKm)));
         }
-        const double own = std::min((h[2] + h[3]) * k, open);  // the report: at least 10 km
+        const double plain = (h[2] + h[3]) * k;
+        const double own = std::min(plain, open);  // the report: at least 10 km
         const double sigma = own + std::max(sigma_at(kOpenVisKm) - own, 0.0) * pull;
-        h[2] = static_cast<float>(std::max(sigma / k - h[3], 0.0));
+        h[2] = static_cast<float>(std::max((plain + (sigma - plain) * open_part) / k - h[3], 0.0));
         return h;
     }
 
@@ -412,9 +430,22 @@ private:
         in.local_hour = s.local_hour;
         const Haze h = haze_values(haze::derive(in));
         s.haze_hour = s.local_hour;
+        const bool crossfade = weight(s, now) > 0.0;
+        const double open = s.metar.vis_open ? 1.0 : 0.0, counts = std::isfinite(s.metar.vis_m) ? 1.0 : 0.0;
+        if (open != s.open_to || counts != s.counts_to)
+        {
+            s.open_from = crossfade ? open_share(s, now) : open;
+            s.counts_from = crossfade ? counts_share(s, now) : counts;
+            s.kind_change = crossfade ? now : -1e9;
+            s.open_to = open;
+            s.counts_to = counts;
+            if (crossfade)
+                note(s, static_cast<size_t>(&s - slots_.data()),
+                     std::string("visibility now ") + (counts <= 0.0 ? "not reported" : open > 0.0 ? "open-ended" : "a number") +
+                         ": the haze crossfades over " + std::to_string(std::lround(kCrossfadeS)) + " s");
+        }
         if (h == s.haze_to)
             return;
-        const bool crossfade = weight(s, now) > 0.0;
         s.haze_from = crossfade ? current_haze(s, now) : h;
         s.haze_change = crossfade ? now : -1e9;
         s.haze_to = h;

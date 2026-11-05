@@ -646,6 +646,62 @@ int churn_scenario()
     return g_fails ? 1 : 0;
 }
 
+// A new report that changes the kind of visibility it gives crossfades like any other. It changed the
+// haze at once (issue 19; KMSP 10SM to 5SM -RA BR on 3 Nov 2026: ~13 to ~25 km in one frame), the open-ended
+// report's pull and whether a station counts being taken from the latest report as they stood.
+int haze_flip_scenario()
+{
+    using anchor::Haze, anchor::kCrossfadeS;
+    printf("haze: a report changing its kind of visibility\n");
+    const double lat = 44.88, lon = -93.22;
+    const auto report = [](const char *icao, double vis_m, bool open, bool mist = false) {
+        haze::Metar m = metar(icao, { { 1000.0, 8, -1 } });
+        m.vis_m = vis_m;
+        m.vis_open = open;
+        m.fog = mist;
+        return m;
+    };
+    const auto sigma = [](const Haze &h) { return static_cast<double>(h[2]) + h[3]; };
+    // the largest change in one second of the haze at the aircraft, A's report changing at 100 s (or B's)
+    const auto largest_step = [&](const haze::Metar &a0, const haze::Metar &b0, const haze::Metar &later, const char *name) {
+        std::vector<std::string> log;
+        anchor::StationSet set([&log](const std::string &line) { log.push_back(line); });
+        set.on_metar(a0, lat, lon, true, 250.0, 12.0, lat, lon, 0.0);
+        set.on_position(a0.icao, lat, lon, 250.0, 0.5);
+        set.on_metar(b0, 45.05, -93.22, false, 0.0, 12.0, lat, lon, 1.0);
+        set.on_position(b0.icao, 45.05, -93.22, 250.0, 1.5);
+        set.tick(lat, lon, 2.0);
+        Haze h = {};
+        const bool at_a = later.icao == a0.icao;
+        set.haze_at(lat, lon, 99.0, h);
+        double previous = sigma(h);
+        const double first = previous;
+        double worst = 0.0;
+        set.on_metar(later, at_a ? lat : 45.05, at_a ? lon : -93.22, at_a, 0.0, 12.0, lat, lon, 100.0);
+        for (double t = 100.0; t <= 101.0 + kCrossfadeS; t += 1.0)
+        {
+            set.tick(lat, lon, t);
+            set.haze_at(lat, lon, t, h);
+            worst = std::max(worst, std::abs(std::log(sigma(h) / previous)));
+            previous = sigma(h);
+        }
+        printf("  %s: T3+T4 %.1f -> %.1f, at most %.1f %% in a second\n", name, first, previous, 100.0 * worst);
+        // (a fade of the largest of these peaks at 2.8 %; in one frame they were 40-194 %)
+        check(worst < 0.03, std::string(name) + ": gradual, " + std::to_string(100.0 * worst) + " % in a second");
+        check(lines_with(log, "visibility now") == 1, std::string(name) + ": logged once, a neighbour's too");
+    };
+    const haze::Metar a_open = report("KMSP", 10000.0, true), b_thick = report("KFCM", 4000.0, false);
+    largest_step(a_open, b_thick, report("KMSP", 8047.0, false), "open-ended to a number, thicker neighbour");
+    largest_step(report("KMSP", 3000.0, false, true), b_thick, a_open, "a number to open-ended");
+    largest_step(a_open, b_thick, report("KFCM", 10000.0, true), "the neighbour's report turning open-ended");
+    largest_step(a_open, report("KFCM", 10000.0, true), b_thick, "the neighbour's report turning thick");
+    haze::Metar blind = report("KMSP", NAN, false);
+    largest_step(report("KMSP", 4000.0, false), report("KFCM", 10000.0, true), blind, "a report losing its visibility");
+    largest_step(blind, report("KFCM", 10000.0, true), report("KMSP", 4000.0, false), "a report getting one");
+    printf(g_fails ? "%d check(s) failed\n" : "all checks passed\n", g_fails);
+    return g_fails ? 1 : 0;
+}
+
 // Longer runs among many stations, with weather_feed.cpp's survey: stations every
 // 0.4 deg, the nearest to the aircraft asked for every minute, and the nearest to one
 // survey point every 15 s. Sitting still the set must settle; flying, the station
@@ -812,5 +868,6 @@ int main(int argc, char **argv)
     const int clouds = scenario();
     const int churn = churn_scenario();
     const int soak = soak_scenario();
-    return haze_scenario() | clouds | churn | soak;
+    const int flip = haze_flip_scenario();
+    return haze_scenario() | clouds | churn | soak | flip;
 }
