@@ -3065,6 +3065,15 @@ void on_present(effect_runtime *runtime)
         g_enabled = !g_enabled;
         event(reshade::log::level::info, g_enabled ? "replacements ON" : "replacements OFF (stock shaders)");
     }
+    // Experiment: C36 on and off within a frame, on the same clouds. Clouds change within tens of seconds
+    // (notes/xplane/gaps), and a reload is too slow to compare across.
+    if (modifiers && runtime->is_key_pressed(VK_F8))
+    {
+        const float setting = std::clamp(load_tunable('C', 36, 0.0f), 0.0f, 1.0f);
+        const float next = g_cloud_plane_light.load(std::memory_order_relaxed) > 0.0f ? 0.0f : (setting > 0.0f ? setting : 1.0f);
+        g_cloud_plane_light.store(next, std::memory_order_relaxed);
+        event(reshade::log::level::info, next > 0.0f ? "plane light ON (Ctrl+Shift+F8)" : "plane light OFF (Ctrl+Shift+F8)");
+    }
     // (the EFB app's unsaved changes go to tunables.ini before the reload reads it)
     if (sync_settings(modifiers && runtime->is_key_pressed(VK_F10), runtime->get_hwnd()))
         reload(runtime->get_device());
