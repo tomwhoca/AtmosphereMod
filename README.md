@@ -614,8 +614,8 @@ Store or Steam version. Systems that have been reported will be added here.
      also drag `FlightSimulator2024.exe` into the installer's window). If it
      can't find your Community folder, it asks for that too;
    - extracts the sim's shaders from **your own copy of the game** and patches
-     them on your PC, in a work folder it deletes afterwards (the mod contains
-     none of the game's files);
+     them on your PC, one at a time, in a work folder it deletes afterwards (the
+     mod contains none of the game's files). This takes several minutes;
    - puts the patched shaders and `tunables.ini` into
      `%LOCALAPPDATA%\AtmosphereMod`;
    - installs the add-on next to ReShade, the EFB app into your Community
@@ -637,6 +637,10 @@ or its flightsim.to page.
 The game's own files stay untouched: the add-on swaps shaders in memory as the
 sim creates them. The installer's log is in
 `%LOCALAPPDATA%\AtmosphereMod\logs\install.log`.
+
+Patching on several CPU cores at once is faster, but it froze one user's PC, so
+it's off by default. To try it, run `Install AtmosphereMod.cmd --workers 4` from
+Command Prompt, in the folder you unzipped.
 
 ### After a sim update
 

@@ -6,7 +6,7 @@
 - run_jobs returns every result in order, at below normal priority, inherited by child processes
   (dxc). Workers that die as they start, or partway, give a quick switch to one at a time: no restarting
   of workers without end, no waiting for ever (issue #18).
-- worker_count, and the marker a frozen run leaves behind, so the next run takes the lightest load.
+- worker_count: one at a time unless more are asked for.
 
     python tools/test_install_patching.py
 """
@@ -138,42 +138,16 @@ def test_run_jobs(temp: Path) -> None:
     del os.environ["TEST_WORKER_STARTS"]
 
 
-def test_workers_and_marker(temp: Path) -> None:
-    real = os.cpu_count
-    try:
-        for cores, expected in ((24, 4), (16, 4), (8, 4), (6, 3), (4, 2), (2, 1), (1, 1)):
-            os.cpu_count = lambda n=cores: n
-            check(f"{cores} logical cores: {expected} worker(s)", install.worker_count(None, False) == expected)
-        os.cpu_count = lambda: None
-        check("cores unknown: 1 worker", install.worker_count(None, False) == 1)
-        os.cpu_count = lambda: 24
-        check("after an unfinished run: 1 worker", install.worker_count(None, True) == 1)
-        check("--workers wins, also after an unfinished run", install.worker_count(6, True) == 6)
-        check("--workers 0 counts as 1", install.worker_count(0, False) == 1)
-    finally:
-        os.cpu_count = real
-    marker = temp / install.UNFINISHED_MARKER
-    with install.unfinished_marker(marker):
-        check("marker there while patching", marker.exists())
-    check("marker gone after a normal finish", not marker.exists())
-    try:
-        with install.unfinished_marker(marker):
-            raise install.InstallError("reported as usual")
-    except install.InstallError:
-        pass
-    check("marker gone after an error", not marker.exists())
-    # a freeze or a power cut: the process just stops
-    code = (f"import os, sys; sys.path.insert(0, {str(ROOT / 'tools')!r}); import install; from pathlib import Path\n"
-            f"with install.unfinished_marker(Path({str(marker)!r})):\n    os._exit(9)\n")
-    subprocess.run([sys.executable, "-c", code], check=False)
-    check("a run that stops dead leaves the marker", marker.exists())
-    marker.unlink(missing_ok=True)
+def test_workers(_: Path) -> None:
+    check("by default: one at a time", install.worker_count(None) == 1)
+    check("--workers chooses another number", install.worker_count(6) == 6)
+    check("--workers 0 counts as 1", install.worker_count(0) == 1)
 
 
 def main() -> None:
     with tempfile.TemporaryDirectory() as folder:
         temp = Path(folder)
-        for test, name in ((test_powershell, "ps"), (test_find_dxc_without_powershell, "dxc"), (test_run_jobs, "jobs"), (test_workers_and_marker, "marker")):
+        for test, name in ((test_powershell, "ps"), (test_find_dxc_without_powershell, "dxc"), (test_run_jobs, "jobs"), (test_workers, "workers")):
             (temp / name).mkdir()
             test(temp / name)
     print("All good." if not failures else f"{failures} FAILED")

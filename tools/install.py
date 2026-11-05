@@ -79,8 +79,6 @@ DXC_SIZE = 26346851
 # (2026-10-23, build 1.8.2502.8). The installer checks both.
 DXC_SHA256 = "70b1913a1bfce4a3e1a5311d16246f4ecdf3a3e613abec8aa529e57668426f85"
 DXC_FILES = ("dxc.exe", "dxcompiler.dll", "dxil.dll")
-MAX_PATCH_WORKERS = 4
-UNFINISHED_MARKER = "patching.unfinished"
 
 
 DISCLAIMER = """\
@@ -545,26 +543,10 @@ def merge_tunables(new: str, old: str) -> tuple[str, list[str]]:
 
 # ---------------------------------------------------------------- the steps
 
-def worker_count(given: int | None, last_run_unfinished: bool) -> int:
-    """Processes for patching: what the user asked for; one at a time after a run
-    that never finished (it may have frozen the PC); else at most half the
-    logical cores and 4, so a PC under this load stays usable."""
-    if given is not None:
-        return max(1, given)
-    if last_run_unfinished:
-        return 1
-    return max(1, min(MAX_PATCH_WORKERS, (os.cpu_count() or 2) // 2))
-
-
-@contextlib.contextmanager
-def unfinished_marker(path: Path):
-    """A file that exists only while patching. A freeze or a power cut leaves it
-    behind, which is how the next run knows; an error is reported as usual."""
-    path.write_text(f"patching started {datetime.now():%Y-%m-%d %H:%M}\n")
-    try:
-        yield
-    finally:
-        path.unlink(missing_ok=True)
+def worker_count(given: int | None) -> int:
+    """Processes for patching: one at a time unless the user asks for more. Patching
+    on several cores at once hard-froze a PC (issue 18), and one at a time worked there."""
+    return 1 if given is None else max(1, given)
 
 
 def patch(pak: Path, dxc: Path, work: Path, shaders: Path, log, workers: int) -> tuple[int, int, list[str]]:
@@ -672,19 +654,12 @@ def install(args) -> None:
         shutil.rmtree(shaders)  # (stale patches from an older sim version)
     shaders.mkdir()
     work = data / "work"
-    marker = data / UNFINISHED_MARKER
-    last_run_unfinished = marker.exists()
-    workers = worker_count(args.workers, last_run_unfinished)
-    if last_run_unfinished and args.workers is None:
-        say("The last install stopped while patching shaders: if your PC froze or restarted, that may be why.")
-        say("This time they're patched one at a time, as a lighter load. (--workers N chooses another number.)")
+    workers = worker_count(args.workers)
     with open(data / "logs" / "install.log", "w", encoding="utf-8") as log:
         log.write(f"AtmosphereMod {version()} installer, {datetime.now():%Y-%m-%d %H:%M}\nsim {sim}\npak {pak}\n"
-                  f"reshade {rv or 'unknown'} ({reshade})\ndxc {dxc}\nworkers {workers}"
-                  f"{' (the last run did not finish)' if last_run_unfinished else ''}\n\n")
+                  f"reshade {rv or 'unknown'} ({reshade})\ndxc {dxc}\nworkers {workers}\n\n")
         log.flush()
-        with unfinished_marker(marker):
-            patched, failed, pack = patch(pak, dxc, work, shaders, log, workers)
+        patched, failed, pack = patch(pak, dxc, work, shaders, log, workers)
     shutil.rmtree(work, ignore_errors=True)  # (the extracted game shaders aren't kept)
 
     # (a release may also carry replacement shaders of its own, for the variants this sim has)
@@ -814,8 +789,8 @@ def main() -> int:
     ap.add_argument("--data", type=Path, default=Path(os.environ.get("LOCALAPPDATA", ".")) / "AtmosphereMod",
                     help="where the patched shaders, settings and logs go")
     ap.add_argument("--dxc", type=Path, help="a folder with dxc.exe, dxcompiler.dll and dxil.dll")
-    ap.add_argument("--workers", type=int, help="processes for patching the shaders, 1 = one at a time, the lightest "
-                    "load (default: up to 4; 1 after a run that never finished)")
+    ap.add_argument("--workers", type=int, help="processes for patching the shaders (default: 1, one at a time, the "
+                    "lightest load; more is faster, but several at once froze one PC)")
     ap.add_argument("--payload", type=Path, help=argparse.SUPPRESS)
     ap.add_argument("--yes", action="store_true", help="don't ask")
     ap.add_argument("--uninstall", action="store_true")
