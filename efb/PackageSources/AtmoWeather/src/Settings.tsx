@@ -998,7 +998,10 @@ export class SettingsView extends DisplayComponent<SettingsViewProps> {
  * resolve: the page then didn't scroll), and scrolls between the EFB's status bar (the date) and
  * its dock, which lie over the app's area: about 85-95 px each at all six tablet sizes and
  * orientations (936 x 1392 to 1924 x 1294 px; screenshots of 3 Nov 2026). With .atmo-narrow on
- * an ancestor (a narrow tablet), each slider's name goes above it and its value. */
+ * an ancestor (a narrow tablet), each slider's name goes above it and its value. Those rows are
+ * plain blocks, with no flex-wrap: a slider has no width of its own, so wrapped, it stayed at 0 px
+ * on its name's full line and only its thumb showed (measured in the live EFB, 5 Nov 2026; check
+ * this layout with the sim's UI debugger, a browser preview doesn't show it). */
 export const SETTINGS_CSS = `
 .atmo-app { position: absolute; top: 0; right: 0; bottom: 0; left: 0; overflow: hidden; }
 .atmo-settings { position: absolute; top: 96px; right: 0; bottom: 96px; left: 0; overflow-y: auto;
@@ -1039,8 +1042,9 @@ export const SETTINGS_CSS = `
 .atmo-note { margin-top: 16px; font-size: 24px; opacity: 0.8; }
 .atmo-narrow .atmo-settings { padding-left: 20px; padding-right: 20px; }
 .atmo-narrow .atmo-label { flex: 1 1 auto; }
-.atmo-narrow .atmo-slider-row { flex-wrap: wrap; }
-.atmo-narrow .atmo-slider-row .atmo-label { flex: 1 0 100%; padding: 10px 0 0; }
-.atmo-narrow .atmo-value { flex: 0 0 auto; min-width: 140px; }
+.atmo-narrow .atmo-slider-row { display: block; padding: 10px 0 6px; }
+.atmo-narrow .atmo-slider-row .atmo-label { padding: 0 0 6px; }
+.atmo-narrow .atmo-slider-row .atmo-control { margin-right: 150px; min-height: 44px; }
+.atmo-narrow .atmo-slider-row .atmo-value { position: absolute; right: 0; bottom: 18px; width: 140px; padding-left: 0; }
 .atmo-narrow .atmo-tip { left: 0; top: 100%; }
 `;
