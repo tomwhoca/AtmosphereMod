@@ -4137,14 +4137,20 @@ def find_sun_march(ir: Ir, ms: dict) -> dict | None:
     along = [step * i * (i + 1) / 2 for i in range(1, 33)]
     picked = [i + 1 for i, a in enumerate(along) if TILT_RANGE_M[0] <= a <= TILT_RANGE_M[1]]
     need(picked, f"none of the march's samples in {TILT_RANGE_M}")
-    sun = []
-    for a in ms["adds"]:
-        users = [ir.def_name(i) for i in ir.users(a) if DEFINE.match(ir.lines[i])]
-        sun += [(ir.defs[u], [o for o in ir.binops[u][1:] if o != a][0]) for u in users
-                if ir.binops.get(u, ("",))[0] == "fmul"]
-    need(sun, "no sun irradiance times the sun phase")
+    # the sun's irradiance (Light c1) per channel, where it scales the sun phase
+    sun = {}
+    for name, (load, comp) in ir.extracts.items():
+        if load not in ir.loads or comp > 2 or comp in sun:
+            continue
+        handle, reg = ir.loads[load]
+        if ir.cbs.get(handle, ("", 0))[1] != 176 or reg != 1:
+            continue
+        others = [(b if a == name else a) for k, a, b in ir.binops.values() if k == "fmul" and name in (a, b)]
+        if any(o.startswith("%") and any(reaches(ir, o, add) for add in ms["adds"]) for o in others):
+            sun[comp] = name
+    need(len(sun) == 3, f"{len(sun)} channels of the sun's irradiance")
     return {"index": index, "index_f": index_f, "step": step, "scale": scales.pop(), "depth": edges["depth"],
-            "depth_q": depth_q, "first": picked[0], "last": picked[-1], "sun": [v for _, v in sorted(sun)]}
+            "depth_q": depth_q, "first": picked[0], "last": picked[-1], "sun": [sun[0], sun[1], sun[2]]}
 
 
 def apply_cloud_tilt_view(ir: Ir, march: dict | None, site: dict) -> str:
