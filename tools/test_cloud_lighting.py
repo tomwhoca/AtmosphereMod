@@ -597,6 +597,20 @@ def check_tilt_view(stock: str, patched: str, failures: list) -> None:
         err = float(np.max(np.abs(got(name).astype(np.float64) - want)))
         if err > 1e-3:
             failures.append(f"tilt view {name}: off by {err:.1e}")
+    # the optical depth since leaving the sample's own cloud
+    latch_of = re.search(rf"%mod\.tv\.t0 = phi float \[ \S+, (\S+) \], \[ \S+, (\S+) \]", patched)
+    prev = re.search(rf"(%\d+) = phi float \[ 0\.000000e\+00, {re.escape(latch_of[1])} \], \[ {re.escape(march['optical'])}, {re.escape(latch_of[2])} \]", patched)[1]
+    l0, t0 = rng.uniform(0, 1, n).astype(F), rng.uniform(0, 3, n).astype(F)
+    before_sum = rng.uniform(0, 5, n).astype(F)
+    grown = before_sum + rng.uniform(0, 2, n).astype(F)
+    got_s = Evaluator(patched, cbs, {**seeds, "%mod.tv.l0": l0, "%mod.tv.t0": t0, prev: before_sum, march["optical"]: grown})
+    far = np.clip((along - P.PLANE_OWN_M[0]) / (P.PLANE_OWN_M[1] - P.PLANE_OWN_M[0]), 0.0, 1.0)
+    left = np.maximum(np.maximum(l0.astype(np.float64), np.clip(-q.astype(np.float64) / P.PLANE_LEFT_M, 0.0, 1.0)), far)
+    want_t = t0.astype(np.float64) + left * (grown.astype(np.float64) - before_sum.astype(np.float64))
+    for name, want in ((next_of("%mod.tv.l0"), left), (next_of("%mod.tv.t0"), want_t)):
+        err = float(np.max(np.abs(got_s(name).astype(np.float64) - want)))
+        if err > 1e-3:
+            failures.append(f"plane light's shadow {name}: off by {err:.1e}")
     # the colours
     channels = len(P.find_inside_site(P.Ir(stock))["radiance"])
     mu = rng.uniform(-1, 1, n).astype(F)
@@ -638,11 +652,16 @@ def check_plane_light(stock: str, patched: str, failures: list) -> None:
     rng = np.random.default_rng(13)
     u = lambda a, b: rng.uniform(a, b, n).astype(F)
     f, d, layer, weight, shadow = u(-1, 1), u(0, 10), u(0, 1), u(0, 1), u(0, 1)
-    seeds = {"%mod.tv.f": f, "%mod.tv.d": d, march["weight"]: weight, "%mod.sh.f": shadow}
+    other = u(0, 1)
+    seeds = {"%mod.tv.f": f, "%mod.tv.d": d, "%mod.tv.o": other, march["weight"]: weight, "%mod.sh.f": shadow}
     if march["layer"]:
         seeds[march["layer"]] = layer
     else:
         layer = np.ones(n, F)
+    phases = [u(0.05, 2) for _ in range(3)]
+    for name, value in zip(march["phase"], phases):
+        seeds[name] = value
+    mean = sum(v.astype(np.float64) for v in phases) / 3.0
     glory = [u(0, 0.1) for _ in range(march["phases"])]
     for k, g in enumerate(glory):
         seeds[f"%mod.gl.t{k}"] = g
@@ -661,12 +680,15 @@ def check_plane_light(stock: str, patched: str, failures: list) -> None:
         mu = P.PLANE_MU
         reflect = fm * (P.PLANE_A + P.PLANE_B * (mu + fm) + P.PLANE_C * mu * fm + P.PLANE_P) / (4 * (mu + fm))
         lit = (np.clip(f.astype(np.float64) / 0.1, 0, 1) * np.exp(-0.136 * P.PLANE_KAPPA * d.astype(np.float64))
+               * np.exp(-P.PLANE_KAPPA * other.astype(np.float64))
                * layer.astype(np.float64) * weight.astype(np.float64) * strength)
         for c, (eps, ep, sprime) in enumerate(march["terms"]):
             e_p, s_p, sun = (x.astype(np.float64) for x in parts[c])
             stock_term = e_p * s_p
             g = glory[c if march["phases"] == 3 else 0].astype(np.float64) * s_p if glory_on else 0.0
-            want = stock_term + ((reflect / math.pi + g) * shadow.astype(np.float64) * sun - stock_term) * lit
+            fade = np.clip((s_p - P.PLANE_FADE[0]) / (P.PLANE_FADE[1] - P.PLANE_FADE[0]), 0.0, 1.0)
+            tint = phases[c].astype(np.float64) / mean
+            want = stock_term + ((reflect / math.pi * tint + g) * shadow.astype(np.float64) * sun - stock_term) * lit * fade
             value = got(eps).astype(np.float64)
             if strength == 0.0:
                 if not np.array_equal(got(eps), (parts[c][0] * parts[c][1]).astype(F)):

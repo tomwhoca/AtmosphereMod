@@ -208,6 +208,10 @@ export const TABS: TabSpec[] = [
               "Light that has bounced around inside the cloud, already at its sunlit edges: brighter cloud sides "
               + "with the sun to one side, and a slightly smaller silver lining.",
               1, true),
+      percent("C36", "Sun-facing cloud sides (experiment)",
+              "Light on the sides of clouds that face the sun, worked out as real, thick cloud reflects it. It fades "
+              + "out where the cloud is shaded. 0 % is off. Ctrl+Shift+F8 switches it on and off.",
+              1),
       {
         kind: "slider", key: "C5", label: "Light deep inside clouds", min: 1, max: 6, step: 0.1, more: true,
         tip: "How much sunlight reaches deep inside clouds, as a multiple of the sim's own: brighter interiors "

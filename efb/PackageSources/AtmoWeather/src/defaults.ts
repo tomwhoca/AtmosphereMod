@@ -51,4 +51,5 @@ export const DEFAULTS: Readonly<Record<string, number>> = {
   C32: 0,
   C33: 10,
   C34: 0.1,
+  C36: 0,
 };

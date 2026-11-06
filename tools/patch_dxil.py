@@ -4126,6 +4126,20 @@ PLANE_P = 0.5           # the droplets' backscatter, 4 pi p(180 - ish), as the m
 PLANE_MU = 0.7
 PLANE_KAPPA = 8.0
 PLANE_SLOPE_DIV = 2.0
+# Another cloud's shadow: the march's optical depth counted from where it has left the sample's own cloud (the depth
+# at a lookup below 0, fully PLANE_LEFT_M below) blocks the formula by exp(-kappa * that), the direct beam at the
+# formula's own density. Without it shaded cloud lit up: `blocked` is weak on purpose, so that a cloud's own depth doesn't
+# dim it, and can't tell its own cloud from another (user, 6 Nov; deep shade x1.27 in the median, x4.6 at p90).
+# ... and where MSFS's own shadow term S' already dims the spot the formula fades out, from nothing at PLANE_FADE[1] to
+# full at PLANE_FADE[0]: it blends away from the sim's shaded term and would otherwise override that shade (user, 6 Nov:
+# warm patches, half lit and bluish without the formula, in almost full sun with it). S' is 1 up to an optical depth of
+# about .7, .82 at 1, .48 at 2, .25 at 4, so open sun-facing sides keep the formula.
+PLANE_FADE = (0.4, 0.9)
+PLANE_LEFT_M = 100.0
+# ... and from this far along the march whether it has left or not (from the first value, fully at the second): a
+# flank under an overhang of its own cloud has no gap on the way to the sun, and still lit up (user, 6 Nov). A surface
+# really facing the sun has nothing that far along it, and the view doesn't see deeper than this into a cloud.
+PLANE_OWN_M = (300.0, 500.0)
 PLANE_F_MIN = 0.05      # (the surface barely lit: the formula's limit)
 
 
@@ -4203,7 +4217,7 @@ def find_sun_march(ir: Ir, ms: dict) -> dict | None:
             weights.append(m3[1])
     need(len(weights) == 1, f"{len(weights)} weights of the march")
     # each channel's E * P * S'
-    terms = []
+    terms, phase_of = [], []
     for c in range(3):
         found = []
         for ep, (k3, a, b) in ir.binops.items():
@@ -4215,11 +4229,13 @@ def find_sun_march(ir: Ir, ms: dict) -> dict | None:
             for eps, (k4, p, q) in ir.binops.items():
                 if k4 == "fmul" and ep in (p, q):
                     found.append((eps, ep, q if p == ep else p))
+                    phase_of.append(phase)
         need(len(found) == 1, f"channel {c}: {len(found)} products of the sun term")
         terms.append(found[0])
     return {"index": index, "index_f": index_f, "step": step, "scale": scales.pop(), "depth": edges["depth"],
             "depth_q": depth_q, "first": picked[0], "last": picked[-1], "sun": [sun[0], sun[1], sun[2]],
-            "optical": sums[0], "layer": layer, "weight": weights[0], "terms": terms, "phases": len(ms["adds"])}
+            "optical": sums[0], "layer": layer, "weight": weights[0], "terms": terms, "phases": len(ms["adds"]),
+            "phase": phase_of}
 
 
 def apply_cloud_tilt_view(ir: Ir, march: dict | None, site: dict) -> str:
@@ -4276,18 +4292,28 @@ def apply_cloud_tilt_view(ir: Ir, march: dict | None, site: dict) -> str:
     raw_next = em.add("%mod.tv.raw0", em.select(used, em.mul(raw, share), 0.0))
     scaled = em.max(em.min(em.div(slope, PLANE_SLOPE_DIV), 1.0), -1.0)
     f_next = em.add("%mod.tv.f0", em.select(used, em.mul(scaled, share), 0.0))
+    # the optical depth since leaving the sample's own cloud
+    stock_sum = re.search(rf"^\s+({V}) = phi float \[ 0\.000000e\+00, {re.escape(before)} \], \[ {re.escape(march['optical'])}, {re.escape(latch)} \]$",
+                          "\n".join(ir.lines), re.M)
+    need(stock_sum, f"{march['optical']}: no phi for the march's sum")
+    own0, own1 = PLANE_OWN_M
+    far = em.sat(em.mul(em.sub(along, own0), 1.0 / (own1 - own0)))
+    left = em.max("%mod.tv.l0", em.max(em.sat(em.mul(march["depth_q"], -1.0 / PLANE_LEFT_M)), far))
+    other = em.add("%mod.tv.t0", em.mul(left, em.sub(march["optical"], stock_sum[1])))
     zero = "0.000000e+00"
     edits = [(n, [*em.lines, ir.lines[n]]),
              (head, [ir.lines[head],
                      f"  %mod.tv.mu0 = phi float [ {zero}, {before} ], [ {mu_next}, {latch} ]",
                      f"  %mod.tv.raw0 = phi float [ {zero}, {before} ], [ {raw_next}, {latch} ]",
-                     f"  %mod.tv.f0 = phi float [ {zero}, {before} ], [ {f_next}, {latch} ]"])]
+                     f"  %mod.tv.f0 = phi float [ {zero}, {before} ], [ {f_next}, {latch} ]",
+                     f"  %mod.tv.l0 = phi float [ {zero}, {before} ], [ {left}, {latch} ]",
+                     f"  %mod.tv.t0 = phi float [ {zero}, {before} ], [ {other}, {latch} ]"])]
     def phi(name, value):
         pairs = ", ".join(f"[ {value if l == leave[0] else zero}, {l} ]" for l in labels)
         return f"  {name} = phi float {pairs}"
     edits.append((merge, [ir.lines[merge], phi("%mod.tv.mu", mu_next), phi("%mod.tv.raw", raw_next),
                           phi("%mod.tv.ran", "1.000000e+00"), phi("%mod.tv.f", f_next),
-                          phi("%mod.tv.d", march["optical"])]))
+                          phi("%mod.tv.d", march["optical"]), phi("%mod.tv.o", other)]))
 
     # the formula, in place of each channel's E * P * S'
     pl = Emitter("pl.")
@@ -4296,10 +4322,15 @@ def apply_cloud_tilt_view(ir: Ir, march: dict | None, site: dict) -> str:
     num1 = PLANE_B + PLANE_C * PLANE_MU
     reflect = pl.div(pl.mul(f, pl.mad(num1, f, num0)), pl.mul(pl.add(f, PLANE_MU), 4.0))
     over_pi = pl.mul(reflect, 1.0 / math.pi)
+    # the hue of the sim's sun term: its phase differs by channel, the formula's doesn't, and without that lit spots came
+    # out cooler than the cloud around them at a low sun (user, 6 Nov). The channels' mean stays 1, so no brighter.
+    p_mean = pl.max(pl.mul(pl.add(pl.add(march["phase"][0], march["phase"][1]), march["phase"][2]), 1.0 / 3.0), 1e-4)
+    tints = [pl.div(march["phase"][c], p_mean) for c in range(3)]
     # (DXIL's Exp is base 2)
     blocked = pl.exp2(pl.mul("%mod.tv.d", -0.136 * PLANE_KAPPA / math.log(2.0)))
+    shadowed = pl.exp2(pl.mul("%mod.tv.o", -PLANE_KAPPA / math.log(2.0)))
     facing = pl.sat(pl.div("%mod.tv.f", 0.1))
-    lit = pl.mul(facing, blocked)
+    lit = pl.mul(pl.mul(facing, blocked), shadowed)
     if march["layer"]:
         lit = pl.mul(lit, march["layer"])
     lit = pl.mul(pl.mul(lit, march["weight"]), "%mod.cpl")
@@ -4315,11 +4346,16 @@ def apply_cloud_tilt_view(ir: Ir, march: dict | None, site: dict) -> str:
             ir.lines[j].replace(f"{eps} = ", f"%mod.pl.o{c} = ", 1),
             f"  %mod.pl.gs{c} = fmul fast float %mod.gl.t{k}, {sprime}",
             f"  %mod.pl.g{c} = select i1 %mod.cgloff, float 0.000000e+00, float %mod.pl.gs{c}",
-            f"  %mod.pl.r{c} = fadd fast float {over_pi}, %mod.pl.g{c}",
+            f"  %mod.pl.h{c} = fmul fast float {over_pi}, {tints[c]}",
+            f"  %mod.pl.r{c} = fadd fast float %mod.pl.h{c}, %mod.pl.g{c}",
             f"  %mod.pl.a{c} = fmul fast float %mod.pl.r{c}, %mod.sh.f",
             f"  %mod.pl.e{c} = fmul fast float %mod.pl.a{c}, {sun}",
             f"  %mod.pl.d{c} = fsub fast float %mod.pl.e{c}, %mod.pl.o{c}",
-            f"  %mod.pl.m{c} = call float @dx.op.tertiary.f32(i32 46, float %mod.pl.d{c}, float {lit}, float %mod.pl.o{c})",
+            f"  %mod.pl.q{c} = fsub fast float {sprime}, {f32(PLANE_FADE[0])}",
+            f"  %mod.pl.w{c} = fmul fast float %mod.pl.q{c}, {f32(1.0 / (PLANE_FADE[1] - PLANE_FADE[0]))}",
+            f"  %mod.pl.v{c} = call float @dx.op.unary.f32(i32 7, float %mod.pl.w{c})",
+            f"  %mod.pl.l{c} = fmul fast float {lit}, %mod.pl.v{c}",
+            f"  %mod.pl.m{c} = call float @dx.op.tertiary.f32(i32 46, float %mod.pl.d{c}, float %mod.pl.l{c}, float %mod.pl.o{c})",
             f"  {eps} = select i1 %mod.cploff, float %mod.pl.o{c}, float %mod.pl.m{c}",
         ]))
     edits += terms_x
@@ -6823,34 +6859,152 @@ def cloud_types_lines(values: dict | None, tx: str, ty: str, terrain: str, share
     return lines + ["  br label %mod.cgb.tyend", "", "mod.cgb.tyend:"]
 
 
-def apply_deck_tops(ir: Ir) -> str:
+# Experiment, the sliced-cake layer (notes/xplane/gaps). MSFS's weather map gives a whole region one layer, and in the
+# captured volumes the shape stays near 0 through it and then drops by about .3 within one slice, more than the
+# erosion's reach (+.0625), so the erosion can't move the top: at Paros 67 % of the columns end in one slice. All in
+# the generator, so every march and the shadows see the same shape, and nothing runs per frame.
+# DebugCapture bit 15, gentle tops: going up, the shape falls by at most TOP_SLOPE_PER_KM, whatever the kind of cloud,
+# and only outside the surface (TOP_CAP_X, one 8-bit step below 0), so that the erosion decides where a top ends.
+# Bases stay flat: it only acts going up.
+# ... and C30's slot < 0, rising air, strength -C30 (the render shaders read max(C30, 0)): air doesn't rise the same everywhere, so each place gets a lift
+# (0..1, a coarse level of MSFS's own shape noise: a cloud's middle lifts most, neighbours differ, and it drifts with the
+# clouds). The more lift, the slower the shape falls going up, so the erosion carries the cloud up to TOP_RISE_KM[1]
+# above where it would have ended, and the extinction carries on up with it (thinning over TOP_RISE_CARRY_KM), or the
+# tall parts would be thin. Zero lift is gentle tops. Spread of the visible tops (p10-p90) about 1.9 x. Stopping weak
+# columns low inside the layer was tried: it lost 19 % of the cloud seen from above and added no spread.
+# TOP_RISE_COMP holds that cover. Offline with stand-in erosion noise it isn't reliable, so it's set from the screen,
+# straight down in the sim. Flattened decks keep the gentle slope and get no rising air, nor do the slices above them in
+# that column (stratiform tops are capped; the deck's own slices alone weren't enough: towers grew out of an overcast,
+# user's test at LJLJ, 6 Nov). The inside of a cloud (towers) isn't touched, and it stops at TOP_RISE_SLICES (6 km).
+DEBUG_CLOUD_TOPS = 1 << 15
+TOP_SLOPE_PER_KM = 0.128  # (about .04 per slice at 1.5 km, the DECK_SLOPE that decks already have)
+TOP_CAP_X = 127.0 / 255.0
+TOP_ERODE_REACH = 0.0625  # the erosion's most, in shape units
+TOP_RISE_KM = (TOP_ERODE_REACH / TOP_SLOPE_PER_KM, 2.5)  # how far the shape takes to fall out of the erosion's reach, at lift 0 and 1
+TOP_RISE_POWER = 2  # many low, few tall
+TOP_RISE_COMP = 0.0  # (measured on screen, straight down; offline's -.006 lost 31 % of the cloud in the sim)
+# Far down only the erosion's rare peaks still make cloud, and they float detached above the tops. So the shape falls
+# faster the further down it is, 1 + TOP_RISE_CURVE_X (depth / TOP_ERODE_REACH)^2 times. A soft curve: a sharp bend made
+# the walls again (edges at the surface where the shape falls past the erosion's reach within a column: 7-8 %, here 2-3 %,
+# off and gentle tops 3-4 %; the rare peaks' share falls by about a fifth).
+TOP_RISE_CURVE_X = 2.0
+TOP_RISE_CARRY_KM = 3.0
+TOP_RISE_SLICES = 20
+TOP_RISE_W = 0.3  # the noise's depth: about 1.3 km up, where its pattern matches the low slices'
+TOP_RISE_LOD = 1.0  # above the level the shape's lookup uses (.6 km columns): about 1.2 km
+TOP_RISE_MIX = (0.2, 0.2, 0.35, 0.25)  # x and y vary over many km, z and w from cloud to cloud
+TOP_RISE_NOISE = (0.746, 0.894)  # p5 and p95 of the mix at that level (t4's texels, capture 505)
+TOP_RISE_INSIDE_X = (0.55, 0.60)  # stored shape: untouched from the second value up
+TOP_RISE_RAISED_X = 0.01  # the stored shape raised by this much: the extinction carries on fully
+
+
+def top_limit(k: int) -> float:
+    """The most the stored shape falls from slice k - 1 to slice k (the slices are 15.625 (k + .5)^2 m up)."""
+    return TOP_SLOPE_PER_KM * (31.25 * k / 1000.0) / 2.0
+
+
+def find_shape_noise_lookup(ir: Ir, text: str) -> dict:
+    """ch_cloudDensity: the first lookup of the shape noise t4 (handles, u, v, level) and its line."""
+    raw = binding_handle(text, "t", 4)
+    need(raw, "no t4")
+    handles = set(re.findall(rf"(%\d+) = call %dx\.types\.Handle @dx\.op\.annotateHandle\(i32 216, %dx\.types\.Handle {re.escape(raw)},", text))
+    for i, line in enumerate(ir.lines):
+        m = re.match(rf"\s+{V} = call %dx\.types\.ResRet\.f32 @dx\.op\.sampleLevel\.f32\(i32 62, %dx\.types\.Handle ({V}), "
+                     rf"%dx\.types\.Handle ({V}), float ({V}), float ({V}), float [^,]+, float undef, i32 0, i32 0, i32 0, "
+                     rf"float ({V})\)", line)
+        if m and m[1] in handles:
+            return {"at": i, "tex": m[1], "sampler": m[2], "u": m[3], "v": m[4], "lod": m[5]}
+    need(False, "no lookup of the shape noise")
+
+
+def apply_deck_tops(ir: Ir, text: str, values: dict) -> str:
     """ch_cloudDensity, live-weather family, after the towers: going up from a
     flattened slice k (its flat top fl_k, apply_metar_anchor), the stored shape
     x_k+1 rises toward x'_k - DECK_SLOPE / 2 by sat(fl_k / DECK_FLATTEN), x'_k
-    being slice k's stored shape after this. Exactly stock where fl_k = 0."""
+    being slice k's stored shape after this. Exactly stock where fl_k = 0.
+    With DebugCapture bit 15 also the gentle tops and rising air above."""
     stores = {}
     for i, line in enumerate(ir.lines):
         m = re.match(r"(\s+call void @dx\.op\.textureStore\.f32\(i32 67, %dx\.types\.Handle \S+, i32 \S+, i32 \S+, "
-                     r"i32 (\d+), )float ([^,]+), (float [^,]+, float [^,]+, float [^,]+, i8 15\).*)$", line)
+                     r"i32 (\d+), )float ([^,]+), float ([^,]+), (float [^,]+, float [^,]+, i8 15\).*)$", line)
         if m:
             stores[int(m[2])] = (i, m)
     need(sorted(stores) == list(range(CG_SLICES)), "not 32 slice stores")
     need(all(stores[k][0] < stores[k + 1][0] for k in range(CG_SLICES - 1)), "the slice stores aren't in order")
-    x_prev = stores[0][1][3]
+    first = stores[1][0]
+    look = find_shape_noise_lookup(ir, text)
+    need(look["at"] in dominating_lines(ir, first), "the shape noise's lookup doesn't reach the stores")
+    em = Emitter("gt.")
+    own = em.sat(em.sub(0.0, "%mod.C30"))
+    mx, my, mz, mw = TOP_RISE_MIX
+    noise = em.mad("%mod.gt.nx", mx, em.mad("%mod.gt.ny", my, em.mad("%mod.gt.nz", mz, em.mul("%mod.gt.nw", mw))))
+    lo, hi = TOP_RISE_NOISE
+    lift = em.sat(em.mul(em.sub(noise, lo), 1.0 / (hi - lo)))
+    em.lines.append(f"  %mod.gt.lift = fadd fast float {lift}, 0.000000e+00")
+    d0, d1 = TOP_RISE_KM
+    lifted = lift
+    for _ in range(TOP_RISE_POWER - 1):
+        lifted = em.mul(lifted, lift)
+    climb = em.mad(lifted, d1 - d0, d0)
+    slope = em.mad(own, em.sub(em.div(TOP_ERODE_REACH, climb), TOP_SLOPE_PER_KM), TOP_SLOPE_PER_KM)
+    comp = em.mul(own, TOP_RISE_COMP / 2.0)
+    head = [f"  %mod.gt.b = and i32 %mod.ma.flags, {DEBUG_CLOUD_TOPS}", "  %mod.gt.on = icmp ne i32 %mod.gt.b, 0"] + em.lines
+    x_prev, y_prev = stores[0][1][3], stores[0][1][4]
+    deck_below = 0.0
     edits = []
+    x0, x1 = TOP_RISE_INSIDE_X
     for k in range(1, WEATHER_SLICES):
         i, m = stores[k]
         fl = f"%mod.ma.k{k - 1}.fl"
-        need(fl in ir.defs, f"slice {k - 1}: no flat top")
+        here = f"%mod.ma.k{k}.fl"
+        need(fl in ir.defs and here in ir.defs, f"slice {k - 1}: no flat top")
         em = Emitter(f"dt{k}.")
         a = em.sat(em.mul(fl, 1.0 / DECK_FLATTEN))
+        flat = em.cmp("ogt", fl, 0.0)
         rise = em.max(em.sub(em.sub(x_prev, DECK_SLOPE / 2), m[3]), 0.0)
-        x = em.select(em.cmp("ogt", fl, 0.0), em.mad(a, rise, m[3]), m[3])
-        edits.append((i, em.lines + [f"{m[1]}float {x}, {m[4]}"]))
-        x_prev = x
+        off = em.select(flat, em.mad(a, rise, m[3]), m[3])
+        # the experiment
+        near = em.sat(em.mul(em.sub(x1, m[3]), 1.0 / (x1 - x0)))
+        open_top = em.sub(1.0, em.sat(em.mul(here, 1.0 / DECK_FLATTEN)))
+        shaped = em.sat(em.add(m[3], em.mul(em.mul(comp, near), open_top)))
+        rise_on = em.max(em.sub(em.sub(x_prev, DECK_SLOPE / 2), shaped), 0.0)
+        on = em.select(flat, em.mad(a, rise_on, shaped), shaped)
+        if k < TOP_RISE_SLICES:
+            deck_below = em.max(a, deck_below)
+            risen = em.mul(em.sub(1.0, deck_below), own)
+            local = em.mad(deck_below, em.sub(TOP_SLOPE_PER_KM, slope), slope)  # (a flattened deck below: the gentle slope)
+            depth = em.sat(em.mul(em.sub(0.5, x_prev), 2.0 / TOP_ERODE_REACH))
+            curve = em.mul(risen, em.mul(em.mul(depth, depth), TOP_RISE_CURVE_X))
+            limit = em.mul(em.mul(local, top_limit(k) / TOP_SLOPE_PER_KM), em.add(curve, 1.0))
+        else:
+            limit = top_limit(k)
+        gentle = em.max(on, em.min(em.sub(x_prev, limit), TOP_CAP_X))
+        x = em.select("%mod.gt.on", gentle, off)
+        if k < TOP_RISE_SLICES:
+            raised = em.sat(em.mul(em.sub(gentle, m[3]), 1.0 / TOP_RISE_RAISED_X))
+            thin = math.exp(-(31.25 * k / 1000.0) / TOP_RISE_CARRY_KM / 2.0)
+            carry = em.add(em.mul(em.sub(y_prev, 0.5), thin), 0.5)
+            more = em.mul(em.mul(raised, risen), em.max(em.sub(carry, m[4]), 0.0))
+            y = em.select("%mod.gt.on", em.add(m[4], more), m[4])
+        else:
+            y = m[4]
+        edits.append((i, em.lines + [f"{m[1]}float {x}, float {y}, {m[5]}"]))
+        x_prev, y_prev = x, y
     for i, lines in sorted(edits, key=lambda e: -e[0]):
         ir.lines[i:i + 1] = lines
-    return f"deck tops: the shape drops at most {DECK_SLOPE} per slice above flattened slices ({len(edits)} stores)"
+    ir.lines[first:first] = head
+    rr = "%dx.types.ResRet.f32"
+    ir.lines[look["at"] + 1:look["at"] + 1] = [
+        f"  %mod.gt.l = fadd fast float {look['lod']}, {f32(TOP_RISE_LOD)}",
+        f"  %mod.gt.t = call {rr} @dx.op.sampleLevel.f32(i32 62, %dx.types.Handle {look['tex']}, %dx.types.Handle {look['sampler']}, "
+        f"float {look['u']}, float {look['v']}, float {f32(TOP_RISE_W)}, float undef, i32 0, i32 0, i32 0, float %mod.gt.l)",
+        f"  %mod.gt.nx = extractvalue {rr} %mod.gt.t, 0",
+        f"  %mod.gt.ny = extractvalue {rr} %mod.gt.t, 1",
+        f"  %mod.gt.nz = extractvalue {rr} %mod.gt.t, 2",
+        f"  %mod.gt.nw = extractvalue {rr} %mod.gt.t, 3",
+    ]
+    return (f"deck tops: the shape drops at most {DECK_SLOPE} per slice above flattened slices; gentle tops at "
+            f"{TOP_SLOPE_PER_KM} per km and rising air with DebugCapture bit 15 ({len(edits)} stores)")
 
 
 def patch_cloud_gen_capture(text: str) -> tuple[str, str]:
@@ -6870,7 +7024,7 @@ def patch_cloud_gen_capture(text: str) -> tuple[str, str]:
         ir.reindex()
         anchor += "; " + apply_cb_towers(ir, text, values)
         ir.reindex()
-        anchor += "; " + apply_deck_tops(ir)
+        anchor += "; " + apply_deck_tops(ir, text, values)
         ir.reindex()
     tids = re.findall(r"^\s+(%[\w.]+) = call i32 @dx\.op\.threadId\.i32\(i32 93, i32 ([01])\)", text, re.M)
     tid = {int(c): n for n, c in tids}

@@ -1298,20 +1298,48 @@ def main():
             vol_err = max(max(abs(out[k][0] - res[k][0]), abs(out[k][1] - res[k][1]))
                           for k in range(P.WEATHER_SLICES))
             check(vol_err < 1e-4, f"{tid}: the anchored volume (x, y) differs from the model by {vol_err:.1e}")
-            # with the cloud types on (C23 = 1): MSFS's own share of each slice flattens too where the
-            # types call it stratiform (patch_dxil.TYPE_DECKS)
-            typed = Machine(patched_p, constants(on_flags, cloud=anchor_cloud(types=1.0)), TEX_ANCHOR,
-                            bytearray(table))
-            out_t = typed.run(tid)
-            tw = types_ref(want, ref_m.env[h_name], fill=False)
-            strat_t = [st + (1 - a) * P.DECK_FLATTEN * sum(tw[k]) for k, (st, a) in enumerate(zip(strat, shares))]
-            smooth_t = [sm + (1 - a) * P.DECK_SMOOTH * (tw[k][1] + tw[k][3])
-                        for k, (sm, a) in enumerate(zip(smooth, shares))]
-            res_t = generator_model.column(want, n4, lut, ref_m.env[t1_name], ref_m.env[h_name], 0.0,
-                                           strat=strat_t, smooth=smooth_t, slope=deck_top(strat_t))
-            err_t = max(max(abs(out_t[k][0] - res_t[k][0]), abs(out_t[k][1] - res_t[k][1]))
+            # gentle tops (DebugCapture bit 15): every column's shape falls gently going up; the rest as before
+            gentle = Machine(patched_p, constants(on_flags | P.DEBUG_CLOUD_TOPS, cloud=anchor_cloud()), TEX_ANCHOR,
+                             bytearray(table))
+            out_g = gentle.run(tid)
+            res_g = generator_model.column(want, n4, lut, ref_m.env[t1_name], ref_m.env[h_name], 0.0, strat=strat,
+                                           smooth=smooth, slope=deck_top(strat), gentle=(P.top_limit, P.TOP_CAP_X, P.TOP_SLOPE_PER_KM))
+            err_g = max(max(abs(out_g[k][0] - res_g[k][0]), abs(out_g[k][1] - res_g[k][1]))
                         for k in range(P.WEATHER_SLICES))
-            check(err_t < 1e-4, f"{tid}: the volume with the types' decks differs from the model by {err_t:.1e}")
+            check(err_g < 1e-4, f"{tid}: the volume with gentle tops differs from the model by {err_g:.1e}")
+            check(all(out_g[k][0] >= out[k][0] - 1e-6 for k in range(P.WEATHER_SLICES)),
+                  f"{tid}: gentle tops lowered the shape somewhere")
+            check(all(out_g[k][0] >= min(out_g[k - 1][0] - P.top_limit(k), P.TOP_CAP_X) - 1e-5
+                      for k in range(1, P.WEATHER_SLICES)), f"{tid}: gentle tops: the shape still drops too fast")
+            check(all(out_g[k][1:] == out[k][1:] for k in range(P.WEATHER_SLICES)),
+                  f"{tid}: gentle tops changed more than the shape")
+            check(all(out_g[k][0] == out[k][0] or out_g[k][0] <= P.TOP_CAP_X + 1e-5 for k in range(P.WEATHER_SLICES)),
+                  f"{tid}: gentle tops raised the shape inside the surface")
+            # rising air (C30's slot < 0, with bit 15), against the model; the slot alone changes nothing
+            c_own = anchor_cloud()
+            c_own[30] = -1.0
+            alone = Machine(patched_p, constants(on_flags, cloud=c_own), TEX_ANCHOR, bytearray(table))
+            out_a = alone.run(tid)
+            check(all(out_a[k] == out[k] for k in range(P.WEATHER_SLICES)), f"{tid}: rising air acts without bit 15")
+            own_m = Machine(patched_p, constants(on_flags | P.DEBUG_CLOUD_TOPS, cloud=c_own), TEX_ANCHOR, bytearray(table))
+            out_o = own_m.run(tid)
+            lo, hi = P.TOP_RISE_NOISE
+            noise_low = sum(m * own_m.env[f"%mod.gt.n{c}"] for m, c in zip(P.TOP_RISE_MIX, "xyzw"))
+            lift = min(max((noise_low - lo) / (hi - lo), 0.0), 1.0)
+            check(abs(lift - own_m.env["%mod.gt.lift"]) < 1e-5, f"{tid}: rising air's lift {own_m.env['%mod.gt.lift']} != {lift}")
+            params = dict(lift=lift, comp=P.TOP_RISE_COMP, km=P.TOP_RISE_KM, power=P.TOP_RISE_POWER, erode=P.TOP_ERODE_REACH,
+                          inside_x=P.TOP_RISE_INSIDE_X, slices=P.TOP_RISE_SLICES, raised_x=P.TOP_RISE_RAISED_X,
+                          carry_km=P.TOP_RISE_CARRY_KM, curve_x=P.TOP_RISE_CURVE_X)
+            res_o = generator_model.column(want, n4, lut, ref_m.env[t1_name], ref_m.env[h_name], 0.0, strat=strat,
+                                           smooth=smooth, slope=deck_top(strat),
+                                           gentle=(P.top_limit, P.TOP_CAP_X, P.TOP_SLOPE_PER_KM), own=params)
+            err_o = max(max(abs(out_o[k][0] - res_o[k][0]), abs(out_o[k][1] - res_o[k][1]))
+                        for k in range(P.WEATHER_SLICES))
+            check(err_o < 1e-4, f"{tid}: the volume with rising air differs from the model by {err_o:.1e}")
+            check(all(out_o[k][2:] == out[k][2:] for k in range(P.WEATHER_SLICES)),
+                  f"{tid}: rising air changed more than the shape and the extinction")
+            check(all(out_o[k][1] >= out[k][1] - 1e-6 for k in range(P.WEATHER_SLICES)),
+                  f"{tid}: rising air lowered the extinction")
         covered = sum(1 for k in range(P.WEATHER_SLICES) if out[k][0] > 0.51)
         # the capture's per-column record: terrain, global terrain, the column's total weight, the nearest station
         cap = Machine(patched_p, constants(1 | P.DEBUG_BUFFER_16MB, cloud=anchor_cloud()), TEX, bytearray(table))
