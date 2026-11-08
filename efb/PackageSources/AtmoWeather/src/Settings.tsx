@@ -208,9 +208,10 @@ export const TABS: TabSpec[] = [
               "Light that has bounced around inside the cloud, already at its sunlit edges: brighter cloud sides "
               + "with the sun to one side, and a slightly smaller silver lining.",
               1, true),
-      percent("C36", "Sun-facing cloud sides (experiment)",
+      percent("C36", "Sun-facing cloud sides",
               "Light on the sides of clouds that face the sun, worked out as real, thick cloud reflects it. It fades "
-              + "out where the cloud is shaded. 0 % is off. Ctrl+Shift+F8 switches it on and off.",
+              + "out where the cloud is shaded. 0 % is off. Ctrl+Shift+F8 switches it on and off. With it on, "
+              + "set \"Powder effect (grey rims, sun behind you)\" to 0 %: the two don't go well together.",
               1),
       {
         kind: "slider", key: "C5", label: "Light deep inside clouds", min: 1, max: 6, step: 0.1, more: true,
