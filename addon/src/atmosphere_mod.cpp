@@ -20,8 +20,6 @@
 //    captures from its pixel shader).
 //
 // Hotkeys, all with Ctrl+Shift:
-//  F7  experiment: cloud tops off, gentle, gentle with rising air (C37)
-//  F8  experiment: the plane-cloud light on and off (C36)
 //  F9  toggle replacements (A/B against stock)
 //  F10 reload replacement shaders and tunables.ini from disk
 //  F11 capture the constants our replacements see
@@ -395,9 +393,9 @@ std::array<float, kCloudTunableCount> g_effective_cloud_tunables = {};  // pushe
 // C32 <= 0: no thunderstorm cells (DebugCapture bit 8 to the cloud generator)
 std::atomic<bool> g_storms_off{true};
 std::atomic<bool> g_cloud_tilt_view{false};  // T17 > 0 (developers): DebugCapture bit 14, patch_dxil.py DEBUG_CLOUD_TILT
-std::atomic<float> g_cloud_plane_light{0.0f};  // C36 (experiment, 0..1): pushed as C35's slot, patch_dxil.py PLANE_*
-std::atomic<int> g_cloud_tops_mode{0};  // C37 (experiment): 1 gentle tops, DebugCapture bit 15; 2 also rising air, patch_dxil.py TOP_*
-std::atomic<float> g_cloud_rising_air{1.0f};  // C38 (0..1): how much of it, pushed as C30's slot < 0
+std::atomic<float> g_cloud_plane_light{0.0f};  // C36 (0..1, the app's Sun-facing cloud sides): pushed as C35's slot, patch_dxil.py PLANE_*
+// Cloud tops, always: gentle (DebugCapture bit 15) with rising air at full strength (C30's slot -1), patch_dxil.py
+// TOP_*. experiment/cloud-detail has them as C37 and C38, with Ctrl+Shift+F7.
 std::atomic<bool> g_fog_tint{false};  // C35 > 0: DebugCapture bit 13 on graphics draws
 std::atomic<bool> g_forward_fog_off{false};  // C35 < 0: no fog on the forward pass (bits 10-12 left 0)
 constexpr float kFallbackFreezingLevel = 3000.0f;  // m, R4 = 0 before the first METAR
@@ -642,11 +640,11 @@ fs::path presets_dir()
     return g_data_dir / "presets";
 }
 
-// The tunables the add-on reads: T0..T16 (T14..T16 its own), R0..R13, C0..C35.
+// The tunables the add-on reads: T0..T16 (T14..T16 its own), R0..R13, C0..C36 (C36 its own).
 bool known_tunable(char prefix, unsigned index)
 {
     return (prefix == 'T' && index < kTunableCount + 3) || (prefix == 'R' && index < kTunableCount) ||
-           (prefix == 'C' && index < kCloudTunableCount);
+           (prefix == 'C' && index < kCloudTunableCount + 1);
 }
 
 // tunables.ini: lines of "<prefix><index> = <value>", T for the atmosphere,
@@ -1073,8 +1071,6 @@ void reload(device *dev)
     weather::set_haze_strength(load_tunable('T', 16, 1.0f));
     g_cloud_tilt_view.store(load_tunable('T', 17, 0.0f) > 0.0f, std::memory_order_relaxed);
     g_cloud_plane_light.store(std::clamp(load_tunable('C', 36, 0.0f), 0.0f, 1.0f), std::memory_order_relaxed);
-    g_cloud_tops_mode.store(std::clamp(int(load_tunable('C', 37, 0.0f)), 0, 2), std::memory_order_relaxed);
-    g_cloud_rising_air.store(std::clamp(load_tunable('C', 38, 1.0f), 0.0f, 1.0f), std::memory_order_relaxed);
     struct Job
     {
         uint64_t handle;
@@ -1393,8 +1389,7 @@ void push_mod_args(command_list *cmd_list, const TrackedPipeline &info, const st
         p.debug_capture |= 256;
     if (g_cloud_tilt_view.load(std::memory_order_relaxed))
         p.debug_capture |= 1u << 14;
-    if (g_cloud_tops_mode.load(std::memory_order_relaxed) > 0)
-        p.debug_capture |= 1u << 15;
+    p.debug_capture |= 1u << 15;  // gentle tops
     // bit 5: MSFS's TLAS is bound (t0 space50): ch_deferred_shadows traces the
     // aircraft into the shadow window, for Raytraced Shadows
     const uint64_t tlas = g_tlas_va.load(std::memory_order_relaxed);
@@ -2841,9 +2836,10 @@ void update_effective_tunables()
     g_fog_tint.store(cloud[35] > 0.0f, std::memory_order_relaxed);
     g_forward_fog_off.store(cloud[35] < 0.0f, std::memory_order_relaxed);
     cloud[35] = g_cloud_plane_light.load(std::memory_order_relaxed);  // (C35 itself goes no further; no cloud shader read its slot)
-    // Rising air goes to the generator as C30's slot < 0: the render shaders read max(C30, 0). C30 > 0 wins.
-    if (!(cloud[30] > 0.0f) && g_cloud_tops_mode.load(std::memory_order_relaxed) == 2)
-        cloud[30] = -g_cloud_rising_air.load(std::memory_order_relaxed);
+    // Rising air goes to the generator as C30's slot < 0: the render shaders read max(C30, 0). C30 > 0 (finer
+    // billows, tunables.ini only) wins.
+    if (!(cloud[30] > 0.0f))
+        cloud[30] = -1.0f;
 
     const std::unique_lock lock(g_mutex);
     g_effective_tunables = effective;
@@ -2898,7 +2894,7 @@ std::string settings_state(bool pending)
     }
     missing += "}";
     std::array<float, kTunableCount> ini, effective;
-    std::array<float, kCloudTunableCount + 1> cloud;  // (+ C36, the experiment's plane-cloud light, for its slider)
+    std::array<float, kCloudTunableCount + 1> cloud;  // (+ C36, the plane-cloud light, for its slider)
     {
         const std::shared_lock lock(g_mutex);
         ini = g_tunables;
@@ -3030,7 +3026,7 @@ bool sync_settings(bool reload_key, void *window)
                 weather::set_haze_strength(c.value);
             else if (c.prefix == 'C' && c.index < kCloudTunableCount && (c.index < 13 || c.index > 15))  // (C13-C15: ours)
                 g_cloud_tunables[c.index] = c.value;
-            else if (c.prefix == 'C' && c.index == 36)  // (the experiment's plane-cloud light, also Ctrl+Shift+F8)
+            else if (c.prefix == 'C' && c.index == 36)  // (the plane-cloud light, Sun-facing cloud sides)
                 g_cloud_plane_light.store(std::clamp(c.value, 0.0f, 1.0f), std::memory_order_relaxed);
             else
                 continue;
@@ -3078,25 +3074,6 @@ void on_present(effect_runtime *runtime)
     {
         g_enabled = !g_enabled;
         event(reshade::log::level::info, g_enabled ? "replacements ON" : "replacements OFF (stock shaders)");
-    }
-    // Experiment: cloud tops (C37) off, gentle, gentle with rising air, on the same clouds; the generator rebuilds the
-    // volume within seconds.
-    if (modifiers && runtime->is_key_pressed(VK_F7))
-    {
-        const int next = (g_cloud_tops_mode.load(std::memory_order_relaxed) + 1) % 3;
-        g_cloud_tops_mode.store(next, std::memory_order_relaxed);
-        event(reshade::log::level::info, next == 0   ? "cloud tops: off (Ctrl+Shift+F7)"
-                                         : next == 1 ? "cloud tops: gentle (Ctrl+Shift+F7)"
-                                                     : "cloud tops: gentle, rising air (Ctrl+Shift+F7)");
-    }
-    // Experiment: C36 on and off within a frame, on the same clouds. Clouds change within tens of seconds
-    // (notes/xplane/gaps), and a reload is too slow to compare across.
-    if (modifiers && runtime->is_key_pressed(VK_F8))
-    {
-        const float setting = std::clamp(load_tunable('C', 36, 0.0f), 0.0f, 1.0f);
-        const float next = g_cloud_plane_light.load(std::memory_order_relaxed) > 0.0f ? 0.0f : (setting > 0.0f ? setting : 1.0f);
-        g_cloud_plane_light.store(next, std::memory_order_relaxed);
-        event(reshade::log::level::info, next > 0.0f ? "plane light ON (Ctrl+Shift+F8)" : "plane light OFF (Ctrl+Shift+F8)");
     }
     // (the EFB app's unsaved changes go to tunables.ini before the reload reads it)
     if (sync_settings(modifiers && runtime->is_key_pressed(VK_F10), runtime->get_hwnd()))
@@ -3155,8 +3132,6 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE re
     weather::set_haze_strength(load_tunable('T', 16, 1.0f));
     g_cloud_tilt_view.store(load_tunable('T', 17, 0.0f) > 0.0f, std::memory_order_relaxed);
     g_cloud_plane_light.store(std::clamp(load_tunable('C', 36, 0.0f), 0.0f, 1.0f), std::memory_order_relaxed);
-    g_cloud_tops_mode.store(std::clamp(int(load_tunable('C', 37, 0.0f)), 0, 2), std::memory_order_relaxed);
-    g_cloud_rising_air.store(std::clamp(load_tunable('C', 38, 1.0f), 0.0f, 1.0f), std::memory_order_relaxed);
     g_effective_tunables = g_tunables;
     g_radar_tunables = load_tunables('R');
     g_cloud_tunables = load_tunables<kCloudTunableCount>('C');

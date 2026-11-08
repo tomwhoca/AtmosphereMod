@@ -414,6 +414,12 @@ What it can do, inside MSFS's own cloud renderer:
   - with them on, it is traced from the sim's ray-tracing scene;
   - its edges soften with distance, as the sun's disc blurs them.
 - **Crisper cloud edges** (`C8`, off by default).
+- **Sun-facing cloud sides** (`C36`, off by default). Light on the sides of
+  clouds that face the sun, worked out as real, thick cloud reflects it:
+  - it fades out where another cloud shades the spot;
+  - it takes the colour of the sim's sunlight, so it turns warm with a low
+    sun;
+  - it goes best with the powder effect (`C6`) at 0.
 
 What it can't do:
 - The clouds' shapes, their resolution and the way MSFS steps through them
@@ -485,7 +491,17 @@ What it can do:
     across, which look like popcorn under solid cloud bases.
   - The mod fades them out toward each cloud's base, so bases are flat and
     tops keep their billows.
-  - Optionally it adds finer billows on the tops (`C30`, off by default).
+  - Optionally it adds finer billows on the tops (`C30`, off by default). They
+    switch off varied cloud tops (below).
+- **Varied cloud tops** (always on):
+  - MSFS's weather gives a whole region one cloud layer, and every cloud in it
+    ends at the same height, so the layer looks cut off flat, like a slice of
+    cake.
+  - Real air doesn't rise the same everywhere. The mod gives each place its
+    own lift: where the air rises more, clouds grow taller, by up to about
+    2.5 km, and tops round off instead of ending in a flat cut.
+  - Flat decks, and the clouds above them, keep their flat tops.
+  - It shapes the clouds where the sim builds them, so their shadows match.
 - **METAR anchoring** (`C20`, `C21`, live weather). Near weather stations, the
   sim's clouds are pulled toward the layers the METARs report:
   - **What follows the report:** the cover (FEW, SCT, BKN, OVC), the base
@@ -528,13 +544,18 @@ What it can't do:
 - **Only what a METAR can see.** Above about 12,000 ft over the station (5,000
   ft with CAVOK or NSC, or the top of an overcast), the sim's own clouds stay.
   Far from any station, the sim's own weather shows.
+- **Less rain near stations.** MSFS makes its rain, and the weather radar's
+  picture, from the clouds it has. Where the anchoring gives thinner cloud
+  than the sim had, the rain and the radar thin out with it, even when the
+  report has rain or a thunderstorm. With "Clouds follow the METARs" at 0 in
+  the app's Clouds tab (`C20 = 0`), the sim's rain is back.
 - **Live weather only.** Weather presets and third-party weather engines (such
   as Active Sky) keep their own cloud layers.
 - **Experimental.** Shapes and transitions can look wrong in some weather.
   `C20 = 0` switches the anchoring off.
 - **Thunderstorms are visual only.** The aircraft doesn't feel them (no
   turbulence, updrafts or downdrafts), there is no lightning of their own, and
-  the weather radar shows the sim's own rain. Over oceans and remote areas
+  the weather radar doesn't show them. Over oceans and remote areas
   without stations they form only under very heavy rain.
 
 ### METAR passing
@@ -728,7 +749,9 @@ Changes apply at once and are saved to `tunables.ini`. While the haze comes
 from the METAR, the manual haze sliders are greyed out and show what the METAR
 set, and a Haze strength slider scales it (100 % is as reported). Hover over a
 setting's name for an explanation of what it does. The app's
-"Reload tunables.ini" button does what Ctrl+Shift+F10 does.
+"Reload tunables.ini" button does what Ctrl+Shift+F10 does. After an update,
+the app opens with a short list of what's new; "Got it" closes it until the
+next one.
 
 **Presets.** The app's fifth tab saves all your settings (every value in
 `tunables.ini`, also the ones the app doesn't show) under a name, and loads
@@ -771,6 +794,7 @@ ones you're most likely to touch:
 | `C1`, `C2` | silver lining: how tight around the sun, how strong |
 | `C9` | glory strength (0 = off) |
 | `C12` | darkness of your aircraft's shadow on the clouds (0 = off) |
+| `C36` | sun-facing cloud sides (0 = off, up to 1); best with `C6`, the powder effect, at 0 |
 | `C16`, `C17` | cloud thickness (0 = the sim's) and how solid the bases are |
 | `C33`, `C34` | visibility inside clouds, around your aircraft (m; 0 = the sim's), and its structure |
 | `C19` | thickness of high, icy clouds (cirrus) |

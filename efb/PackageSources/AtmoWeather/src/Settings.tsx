@@ -210,7 +210,7 @@ export const TABS: TabSpec[] = [
               1, true),
       percent("C36", "Sun-facing cloud sides",
               "Light on the sides of clouds that face the sun, worked out as real, thick cloud reflects it. It fades "
-              + "out where the cloud is shaded. 0 % is off. Ctrl+Shift+F8 switches it on and off. With it on, "
+              + "out where the cloud is shaded. 0 % is off. With it on, "
               + "set \"Powder effect (grey rims, sun behind you)\" to 0 %: the two don't go well together.",
               1),
       {

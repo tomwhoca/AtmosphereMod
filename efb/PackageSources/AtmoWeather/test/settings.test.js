@@ -31,9 +31,25 @@ esbuild.buildSync({
   outfile: outDefaults,
   logLevel: "error",
 });
+const outNews = path.join(os.tmpdir(), "atmo-whatsnew-test.js");
+esbuild.buildSync({
+  entryPoints: [path.join(__dirname, "..", "src", "WhatsNew.tsx")],
+  bundle: true,
+  platform: "node",
+  format: "cjs",
+  outfile: outNews,
+  jsxFactory: "FSComponent.buildComponent",
+  jsxFragment: "FSComponent.Fragment",
+  alias: {
+    "@microsoft/msfs-sdk": path.join(__dirname, "stubs", "msfs-sdk.js"),
+    "@efb/efb-api": path.join(__dirname, "stubs", "efb-api.js"),
+  },
+  logLevel: "error",
+});
 global.window = { setTimeout, clearTimeout };
 const { TABS, SettingsModel, PRESET_DEFAULT, presetChar, presetName, sameName, missingText } = require(out);
 const { DEFAULTS } = require(outDefaults);
+const { WHATS_NEW, WHATS_NEW_KEY, WhatsNewModel } = require(outNews);
 
 let failures = 0;
 function check(ok, what) {
@@ -174,8 +190,32 @@ check(model.value("T3").get() === 4 && model.effectiveValue("T3").get() === 7.5,
         !presetChar("ä") && !presetChar(":"), "names: the characters the add-on takes");
   check(sameName("default", PRESET_DEFAULT), "names: case doesn't count");
 
+  // what's new: once per release, until closed
+  const memory = (stored) => {
+    const data = stored === undefined ? {} : { [WHATS_NEW_KEY]: stored };
+    return { data, get: (k) => data[k], set: (k, v) => { data[k] = v; } };
+  };
+  const fresh = memory();
+  const first = new WhatsNewModel(fresh);
+  check(first.open.get(), "what's new: shows on a first start");
+  first.close();
+  check(!first.open.get() && fresh.data[WHATS_NEW_KEY] === WHATS_NEW.release, "what's new: closing keeps the release");
+  check(!new WhatsNewModel(fresh).open.get(), "what's new: not again once closed");
+  check(new WhatsNewModel(memory("0.6.1")).open.get(), "what's new: shows after an update");
+  const noStore = new WhatsNewModel();
+  check(noStore.open.get(), "what's new: shows without the sim's data store");
+  noStore.close();
+  check(!noStore.open.get(), "what's new: and closes there too");
+  check(/^\d+\.\d+\.\d+$/.test(WHATS_NEW.release) && WHATS_NEW.items.every(([h, t]) => h && t && !/  /.test(t)),
+        `what's new: release ${WHATS_NEW.release}, ${WHATS_NEW.items.length} items, each with a heading and a text`);
+  const labels = TABS.flatMap((t) => t.settings.map((s) => s.label));
+  for (const name of ["Haze strength", "Sun-facing cloud sides", "Haze from METAR", "Powder effect"]) {
+    check(labels.some((l) => l.startsWith(name)), `what's new: "${name}" is a setting's name in the app`);
+  }
+
   fs.rmSync(out, { force: true });
   fs.rmSync(outDefaults, { force: true });
+  fs.rmSync(outNews, { force: true });
   console.log(failures ? "FAILED" : "all checks passed");
   process.exit(failures ? 1 : 0);
 })();

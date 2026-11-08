@@ -40,6 +40,7 @@ import {
 } from "@microsoft/msfs-sdk";
 
 import { EVENT_SETTINGS, EVENT_STATE, SETTINGS_CSS, SettingsModel, SettingsView } from "./Settings";
+import { WHATS_NEW_CSS, WhatsNewModel, WhatsNewView } from "./WhatsNew";
 
 declare const BASE_URL: string;
 /** The mod's version (build.js, from addon/CMakeLists.txt). */
@@ -169,6 +170,7 @@ class WeatherBridge {
 
 const bridge = new WeatherBridge();
 const settings = new SettingsModel((data) => bridge.send(EVENT_SETTINGS, data));
+const news = new WhatsNewModel();
 bridge.listen(EVENT_STATE, (args) => settings.onState(args), () => settings.requestState());
 setInterval(() => {
   if (!settings.connected.get()) {
@@ -178,7 +180,7 @@ setInterval(() => {
 
 const style = document.createElement("style");
 // (the link's status and the version, at the end of the page)
-style.textContent = SETTINGS_CSS + `
+style.textContent = SETTINGS_CSS + WHATS_NEW_CSS + `
 .atmo-link { padding-top: 24px; opacity: 0.6; font-size: 21px; }
 `;
 document.head.appendChild(style);
@@ -239,6 +241,7 @@ class AtmoWeatherView extends AppView<RequiredProps<AppViewProps, "bus">> {
             <div>{versionLine}</div>
           </div>
         </SettingsView>
+        <WhatsNewView model={news} />
       </div>
     );
   }

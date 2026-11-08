@@ -1,4 +1,4 @@
-// Stand-ins for the parts of @microsoft/msfs-sdk that src/Settings.tsx uses,
+// Stand-ins for the parts of @microsoft/msfs-sdk that src/Settings.tsx and src/WhatsNew.tsx use,
 // enough to test its model and settings in Node (test/settings.test.js).
 
 class Subject {
@@ -45,4 +45,14 @@ class DisplayComponent {
 
 const FSComponent = { buildComponent: () => ({}), Fragment: () => ({}) };
 
-module.exports = { Subject, MappedSubject, DisplayComponent, FSComponent };
+// (the sim's data store isn't there, as if GetStoredData were missing)
+const DataStore = {
+  get: () => {
+    throw new Error("GetStoredData is not defined");
+  },
+  set: () => {
+    throw new Error("SetStoredData is not defined");
+  },
+};
+
+module.exports = { Subject, MappedSubject, DisplayComponent, FSComponent, DataStore };
