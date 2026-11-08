@@ -94,7 +94,9 @@ const std::unordered_set<std::string> kWatchedEntries = {
 };
 
 // Must match the patched shaders' ModParams (tools/patch_dxil.py prologue_lines).
-constexpr uint32_t kModSpace = 50;
+// The register space of the mod's root parameters: [ATMOSPHEREMOD] RegisterSpace, which the installer sets along with
+// the patched shaders (--renodx, tools/install.py); a replacement in another space than this fails to create and stays stock.
+uint32_t g_mod_space = 50;
 constexpr uint32_t kTunableCount = 14;  // T0..T13
 struct ModParams
 {
@@ -634,10 +636,10 @@ fs::path presets_dir()
     return g_data_dir / "presets";
 }
 
-// The tunables the add-on reads: T0..T15 (T14, T15 its own), R0..R13, C0..C35.
+// The tunables the add-on reads: T0..T16 (T14..T16 its own), R0..R13, C0..C35.
 bool known_tunable(char prefix, unsigned index)
 {
-    return (prefix == 'T' && index < kTunableCount + 2) || (prefix == 'R' && index < kTunableCount) ||
+    return (prefix == 'T' && index < kTunableCount + 3) || (prefix == 'R' && index < kTunableCount) ||
            (prefix == 'C' && index < kCloudTunableCount);
 }
 
@@ -1062,6 +1064,7 @@ void reload(device *dev)
     const auto cloud_tunables = load_tunables<kCloudTunableCount>('C');
     const float ozone_setting = load_tunables<kTunableCount + 1>()[kTunableCount];  // T14
     weather::set_haze_field(load_tunable('T', 15, 1.0f) > 0.0f);
+    weather::set_haze_strength(load_tunable('T', 16, 1.0f));
     struct Job
     {
         uint64_t handle;
@@ -1256,7 +1259,7 @@ bool on_create_pipeline_layout(device *, uint32_t &param_count, pipeline_layout_
     extended.assign(params, params + param_count);
 
     constant_range constants = {};
-    constants.dx_register_space = kModSpace;
+    constants.dx_register_space = g_mod_space;
     constants.count = sizeof(ModParams) / 4;
     constants.visibility = shader_stage::all;
     extended.emplace_back(constants);
@@ -1264,7 +1267,7 @@ bool on_create_pipeline_layout(device *, uint32_t &param_count, pipeline_layout_
     // Both signatures also get the debug buffer as a root UAV. Graphics:
     // 23 + 16 + 2 = 41 of the 64 root-signature dwords.
     descriptor_range debug = {};  // single buffer UAV becomes a root UAV
-    debug.dx_register_space = kModSpace;
+    debug.dx_register_space = g_mod_space;
     debug.count = 1;
     debug.visibility = shader_stage::all;
     debug.type = descriptor_type::buffer_unordered_access_view;
@@ -1275,7 +1278,7 @@ bool on_create_pipeline_layout(device *, uint32_t &param_count, pipeline_layout_
     {
         constant_range cloud = {};
         cloud.dx_register_index = 1;
-        cloud.dx_register_space = kModSpace;
+        cloud.dx_register_space = g_mod_space;
         cloud.count = kCloudRootConstants;
         cloud.visibility = shader_stage::all;
         extended.emplace_back(cloud);
@@ -1283,7 +1286,7 @@ bool on_create_pipeline_layout(device *, uint32_t &param_count, pipeline_layout_
         // ... and MSFS's ray-tracing scene (its TLAS) as a root SRV, t0 space50,
         // for the aircraft's shadow with Raytraced Shadows: 62 of the 64 dwords
         descriptor_range tlas = {};
-        tlas.dx_register_space = kModSpace;
+        tlas.dx_register_space = g_mod_space;
         tlas.count = 1;
         tlas.visibility = shader_stage::all;
         tlas.type = descriptor_type::acceleration_structure;
@@ -1299,7 +1302,7 @@ bool on_create_pipeline_layout(device *, uint32_t &param_count, pipeline_layout_
 bool is_mod_param(const pipeline_layout_param &param, uint32_t reg = 0)
 {
     return param.type == pipeline_layout_param_type::push_constants &&
-           param.push_constants.dx_register_space == kModSpace && param.push_constants.dx_register_index == reg;
+           param.push_constants.dx_register_space == g_mod_space && param.push_constants.dx_register_index == reg;
 }
 
 // ---------------------------------------------------------------- capture
@@ -2304,7 +2307,7 @@ void on_init_pipeline_layout(device *dev, uint32_t count, const pipeline_layout_
             cloud_param = i;
         if (tlas_param == UINT32_MAX && params[i].type == pipeline_layout_param_type::push_descriptors &&
             params[i].push_descriptors.type == descriptor_type::acceleration_structure &&
-            params[i].push_descriptors.dx_register_space == kModSpace)
+            params[i].push_descriptors.dx_register_space == g_mod_space)
             tlas_param = i;
     }
     write_line(g_rootsig_log, "created " + hex64(layout.handle) + ", " + std::to_string(count) + " params" +
@@ -2884,6 +2887,10 @@ std::string settings_state(bool pending)
         effective = g_effective_tunables;
         cloud = g_cloud_tunables;
     }
+    // (by index: T16, the haze strength; T14 and T15 aren't the app's)
+    std::array<float, kTunableCount + 3> shown = {};
+    std::copy(ini.begin(), ini.end(), shown.begin());
+    shown[16] = weather::haze_strength();
     const auto list = [](const auto &values, bool rounded) {
         std::string s = "[";
         for (const float v : values)
@@ -2895,7 +2902,7 @@ std::string settings_state(bool pending)
         }
         return s + "]";
     };
-    return std::string("{\"enabled\":") + (g_enabled ? "true" : "false") + ",\"T\":" + list(ini, false) +
+    return std::string("{\"enabled\":") + (g_enabled ? "true" : "false") + ",\"T\":" + list(shown, false) +
            ",\"C\":" + list(cloud, false) + ",\"TE\":" + list(effective, true) + ",\"weather\":\"" +
            json_text(weather::summary()) + "\",\"version\":\"" ATMOSPHEREMOD_VERSION "\",\"presets\":" + presets +
            ",\"preset\":\"" + json_text(g_preset_current.name) + "\",\"presetSaved\":" +
@@ -3000,6 +3007,8 @@ bool sync_settings(bool reload_key, void *window)
         {
             if (c.prefix == 'T' && c.index < kTunableCount)
                 g_tunables[c.index] = c.value;
+            else if (c.prefix == 'T' && c.index == 16)
+                weather::set_haze_strength(c.value);
             else if (c.prefix == 'C' && c.index < kCloudTunableCount && (c.index < 13 || c.index > 15))  // (C13-C15: ours)
                 g_cloud_tunables[c.index] = c.value;
             else
@@ -3094,12 +3103,16 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE re
     g_data_dir = resolve_data_dir(addon_module);
     reshade::get_config_value(nullptr, "ATMOSPHEREMOD", "InjectRootSignature", g_inject);
     reshade::get_config_value(nullptr, "ATMOSPHEREMOD", "InjectGraphicsRootSignature", g_inject_graphics);
+    reshade::get_config_value(nullptr, "ATMOSPHEREMOD", "RegisterSpace", g_mod_space);
     open_logs();
+    if (g_mod_space != 50)
+        event(reshade::log::level::info, "root parameters in register space " + std::to_string(g_mod_space) + " (installed with --renodx)");
     load_names();
     g_replacements = load_replacements(g_lazy_replacements);
     g_tunables = load_tunables();
     g_ozone_setting = load_tunables<kTunableCount + 1>()[kTunableCount];  // T14
     weather::set_haze_field(load_tunable('T', 15, 1.0f) > 0.0f);
+    weather::set_haze_strength(load_tunable('T', 16, 1.0f));
     g_effective_tunables = g_tunables;
     g_radar_tunables = load_tunables('R');
     g_cloud_tunables = load_tunables<kCloudTunableCount>('C');

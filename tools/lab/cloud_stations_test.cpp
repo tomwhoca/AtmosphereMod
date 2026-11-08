@@ -365,6 +365,13 @@ int haze_scenario()
               near(haze_row(1)[5], blend.ini[7] + (esms[7] - blend.ini[7]) * 0.25f, 1e-5),
           "blended into the ini's by T13");
     blend.mix = 1.0f;
+    blend.strength = 0.5f;
+    set.table(2.0, t.bytes.data(), &blend);
+    const Haze half = anchor::scaled_haze(esms, 0.5f);
+    check(same(haze_row(1), row_of(half)) && half[2] == esms[2] * 0.5f && half[3] == esms[3] * 0.5f &&
+              half[5] == esms[5] * 0.5f && half[0] == esms[0] && half[4] == esms[4] && half[7] == esms[7],
+          "the haze strength scales the amounts of haze, in the rows too, not the height or colour");
+    blend.strength = 1.0f;
 
     printf("haze at a point\n");
     Haze h = {};

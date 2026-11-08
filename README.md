@@ -331,6 +331,12 @@ What it can do:
 
   With `T15 = 0`, the nearest METAR alone sets the haze everywhere, smoothed
   over about 30 seconds.
+- **Haze strength** (`T16`). A slider under "Haze from METAR" in the app, for
+  when the reported haze looks too strong or too weak to you:
+  - 100 % is what the reports say. 50 % makes the haze half as thick, so the
+    visibility about doubles; 200 % makes it twice as thick.
+  - It changes the amount of haze, not the layer's height or its colour.
+  - It doesn't change the sim's own fog and mist.
 - **The same haze everywhere.** It applies to:
   - the sky;
   - the terrain and buildings;
@@ -686,6 +692,24 @@ works or not:
   also recolour the haze and sky the mod draws. Switch them off to see the
   mod on its own.
 
+### With RenoDX
+
+The [RenoDX HDR mod for MSFS 2024](https://www.nexusmods.com/microsoftflightsimulator2024/mods/26)
+stops working next to AtmosphereMod: its shader replacements fail, with
+`Params not created` in `ReShade.log`. Both mods add inputs to the sim's shaders
+under the same label (register space 50). If you use RenoDX, install
+AtmosphereMod with a parameter that moves its inputs to another label: run
+`Install AtmosphereMod.cmd --renodx` from Command Prompt, in the folder you
+unzipped.
+
+- If you don't use RenoDX, you don't need this.
+- Installing again keeps it, so updates need no parameter. To go back, run
+  `Install AtmosphereMod.cmd --no-renodx`.
+- It sets `RegisterSpace` in `ReShade.ini`. Don't change that line by hand: the
+  shaders have to be patched with the same value, or they stay stock.
+- A user reported that moving the label makes both mods work, on version 0.5.1.
+  I haven't tried it with RenoDX myself.
+
 ## Using it
 
 All hotkeys use **Ctrl+Shift**:
@@ -702,7 +726,8 @@ The main settings are in the **AtmosphereMod app on your EFB tablet**, as
 switches and sliders in four tabs: Haze, Sky & light, Cloud lighting and Clouds.
 Changes apply at once and are saved to `tunables.ini`. While the haze comes
 from the METAR, the manual haze sliders are greyed out and show what the METAR
-set. Hover over a setting's name for an explanation of what it does. The app's
+set, and a Haze strength slider scales it (100 % is as reported). Hover over a
+setting's name for an explanation of what it does. The app's
 "Reload tunables.ini" button does what Ctrl+Shift+F10 does.
 
 **Presets.** The app's fifth tab saves all your settings (every value in
@@ -740,6 +765,7 @@ ones you're most likely to touch:
 | `T8` | sky colours: 0 = the sim's (ARPC), 1 = fitted to the full spectrum |
 | `T14` | ozone in Dobson units: 0 = by season and latitude, or a fixed amount |
 | `T15` | haze from all the stations around (1), or from the nearest METAR only (0) |
+| `T16` | haze strength with `T13` = 1: 1 = as reported, 0.5 half as thick, up to 2 |
 | `C22` | daylight white balance (0 = off, 1 = on) |
 | `C0` | cloud lighting: 0 = stock, 1 = the mod |
 | `C1`, `C2` | silver lining: how tight around the sun, how strong |

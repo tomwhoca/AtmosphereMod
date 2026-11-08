@@ -24,6 +24,8 @@ using Microsoft::WRL::ComPtr;
 
 namespace
 {
+UINT g_space = 50;  // the register space of the mod's root parameters
+
 std::vector<char> read_file(const char *path)
 {
     std::ifstream file(path, std::ios::binary);
@@ -70,19 +72,19 @@ int test_compute(ID3D12Device *dev, const std::vector<char> &cs, const char *nam
     {
         p = {};
         p.ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-        p.Constants = { 0, 50, 16 };
+        p.Constants = { 0, g_space, 16 };
         params.push_back(p);
         p = {};
         p.ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
-        p.Descriptor = { 0, 50, D3D12_ROOT_DESCRIPTOR_FLAG_NONE };
+        p.Descriptor = { 0, g_space, D3D12_ROOT_DESCRIPTOR_FLAG_NONE };
         params.push_back(p);
         p = {};
         p.ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-        p.Constants = { 1, 50, 32 };  // cloud tunables C0..C31
+        p.Constants = { 1, g_space, 32 };  // cloud tunables C0..C31
         params.push_back(p);
         p = {};
         p.ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;  // MSFS's TLAS for the aircraft's shadow with RT shadows
-        p.Descriptor = { 0, 50, D3D12_ROOT_DESCRIPTOR_FLAG_NONE };
+        p.Descriptor = { 0, g_space, D3D12_ROOT_DESCRIPTOR_FLAG_NONE };
         params.push_back(p);
     }
     D3D12_VERSIONED_ROOT_SIGNATURE_DESC rd = {};
@@ -114,9 +116,18 @@ int test_compute(ID3D12Device *dev, const std::vector<char> &cs, const char *nam
 
 int main(int argc, char **argv)
 {
+    for (int i = 1; i + 1 < argc; ++i)  // --space N, anywhere: the installer's --renodx
+        if (strcmp(argv[i], "--space") == 0)
+        {
+            g_space = static_cast<UINT>(atoi(argv[i + 1]));
+            for (int j = i; j + 2 < argc; ++j)
+                argv[j] = argv[j + 2];
+            argc -= 2;
+            break;
+        }
     if (argc < 3)
     {
-        fprintf(stderr, "usage: psotest <vs.cso> <ps.cso> [--no-mod] | psotest --cs <cs.cso> [--no-mod]\n");
+        fprintf(stderr, "usage: psotest <vs.cso> <ps.cso> [--no-mod] [--space N] | psotest --cs <cs.cso> [--no-mod] [--space N]\n");
         return 2;
     }
     const bool compute = strcmp(argv[1], "--cs") == 0;
@@ -176,11 +187,11 @@ int main(int argc, char **argv)
     {
         p = {};
         p.ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-        p.Constants = { 0, 50, 16 };
+        p.Constants = { 0, g_space, 16 };
         params.push_back(p);
         p = {};
         p.ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
-        p.Descriptor = { 0, 50, D3D12_ROOT_DESCRIPTOR_FLAG_NONE };
+        p.Descriptor = { 0, g_space, D3D12_ROOT_DESCRIPTOR_FLAG_NONE };
         params.push_back(p);
     }
 

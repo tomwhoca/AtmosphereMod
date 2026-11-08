@@ -164,6 +164,7 @@ int g_newest_report = -1;        // the newest METAR's report_min (haze_mapping.
 std::string g_stale_logged;      // the last stale report logged
 
 std::atomic<bool> g_haze_field{true};  // T15
+std::atomic<float> g_haze_strength{1.0f};  // T16
 
 // Present thread only.
 std::array<float, std::size(kDriven)> g_smoothed = {};
@@ -271,8 +272,8 @@ std::string recompute()
     g_have_target = true;
     // (haze::AirMass order)
     static const char *const kinds[] = { "continental haze", "haze (HZ)", "smoke (FU)", "dust", "volcanic ash" };
-    // the surface aerosol: haze_mapping.h's T3 + T4 = sigma / kStockMieExtinction
-    const double sigma = g_haze_stations > 0 ? (field[2] + field[3]) * haze::kStockMieExtinction : t.sigma;
+    // the surface aerosol: haze_mapping.h's T3 + T4 = sigma / kStockMieExtinction, as drawn (T16)
+    const double sigma = (g_haze_stations > 0 ? (field[2] + field[3]) * haze::kStockMieExtinction : t.sigma) * g_haze_strength;
     char from[64] = "";
     if (g_haze_stations > 1)
         snprintf(from, sizeof(from), " (+%zu)", g_haze_stations - 1);
@@ -854,6 +855,22 @@ void set_haze_field(bool on)
                : "haze field off (T15 = 0): the haze from the nearest METAR only");
 }
 
+void set_haze_strength(float strength)
+{
+    strength = std::clamp(strength, 0.0f, 2.0f);
+    if (g_haze_strength.exchange(strength) == strength)
+        return;
+    const std::lock_guard lock(g_mutex);
+    log("haze strength %.0f%% (T16)", 100.0f * strength);
+    if (g_have_target)
+        recompute();  // (for the visibility in the app's weather line)
+}
+
+float haze_strength()
+{
+    return g_haze_strength;
+}
+
 float freezing_level_m()
 {
     const std::lock_guard lock(g_mutex);
@@ -880,6 +897,7 @@ std::array<float, kTunableCount> apply(const std::array<float, kTunableCount> &i
         for (size_t i = 0; i < std::size(kDriven); ++i)
             g_haze_blend.ini[i] = ini[kDriven[i]];
         g_haze_blend.mix = std::clamp(ini[13], 0.0f, 1.0f);
+        g_haze_blend.strength = g_haze_strength;
         g_have_blend = true;
         if (!g_have_target)
             return ini;
@@ -890,11 +908,13 @@ std::array<float, kTunableCount> apply(const std::array<float, kTunableCount> &i
         g_smoothed[i] += (target[i] - g_smoothed[i]) * k;
     g_smoothed_valid = true;
 
+    // (after the smoothing: the slider acts at once)
+    const anchor::Haze scaled = anchor::scaled_haze(g_smoothed, g_haze_strength);
     const float mix = std::clamp(ini[13], 0.0f, 1.0f);
     std::array<float, kTunableCount> out = ini;
     for (size_t i = 0; i < std::size(kDriven); ++i)
     {
-        float weather = g_smoothed[i];
+        float weather = scaled[i];
         // T9 (g, the forward glare) stays the user's: the weather adds its
         // type and humidity offsets to it instead of replacing it.
         if (kDriven[i] == 9 && ini[9] > 0.0f)

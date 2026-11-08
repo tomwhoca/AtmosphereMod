@@ -83,6 +83,10 @@ size_t cloud_anchor_table(std::array<uint8_t, kAnchorTableBytes> &out);
 // stations around instead of the nearest one's. Any thread.
 void set_haze_field(bool on);
 
+// How strong the haze from METARs is (T16): 1 as they report, 0..2.
+void set_haze_strength(float strength);
+float haze_strength();
+
 // Present thread: advances the smoothing by dt_seconds and returns `ini` with
 // the weather-driven tunables blended in by ini[13]. Returns `ini` unchanged
 // until the first METAR arrives.

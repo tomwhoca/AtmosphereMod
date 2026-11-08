@@ -63,6 +63,10 @@ EFB = "atmospheremod-weather"
 SECTION = "ATMOSPHEREMOD"
 ISSUES = "https://github.com/tomwhoca/AtmosphereMod/issues"
 BACKUP = "ReShade.ini.atmospheremod.bak"
+# The register space of the mod's root parameters, in the add-on and the patched shaders alike. The RenoDX HDR mod for
+# MSFS 2024 adds its own to the same root signature in space 50, and with the mod's already there its replacements fail
+# (GitHub issue 22), so --renodx moves the mod's. Nothing else needs it.
+DEFAULT_SPACE, RENODX_SPACE = 50, 51
 RESHADE_LIBRARY = "ReShade64.dll"  # ReShade loaded by another program (OptiShade)
 # What the standard ReShade build logs when it skips an add-on: in that build's DLL, not in the build with
 # full add-on support (checked on 6.8.0), so it tells them apart before the sim has run.
@@ -512,6 +516,15 @@ def set_key(text: str, key: str, value: str) -> str:
     return text[:section.start()] + body + text[section.end():]
 
 
+def register_space(renodx: bool | None, ini_text: str) -> int:
+    """--renodx or --no-renodx; without either, what the last install left in ReShade.ini, so that updating keeps it."""
+    if renodx is not None:
+        return RENODX_SPACE if renodx else DEFAULT_SPACE
+    section = re.search(rf"^\[{SECTION}\][^\[]*", ini_text, re.M)
+    key = re.search(r"^RegisterSpace=(\d+)\s*$", section.group(0), re.M) if section else None
+    return int(key.group(1)) if key else DEFAULT_SPACE
+
+
 def remove_section(text: str) -> str:
     return re.sub(rf"^\[{SECTION}\][^\[]*", "", text, flags=re.M)
 
@@ -549,7 +562,7 @@ def worker_count(given: int | None) -> int:
     return 1 if given is None else max(1, given)
 
 
-def patch(pak: Path, dxc: Path, work: Path, shaders: Path, log, workers: int) -> tuple[int, int, list[str]]:
+def patch(pak: Path, dxc: Path, work: Path, shaders: Path, log, workers: int, space: int) -> tuple[int, int, list[str]]:
     """Extract the pack into work/, patch, move the results into shaders/.
     Returns (patched, failed, crcs in the pack)."""
     if work.exists():
@@ -566,7 +579,7 @@ def patch(pak: Path, dxc: Path, work: Path, shaders: Path, log, workers: int) ->
     say("Patching them, one at a time (several minutes) ..." if workers == 1 else "Patching them (a minute or two) ...")
     import patch_dxil
     with contextlib.redirect_stdout(log):
-        failed = patch_dxil.patch_all(root=work, dxc=dxc, strict=False, workers=workers)
+        failed = patch_dxil.patch_all(root=work, dxc=dxc, strict=False, workers=workers, mod_space=space)
     made = sorted((work / "build" / "shaders").glob("*.cso"))
     for f in made:
         shutil.move(str(f), shaders / f.name)
@@ -625,6 +638,9 @@ def install(args) -> None:
     say(f"  shaders:    {pak}")
     say(f"  Community:  {community or 'not found: the EFB app (METAR features) is skipped'}")
     say(f"  data:       {data}")
+    space = register_space(args.renodx, read_ini(sim / "ReShade.ini"))
+    if space != DEFAULT_SPACE:
+        say(f"  RenoDX:     compatible, register space {space} (--no-renodx goes back)")
     if rv and tuple(int(x) for x in rv.split(".")[:2]) < (6, 8):
         say(f"  ReShade {rv} is too old: install 6.8 or newer with full add-on support.")
         raise InstallError("ReShade too old")
@@ -657,9 +673,9 @@ def install(args) -> None:
     workers = worker_count(args.workers)
     with open(data / "logs" / "install.log", "w", encoding="utf-8") as log:
         log.write(f"AtmosphereMod {version()} installer, {datetime.now():%Y-%m-%d %H:%M}\nsim {sim}\npak {pak}\n"
-                  f"reshade {rv or 'unknown'} ({reshade})\ndxc {dxc}\nworkers {workers}\n\n")
+                  f"reshade {rv or 'unknown'} ({reshade})\ndxc {dxc}\nworkers {workers}\nregister space {space}\n\n")
         log.flush()
-        patched, failed, pack = patch(pak, dxc, work, shaders, log, workers)
+        patched, failed, pack = patch(pak, dxc, work, shaders, log, workers, space)
     shutil.rmtree(work, ignore_errors=True)  # (the extracted game shaders aren't kept)
 
     # (a release may also carry replacement shaders of its own, for the variants this sim has)
@@ -707,7 +723,8 @@ def install(args) -> None:
         shutil.copy2(ini, sim / BACKUP)
     text = read_ini(ini)
     for key, value in (("DataPath", str(data)), ("TunablesPath", str(tunables)),
-                       ("InjectRootSignature", "1"), ("InjectGraphicsRootSignature", "1")):
+                       ("InjectRootSignature", "1"), ("InjectGraphicsRootSignature", "1"),
+                       ("RegisterSpace", str(space))):
         text = set_key(text, key, value)
     ini.write_text(text, encoding="utf-8")
     say(f"Add-on: {sim / ADDON}; ReShade.ini [{SECTION}] set" + (f" (backup {BACKUP})" if (sim / BACKUP).exists()
@@ -718,7 +735,7 @@ def install(args) -> None:
 
     record = {"version": version(), "date": f"{datetime.now():%Y-%m-%d %H:%M}", "sim": str(sim), "reshade": reshade,
               "addons": str(addons), "community": str(community) if community else None, "data": str(data),
-              "pak": pak.name, "patched": patched, "failed": failed}
+              "pak": pak.name, "patched": patched, "failed": failed, "register_space": space}
     (data / "install.json").write_text(json.dumps(record, indent=2))
     say()
     say("Done. Start the sim; Ctrl+Shift+F9 switches between the mod and stock, Ctrl+Shift+F10 reloads")
@@ -791,6 +808,9 @@ def main() -> int:
     ap.add_argument("--dxc", type=Path, help="a folder with dxc.exe, dxcompiler.dll and dxil.dll")
     ap.add_argument("--workers", type=int, help="processes for patching the shaders (default: 1, one at a time, the "
                     "lightest load; more is faster, but several at once froze one PC)")
+    ap.add_argument("--renodx", action=argparse.BooleanOptionalAction, default=None,
+                    help="work next to the RenoDX HDR mod (a different register space for the mod). Installing again "
+                         "keeps it; --no-renodx goes back")
     ap.add_argument("--payload", type=Path, help=argparse.SUPPRESS)
     ap.add_argument("--yes", action="store_true", help="don't ask")
     ap.add_argument("--uninstall", action="store_true")

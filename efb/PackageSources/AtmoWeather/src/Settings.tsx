@@ -43,6 +43,8 @@ interface SliderSpec {
   manualHaze?: boolean;
   /** Greyed out while this setting is 0 (no effect then). */
   needs?: string;
+  /** Shown only while the haze comes from the METAR (T13). */
+  metarOnly?: boolean;
   more?: boolean;
 }
 
@@ -110,6 +112,15 @@ export const TABS: TabSpec[] = [
         kind: "switch", key: "T13", label: "Haze from METAR",
         tip: "The haze follows the sim's own weather reports (METARs): its amount, height and colour, blended "
           + "between stations as you fly. Off: the manual haze settings below.",
+      },
+      {
+        kind: "slider", key: "T16", label: "Haze strength", min: 0, max: 200, step: 5, metarOnly: true,
+        tip: "How much of the haze the reports describe is drawn. 100 % is as reported; lower gives clearer air and "
+          + "longer visibility than reported (50 % about doubles it), higher gives more haze. The sim's own fog and "
+          + "mist stay as they are.",
+        toDisplay: (raw) => raw * 100,
+        toRaw: (d) => d / 100,
+        format: (d) => `${Math.round(d)} %`,
       },
       {
         kind: "switch", key: "T11", label: "Distant clouds fade creamy, not grey",
@@ -580,6 +591,7 @@ class SliderRow extends DisplayComponent<RowProps<SliderSpec>> {
   private readonly text = Subject.create("");
   private readonly quiet = new Quiet();
   private readonly disabled: MappedSubject<[boolean, number, number], boolean>;
+  private readonly hidden: MappedSubject<[number], boolean>;
   private readonly subs: Subscription[] = [];
 
   public constructor(props: RowProps<SliderSpec>) {
@@ -591,6 +603,7 @@ class SliderRow extends DisplayComponent<RowProps<SliderSpec>> {
       model.value("T13"),
       model.value(spec.needs ?? "T0"),
     );
+    this.hidden = MappedSubject.create(([metar]) => spec.metarOnly === true && metar < 0.5, model.value("T13"));
   }
 
   public onAfterRender(node: VNode): void {
@@ -615,7 +628,7 @@ class SliderRow extends DisplayComponent<RowProps<SliderSpec>> {
   public render(): VNode {
     const { spec } = this.props;
     return (
-      <div class={{ "atmo-row": true, "atmo-slider-row": true, "atmo-disabled": this.disabled }}>
+      <div class={{ "atmo-row": true, "atmo-slider-row": true, "atmo-disabled": this.disabled, "atmo-hidden": this.hidden }}>
         <Label text={spec.label} tip={spec.tip} />
         <div class="atmo-control">
           <Slider value={this.display} min={spec.min} max={spec.max} step={spec.step} disabled={this.disabled}

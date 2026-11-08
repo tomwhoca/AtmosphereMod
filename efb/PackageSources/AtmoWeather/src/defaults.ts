@@ -18,6 +18,7 @@ export const DEFAULTS: Readonly<Record<string, number>> = {
   T13: 1,
   T14: 0,
   T15: 1,
+  T16: 1,
   C0: 1,
   C1: 0.9,
   C2: 0.5,

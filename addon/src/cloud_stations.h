@@ -63,12 +63,23 @@ inline Haze haze_values(const haze::Tunables &t)
     return { t.bl_top_km, t.bl_edge_km, t.bl_haze, t.ft_haze, t.ft_scale_km, t.brown, t.g, t.angstrom };
 }
 
+// The haze strength (T16): the amounts of haze, T3, T4 and T6; its height and colour stay.
+inline Haze scaled_haze(Haze h, float strength)
+{
+    h[2] *= strength;
+    h[3] *= strength;
+    h[5] *= strength;
+    return h;
+}
+
 // tunables.ini's values of the Haze tunables and T13: the table's haze rows are
-// blended into them by mix, as the add-on blends its own (weather_feed.cpp apply).
+// blended into them by mix, as the add-on blends its own (weather_feed.cpp apply),
+// the weather's share scaled by the haze strength.
 struct HazeBlend
 {
     Haze ini = {};
     float mix = 0.0f;
+    float strength = 1.0f;
 };
 constexpr double kFadeInS = 180.0;       // a new station
 constexpr double kFadeOutS = 180.0;      // a station left far behind
@@ -254,7 +265,7 @@ public:
             std::memcpy(out + 16 + 16 * kStations + 16 * kSlices * i, rows.data(), sizeof(rows));
             if (blend == nullptr)
                 continue;
-            const Haze h = effective_haze(s, now);
+            const Haze h = scaled_haze(effective_haze(s, now), blend->strength);
             const auto mixed = [&](size_t k) { return blend->ini[k] + (h[k] - blend->ini[k]) * blend->mix; };
             const float haze_rows[8] = { mixed(0), mixed(2), mixed(3), mixed(4), mixed(5), mixed(7),
                                          static_cast<float>(counts_share(s, now)), 0.0f };

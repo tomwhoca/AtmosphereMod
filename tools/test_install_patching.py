@@ -7,9 +7,12 @@
   (dxc). Workers that die as they start, or partway, give a quick switch to one at a time: no restarting
   of workers without end, no waiting for ever (issue #18).
 - worker_count: one at a time unless more are asked for.
+- --renodx: the register space, and only the mod's bindings move with it in the patched shaders (issue #22).
 
     python tools/test_install_patching.py
 """
+import csv
+import json
 import os
 import shutil
 import subprocess
@@ -144,10 +147,57 @@ def test_workers(_: Path) -> None:
     check("--workers 0 counts as 1", install.worker_count(0) == 1)
 
 
+def test_register_space(temp: Path) -> None:
+    ini = "[ADDON]\nRegisterSpace=7\n\n[ATMOSPHEREMOD]\nDataPath=x\nRegisterSpace=51\n\n[OTHER]\nRegisterSpace=9\n"
+    check("the space: 50 by default", install.register_space(None, "[ADDON]\nX=1\n") == 50)
+    check("the space: --renodx", install.register_space(True, "") == install.RENODX_SPACE == 51)
+    check("the space: kept from the last install", install.register_space(None, ini) == 51)
+    check("the space: --no-renodx goes back", install.register_space(False, ini) == 50)
+    check("the space: only from the mod's section", install.register_space(None, "[ADDON]\nRegisterSpace=7\n") == 50)
+    check("the space: nonsense counts as none", install.register_space(None, "[ATMOSPHEREMOD]\nRegisterSpace=x\n") == 50)
+    text = install.set_key(ini, "RegisterSpace", "50")
+    check("the space: written in the mod's section alone", install.register_space(None, text) == 50 and "[ADDON]\nRegisterSpace=7" in text
+          and "[OTHER]\nRegisterSpace=9" in text)
+
+    # the patcher, one variant of each kind of patch: the two differ only in the mod's bindings
+    extracted = ROOT / "extracted"
+    if not (extracted / "index.csv").exists():
+        print("     (no extracted shaders: the patcher isn't checked)")
+        return
+    dxc = patch_dxil.find_dxc()
+    manifest = json.loads((ROOT / "shaders" / "manifest.json").read_text())
+    rows = list(csv.DictReader(open(extracted / "index.csv")))
+    kinds = {}
+    for target in manifest["patches"]:
+        kinds.setdefault(target.get("kind", "medium"), target)
+    psotest = ROOT / "build" / "lab" / "psotest.exe"
+    for kind, target in kinds.items():
+        blobs = sorted({extracted / r["path"] for r in rows if r["entry"] == target["entry"]})
+        crcs = target.get("crcs", "all")
+        for blob in (b for b in blobs if crcs == "all" or b.name.split(".")[0] in crcs):
+            job = (blob, kind, target.get("args", {}), True, dxc)
+            base, moved = patch_dxil._patch_job((*job, 50)), patch_dxil._patch_job((*job, 51))
+            if base[1] == "skip":
+                continue
+            check(f"{kind}: patched in both spaces", base[1] == moved[1] == "ok", f"{base[1]} {moved[1]}: {base[2][:200]}")
+            a, b = base[4].splitlines(), moved[4].splitlines()
+            diff = [(x, y) for x, y in zip(a, b) if x != y]
+            check(f"{kind}: only the mod's bindings move", len(a) == len(b) and diff and
+                  all(x.replace("i32 50,", "i32 51,") == y for x, y in diff), f"{len(diff)} lines, e.g. {diff[:1]}")
+            if kind == "cloud_gen_capture" and psotest.exists():
+                cso = temp / "moved.cso"
+                cso.write_bytes(moved[3])
+                ok = subprocess.run([str(psotest), "--cs", str(cso), "--space", "51"], capture_output=True).returncode
+                bad = subprocess.run([str(psotest), "--cs", str(cso)], capture_output=True).returncode
+                check("the moved generator creates on D3D12 in space 51, not in 50", ok == 0 and bad != 0, f"{ok} {bad}")
+            break
+    patch_dxil.MOD_SPACE = 50
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory() as folder:
         temp = Path(folder)
-        for test, name in ((test_powershell, "ps"), (test_find_dxc_without_powershell, "dxc"), (test_run_jobs, "jobs"), (test_workers, "workers")):
+        for test, name in ((test_powershell, "ps"), (test_find_dxc_without_powershell, "dxc"), (test_run_jobs, "jobs"), (test_workers, "workers"), (test_register_space, "space")):
             (temp / name).mkdir()
             test(temp / name)
     print("All good." if not failures else f"{failures} FAILED")

@@ -68,7 +68,7 @@ REFERENCE_OZONE = (2.830e-3, 1.623e-3, 0.033e-3)
 BROWN_HAZE_TINT = (0.15, 0.3, 0.6)
 BACKSCATTER_G = -0.4
 AEROSOL_SPECTRAL_LOG2 = (-0.30610, 0.0, 0.32193)
-MOD_SPACE = 50
+MOD_SPACE = 50  # the register space of the mod's bindings; the installer's --renodx: another, through patch_all
 MOD_PARAMS_SIZE = 64
 # C0..C35 at b1 space50, compute only (C32 also reaches the shaders as a ModParams bit; C35 too, to the
 # forward pass: FOG_TINT_BIT)
@@ -6979,13 +6979,15 @@ def run_jobs(function, jobs: list, workers: int):
 
 
 def patch_all(keep_ir: bool = False, root: Path | None = None, dxc: Path | None = None,
-              strict: bool = True, workers: int | None = None) -> int:
+              strict: bool = True, workers: int | None = None, mod_space: int | None = None) -> int:
     """Patch every manifest target; returns the number of failures. root holds
     shaders/manifest.json and extracted/ and receives build/ (the project by
     default; the installer passes its work folder and its dxc).
     strict = False: a target the patterns don't recognise (a sim update) is
     reported and skipped, whatever the error.
-    workers: processes to use (default: up to 8, one core spare)."""
+    workers: processes to use (default: up to 8, one core spare).
+    mod_space: the register space of the mod's bindings (default MOD_SPACE); the
+    add-on must use the same one (ReShade.ini [ATMOSPHEREMOD] RegisterSpace)."""
     root = root or ROOT
     dxc = dxc or find_dxc()
     manifest = json.loads((root / "shaders" / "manifest.json").read_text())
@@ -6995,7 +6997,8 @@ def patch_all(keep_ir: bool = False, root: Path | None = None, dxc: Path | None 
         entry = target["entry"]
         blobs = sorted({root / "extracted" / row["path"] for row in index if row["entry"] == entry})
         crcs = target.get("crcs", "all")
-        jobs += [(target, (blob, target.get("kind", "medium"), target.get("args", {}), keep_ir, dxc))
+        jobs += [(target, (blob, target.get("kind", "medium"), target.get("args", {}), keep_ir, dxc,
+                           MOD_SPACE if mod_space is None else mod_space))
                  for blob in blobs if crcs == "all" or blob.name.split(".")[0] in crcs]
     # (thousands of forward-pass variants: patched and assembled in worker processes)
     if workers is None:
@@ -7037,8 +7040,8 @@ def _patch_job(job: tuple) -> tuple:
     """One target variant (patch_all; also in a worker process): (crc, status,
     message, DXIL, IR), status ok, skip, fail or error (an unexpected exception,
     its traceback in message)."""
-    global _WORKER_ASSEMBLER
-    blob, kind, args, keep_ir, dxc = job
+    global _WORKER_ASSEMBLER, MOD_SPACE
+    blob, kind, args, keep_ir, dxc, MOD_SPACE = job  # (in the job: spawned workers don't see the parent's)
     crc = blob.name.split(".")[0]
     try:
         patched, summary = PATCHES[kind](disassemble(blob, dxc), **args)

@@ -67,6 +67,9 @@ check(spec("T10").format(1.3) === "1.3 continental blue" && spec("T10").format(0
 check(spec("C9").format(0) === "off" && spec("C16").format(0) === "the sim's", "off and the sim's at 0");
 check(spec("T3").manualHaze && spec("T10").manualHaze && !spec("T9").manualHaze, "manual haze: T3..T10 but not the glare");
 check(spec("C19").needs === "C16", "high-cloud thickness needs solid clouds");
+check(spec("T16").metarOnly && !spec("T3").metarOnly && spec("T16").toDisplay(1) === 100 && spec("T16").toRaw(50) === 0.5 &&
+      spec("T16").min === 0 && spec("T16").max === 200 && spec("T16").format(100) === "100 %",
+      "haze strength: 100 % is as reported, 0-200 %, only with the METAR's haze");
 
 // the model
 const sent = [];
