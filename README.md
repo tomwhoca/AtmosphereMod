@@ -492,8 +492,8 @@ What it can do:
   - The mod fades them out toward each cloud's base, so bases are flat and
     tops keep their billows.
   - Optionally it adds finer billows on the tops (`C30`, off by default). They
-    switch off varied cloud tops (below).
-- **Varied cloud tops** (always on):
+    switch off the rising air of varied cloud tops (below).
+- **Varied cloud tops** (`C37`, on by default, `tunables.ini` only):
   - MSFS's weather gives a whole region one cloud layer, and every cloud in it
     ends at the same height, so the layer looks cut off flat, like a slice of
     cake.
@@ -502,6 +502,7 @@ What it can do:
     2.5 km, and tops round off instead of ending in a flat cut.
   - Flat decks, and the clouds above them, keep their flat tops.
   - It shapes the clouds where the sim builds them, so their shadows match.
+  - `C37 = 1` keeps only the rounded tops, and `C37 = 0` gives the sim's own.
 - **METAR anchoring** (`C20`, `C21`, live weather). Near weather stations, the
   sim's clouds are pulled toward the layers the METARs report:
   - **What follows the report:** the cover (FEW, SCT, BKN, OVC), the base
@@ -795,6 +796,7 @@ ones you're most likely to touch:
 | `C9` | glory strength (0 = off) |
 | `C12` | darkness of your aircraft's shadow on the clouds (0 = off) |
 | `C36` | sun-facing cloud sides (0 = off, up to 1); best with `C6`, the powder effect, at 0 |
+| `C37` | varied cloud tops: 2 = by rising air (default), 1 = rounded tops only, 0 = the sim's |
 | `C16`, `C17` | cloud thickness (0 = the sim's) and how solid the bases are |
 | `C33`, `C34` | visibility inside clouds, around your aircraft (m; 0 = the sim's), and its structure |
 | `C19` | thickness of high, icy clouds (cirrus) |

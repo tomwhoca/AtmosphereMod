@@ -13,7 +13,7 @@ export const WHATS_NEW = {
   items: [
     ["Varied cloud tops",
       "Air doesn't rise the same everywhere, so clouds in one layer no longer all end at the same height: "
-      + "where the air rises more, they grow taller. This is always on."],
+      + "where the air rises more, they grow taller. On by default (C37 in tunables.ini)."],
     ["Sun-facing cloud sides",
       "A new slider in the Cloud lighting tab, off by default: light on the sides of clouds that face the "
       + "sun, as real, thick cloud reflects it. If you turn it on, set Powder effect to 0 %."],

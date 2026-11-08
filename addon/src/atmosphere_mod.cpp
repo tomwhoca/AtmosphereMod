@@ -394,8 +394,9 @@ std::array<float, kCloudTunableCount> g_effective_cloud_tunables = {};  // pushe
 std::atomic<bool> g_storms_off{true};
 std::atomic<bool> g_cloud_tilt_view{false};  // T17 > 0 (developers): DebugCapture bit 14, patch_dxil.py DEBUG_CLOUD_TILT
 std::atomic<float> g_cloud_plane_light{0.0f};  // C36 (0..1, the app's Sun-facing cloud sides): pushed as C35's slot, patch_dxil.py PLANE_*
-// Cloud tops, always: gentle (DebugCapture bit 15) with rising air at full strength (C30's slot -1), patch_dxil.py
-// TOP_*. experiment/cloud-detail has them as C37 and C38, with Ctrl+Shift+F7.
+// Varied cloud tops, C37 (tunables.ini only): 0 MSFS's, 1 gentle tops (DebugCapture bit 15), 2 also rising air at full
+// strength (C30's slot -1), the default; patch_dxil.py TOP_*. (experiment/cloud-detail: more states, C38, Ctrl+Shift+F7)
+std::atomic<int> g_cloud_tops{2};
 std::atomic<bool> g_fog_tint{false};  // C35 > 0: DebugCapture bit 13 on graphics draws
 std::atomic<bool> g_forward_fog_off{false};  // C35 < 0: no fog on the forward pass (bits 10-12 left 0)
 constexpr float kFallbackFreezingLevel = 3000.0f;  // m, R4 = 0 before the first METAR
@@ -640,11 +641,11 @@ fs::path presets_dir()
     return g_data_dir / "presets";
 }
 
-// The tunables the add-on reads: T0..T16 (T14..T16 its own), R0..R13, C0..C36 (C36 its own).
+// The tunables the add-on reads: T0..T16 (T14..T16 its own), R0..R13, C0..C37 (C36, C37 its own).
 bool known_tunable(char prefix, unsigned index)
 {
     return (prefix == 'T' && index < kTunableCount + 3) || (prefix == 'R' && index < kTunableCount) ||
-           (prefix == 'C' && index < kCloudTunableCount + 1);
+           (prefix == 'C' && index < kCloudTunableCount + 2);
 }
 
 // tunables.ini: lines of "<prefix><index> = <value>", T for the atmosphere,
@@ -1071,6 +1072,7 @@ void reload(device *dev)
     weather::set_haze_strength(load_tunable('T', 16, 1.0f));
     g_cloud_tilt_view.store(load_tunable('T', 17, 0.0f) > 0.0f, std::memory_order_relaxed);
     g_cloud_plane_light.store(std::clamp(load_tunable('C', 36, 0.0f), 0.0f, 1.0f), std::memory_order_relaxed);
+    g_cloud_tops.store(std::clamp(int(load_tunable('C', 37, 2.0f)), 0, 2), std::memory_order_relaxed);
     struct Job
     {
         uint64_t handle;
@@ -1389,7 +1391,8 @@ void push_mod_args(command_list *cmd_list, const TrackedPipeline &info, const st
         p.debug_capture |= 256;
     if (g_cloud_tilt_view.load(std::memory_order_relaxed))
         p.debug_capture |= 1u << 14;
-    p.debug_capture |= 1u << 15;  // gentle tops
+    if (g_cloud_tops.load(std::memory_order_relaxed) > 0)
+        p.debug_capture |= 1u << 15;  // gentle tops
     // bit 5: MSFS's TLAS is bound (t0 space50): ch_deferred_shadows traces the
     // aircraft into the shadow window, for Raytraced Shadows
     const uint64_t tlas = g_tlas_va.load(std::memory_order_relaxed);
@@ -2838,7 +2841,7 @@ void update_effective_tunables()
     cloud[35] = g_cloud_plane_light.load(std::memory_order_relaxed);  // (C35 itself goes no further; no cloud shader read its slot)
     // Rising air goes to the generator as C30's slot < 0: the render shaders read max(C30, 0). C30 > 0 (finer
     // billows, tunables.ini only) wins.
-    if (!(cloud[30] > 0.0f))
+    if (!(cloud[30] > 0.0f) && g_cloud_tops.load(std::memory_order_relaxed) == 2)
         cloud[30] = -1.0f;
 
     const std::unique_lock lock(g_mutex);
@@ -3132,6 +3135,7 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE re
     weather::set_haze_strength(load_tunable('T', 16, 1.0f));
     g_cloud_tilt_view.store(load_tunable('T', 17, 0.0f) > 0.0f, std::memory_order_relaxed);
     g_cloud_plane_light.store(std::clamp(load_tunable('C', 36, 0.0f), 0.0f, 1.0f), std::memory_order_relaxed);
+    g_cloud_tops.store(std::clamp(int(load_tunable('C', 37, 2.0f)), 0, 2), std::memory_order_relaxed);
     g_effective_tunables = g_tunables;
     g_radar_tunables = load_tunables('R');
     g_cloud_tunables = load_tunables<kCloudTunableCount>('C');
