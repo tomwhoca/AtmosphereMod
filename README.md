@@ -680,6 +680,11 @@ can't break the sim.
 
 ### With OptiShade
 
+AtmosphereMod can also be downloaded on OptiShade's Components page. It
+fetches the release from this repository's
+[releases](https://github.com/tomwhoca/AtmosphereMod/releases), so it's the
+same installer: run `Install AtmosphereMod.cmd` as usual, also for each update.
+
 [OptiShade](https://github.com/GamingWithGravy/OptiShade) brings its own
 ReShade: a `ReShade64.dll` that OptiShade's own `dxgi.dll` or `winmm.dll`
 loads. The installer accepts that ReShade too. **Users have reported it
