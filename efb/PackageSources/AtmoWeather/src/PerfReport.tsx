@@ -32,7 +32,7 @@ export interface AddonReport {
   system?: {
     pc: { gpu: string; gpuVendor: string; vramGB: number; driver: string; cpu: string; threads: number; ramGB: number;
       windows: string };
-    sim: { store: string; output: string; cfg: Record<string, string>; packages: string[] };
+    sim: { store: string; version?: string; output: string; cfg: Record<string, string>; packages: string[] };
     reshade: { loader: string; version: string; effectsOn: number; addons: string[]; registerSpace: number };
   };
 }
@@ -162,6 +162,7 @@ export function reportFields(report: AddonReport, ctx: Context, answers: Answers
     const quality = parseInt(s.clouds, 10);
     Object.assign(f, {
       store: sim.store,
+      simVersion: sim.version ?? "",
       output: sim.output,
       antialiasing: [s.aa, mode].filter((x) => x !== "").join(" "),
       frameGeneration: s.frameGen === "" ? "" : /^(NONE|OFF|0)$/i.test(s.frameGen) ? "off"
@@ -207,7 +208,8 @@ export function detailsText(report: AddonReport, ctx: Context, answers: Answers)
     lines.push(`CPU: ${pc.cpu}, ${pc.threads} threads; ${pc.ramGB} GB RAM; ${pc.windows}`);
   }
   if (sim) {
-    lines.push(`Sim: ${sim.store || "unknown"}, picture ${sim.output}${answers.vr ? ", in VR" : ""}`);
+    lines.push(`Sim: ${sim.store || "unknown"}${sim.version ? ` ${sim.version}` : ""}, picture ${sim.output}`
+      + `${answers.vr ? ", in VR" : ""}`);
     lines.push(`Sim settings: ${Object.entries(sim.cfg).map(([k, v]) => `${k.replace(/^Video\./, "")} ${v}`).join("; ")}`);
     if (sim.packages.length > 0) {
       lines.push(`Community: ${sim.packages.join(", ")}`);

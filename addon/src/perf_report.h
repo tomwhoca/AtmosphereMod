@@ -107,6 +107,15 @@ private:
 // with dots, values with their quotes removed).
 std::map<std::string, std::string> parse_usercfg(const std::string &text);
 
+// The Version of the <Identity> in a MicrosoftGame.Config ("1.9.24.0"), or "".
+std::string game_config_version(const std::string &text);
+
+// The sim's version as its main menu shows it ("1.9.24.0"), from inside the
+// sim: the MS Store package's version, else the exe's version resource, else
+// the MicrosoftGame.Config next to the exe (the GDK's; also in the Steam
+// version). "" if none of them has one.
+std::string sim_version();
+
 // The PC and the sim's settings, as the "system" and "sim" objects of the
 // report's JSON. Present thread (once per measurement): `native_device` is the
 // sim's ID3D12Device, `reshade_module` the ReShade that loaded the add-on,

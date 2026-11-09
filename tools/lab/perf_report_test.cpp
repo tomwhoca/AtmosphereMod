@@ -132,6 +132,20 @@ int main()
         check(get("InstalledPackagesPath") == "D:\\MSFS 2024", "back at the top level after the sections");
     }
     {
+        // MicrosoftGame.Config's <Identity> (as in the MS Store version's, 9 November 2026)
+        check(perf::game_config_version(
+                  "<?xml version=\"1.0\" encoding=\"utf-8\"?>\r\n<Game configVersion=\"1\">\r\n  <Identity "
+                  "Name=\"Microsoft.Limitless\" Publisher=\"CN=Microsoft Corporation, O=Microsoft Corporation\" "
+                  "Version=\"1.9.24.0\" />\r\n</Game>") == "1.9.24.0",
+              "the sim's version from MicrosoftGame.Config");
+        check(perf::game_config_version("<Game><Identity Name=\"x\" /><Other Version=\"1.0\" /></Game>").empty(),
+              "a Version outside <Identity> doesn't count");
+        check(perf::game_config_version("<Identity Version=\"1.9<script>\" />").empty() &&
+                  perf::game_config_version("").empty(),
+              "only digits and dots");
+        std::printf("     sim_version() in this test program: \"%s\"\n", perf::sim_version().c_str());
+    }
+    {
         // This PC, as a report would have it (a device on the default adapter, as the sim's)
         ID3D12Device *device = nullptr;
         D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_12_0, __uuidof(ID3D12Device), reinterpret_cast<void **>(&device));

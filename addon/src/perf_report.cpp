@@ -3,6 +3,7 @@
 #include "perf_report.h"
 
 #include <windows.h>
+#include <appmodel.h>
 #include <d3d12.h>
 #include <dxgi1_6.h>
 #include <psapi.h>
@@ -442,6 +443,46 @@ std::map<std::string, std::string> parse_usercfg(const std::string &text)
     return out;
 }
 
+std::string game_config_version(const std::string &text)
+{
+    const size_t identity = text.find("<Identity");
+    if (identity == std::string::npos)
+        return {};
+    const size_t end = text.find('>', identity);
+    const size_t key = text.find("Version=\"", identity);
+    if (key == std::string::npos || (end != std::string::npos && key > end))
+        return {};
+    const size_t start = key + 9;
+    const size_t close = text.find('"', start);
+    if (close == std::string::npos)
+        return {};
+    const std::string version = text.substr(start, close - start);
+    const bool plain = !version.empty() && version.size() <= 32 &&
+                       std::all_of(version.begin(), version.end(), [](char c) { return c == '.' || (c >= '0' && c <= '9'); });
+    return plain ? version : std::string();
+}
+
+std::string sim_version()
+{
+    UINT32 length = 0;
+    if (GetCurrentPackageId(&length, nullptr) == ERROR_INSUFFICIENT_BUFFER && length > 0)
+    {
+        std::vector<BYTE> buffer(length);
+        if (GetCurrentPackageId(&length, buffer.data()) == ERROR_SUCCESS)
+        {
+            const PACKAGE_VERSION &v = reinterpret_cast<const PACKAGE_ID *>(buffer.data())->version;
+            return std::to_string(v.Major) + "." + std::to_string(v.Minor) + "." + std::to_string(v.Build) + "." +
+                   std::to_string(v.Revision);
+        }
+    }
+    const std::wstring exe = module_path(nullptr);
+    if (std::string v = file_version(exe); !v.empty() && v != "0.0.0.0")
+        return v;
+    std::ifstream file(fs::path(exe).parent_path() / L"MicrosoftGame.Config", std::ios::binary);
+    return file ? game_config_version(std::string(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()))
+                : std::string();
+}
+
 std::string system_json(uint64_t native_device, void *reshade_module, uint32_t output_w, uint32_t output_h,
                         int effects_on, uint32_t register_space)
 {
@@ -489,7 +530,8 @@ std::string system_json(uint64_t native_device, void *reshade_module, uint32_t o
            ",\"threads\":" + std::to_string(GetActiveProcessorCount(ALL_PROCESSOR_GROUPS)) +
            ",\"ramGB\":" + std::to_string(int(std::lround(double(ram_kb) / (1024.0 * 1024.0)))) +
            ",\"windows\":" + json_quote(windows_version()) + "},\"sim\":{\"store\":" +
-           json_quote(store ? "Microsoft Store" : steam ? "Steam" : "") + ",\"output\":" +
+           json_quote(store ? "Microsoft Store" : steam ? "Steam" : "") + ",\"version\":" + json_quote(sim_version()) +
+           ",\"output\":" +
            json_quote(std::to_string(output_w) + "x" + std::to_string(output_h)) + ",\"cfg\":" + sim_cfg +
            ",\"packages\":" + list_json(community_packages(packages != cfg.end() ? packages->second : "")) +
            "},\"reshade\":{\"loader\":" + json_quote(loader) + ",\"version\":" + json_quote(file_version(reshade.wstring())) +

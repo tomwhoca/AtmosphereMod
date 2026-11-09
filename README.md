@@ -786,7 +786,8 @@ which systems it runs well on and which it doesn't:
    again while the add-on times the frames. Ctrl+Shift+F9, or the app's own
    switch, stops it; afterwards the mod is as it was.
 3. The app shows the result and everything that would be sent: the graphics
-   card, driver, CPU, memory and Windows version, the sim's own graphics
+   card, driver, CPU, memory and Windows version, the sim's version (MS Store
+   or Steam, and its version number, such as 1.9.24.0), its own graphics
    settings (from its `UserCfg.opt`: anti-aliasing and upscaling, frame
    generation, render scaling, cloud quality, ray-traced shadows), how ReShade
    is loaded and which other add-ons and effects run, the mod's settings that

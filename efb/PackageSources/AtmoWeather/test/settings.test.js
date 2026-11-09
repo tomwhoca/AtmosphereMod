@@ -235,7 +235,7 @@ check(model.value("T3").get() === 4 && model.effectiveValue("T3").get() === 7.5,
   const system = {
     pc: { gpu: "NVIDIA GeForce RTX 5080", gpuVendor: "NVIDIA", vramGB: 15.6, driver: "621.14",
       cpu: "AMD Ryzen 9 7900X3D 12-Core Processor", threads: 24, ramGB: 64, windows: "Windows 11 (build 26200)" },
-    sim: { store: "Microsoft Store", output: "3840x2160", packages: ["tritrisim-gfx"], cfg: {
+    sim: { store: "Microsoft Store", version: "1.9.24.0", output: "3840x2160", packages: ["tritrisim-gfx"], cfg: {
       "Video.AntiAliasing": "DLSS", "Video.DLSSMode": "AUTO", "Video.FrameGeneration": "DLSSG",
       "Video.NBFramesToGenerate": "2", "Video.PrimaryScaling": "1.000000", "Video.VSync": "0",
       "Video.AntiAliasingVR": "TAA", "Video.FrameGenerationVR": "NONE", "Video.PrimaryScalingVR": "0.800000",
@@ -258,7 +258,7 @@ check(model.value("T3").get() === 4 && model.effectiveValue("T3").get() === 7.5,
         "report: the measurement, as numbers");
   check(f.gpu === "NVIDIA GeForce RTX 5080" && f.vramGB === 15.6 && f.driver === "621.14" && f.cpu.startsWith("AMD Ryzen 9")
         && f.threads === 24 && f.ramGB === 64 && f.windows === "Windows 11 (build 26200)", "report: the PC");
-  check(f.store === "Microsoft Store" && f.output === "3840x2160" && f.antialiasing === "DLSS AUTO"
+  check(f.store === "Microsoft Store" && f.simVersion === "1.9.24.0" && f.output === "3840x2160" && f.antialiasing === "DLSS AUTO"
         && f.frameGeneration === "DLSSG x2" && f.renderScaling === 100 && f.vsync === "off" && f.preset === "Custom"
         && f.cloudQuality === "Ultra" && f.rtShadows === "on", `report: the sim's settings (${JSON.stringify(f)})`);
   check(f.reshade === "ReShade 6.8.0.0 (dxgi.dll)" && f.reshadeEffects === 2
@@ -319,7 +319,8 @@ check(model.value("T3").get() === 4 && model.effectiveValue("T3").get() === 7.5,
   const col = (label, n = 1) => gs.rows[n][head.indexOf(label)];
   check(col("FPS with the mod") === 61.2 && col("FPS without") === 80.5 && col("Change with the mod (%)") === -24
         && col("GPU") === "NVIDIA GeForce RTX 5080" && col("VR") === "no" && col("Mod settings") === "C16 = 2 (0.5)"
-        && col("Received (UTC)") === "2026-11-09 12:00:00" && col("Render scaling (%)") === 100,
+        && col("Received (UTC)") === "2026-11-09 12:00:00" && col("Render scaling (%)") === 100
+        && col("MSFS store") === "Microsoft Store" && col("MSFS version") === "1.9.24.0",
         `sheet: the row under its headers (${JSON.stringify(gs.rows[1])})`);
   check(col("Other fields") === "", `sheet: every key the app sends has its column (${col("Other fields")})`);
   check(gsPost("nonsense").ok === false
@@ -402,7 +403,9 @@ check(model.value("T3").get() === 4 && model.effectiveValue("T3").get() === 7.5,
   model.onReport(done);
   check(model.step.get() === "review" && model.weather.get() === "broken or overcast" && model.summary.get().includes("-24 %"),
         `model: the result to review (${model.summary.get()})`);
-  check(model.warning.get() === "" && model.details.get().includes("RTX 5080"), "model: no warning, the details shown");
+  check(model.warning.get() === "" && model.details.get().includes("RTX 5080")
+        && model.details.get().includes("Sim: Microsoft Store 1.9.24.0, picture 3840x2160"),
+        "model: no warning, the details shown (with the sim's version)");
   await model.send();
   check(model.step.get() === "review" && model.note.get() !== "" && posted.length === 0, "model: Send needs the impression");
   model.impression.set("too slow to use");
