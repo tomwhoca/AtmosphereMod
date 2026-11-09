@@ -3,9 +3,8 @@
 // finds the PC and the sim's settings; this shows all of it, asks for the
 // user's impression, and sends it when the user taps Send (nothing is sent
 // before): as JSON to a Google Apps Script web app that adds it to the mod's
-// performance sheet (tools/perf_report_sheet.gs). Not to the Jotform form
-// people fill in on the web: Jotform answers a post that doesn't come from
-// its own page in a browser with a captcha, which the sim can't show.
+// performance sheet (tools/perf_report_sheet.gs). This is the only way
+// reports reach me: there's no web form.
 //
 //   AtmosphereMod.Settings  app -> add-on  {measure: true} starts, {measure: false} stops
 //   AtmosphereMod.State     add-on -> app  {..., report: {phase, progress, result?, system?}}
@@ -18,8 +17,6 @@ import {
 /** The web app of tools/perf_report_sheet.gs (its deployment's /exec URL). */
 export const REPORT_URL =
   "https://script.google.com/macros/s/AKfycbx6rG_29Li6D5WJCxulXp8Ij1RXqy7qWbtUPwWPlwzhBoS5sM_UF55DsmQ9BrpwW1ju/exec";
-/** The same questions as a form on the web, for when sending from the sim fails. */
-export const FORM_URL = "https://form.jotform.com/263122374395054";
 
 /** What the add-on sends (perf_report.cpp state_json and system_json). */
 export interface AddonReport {
@@ -651,8 +648,8 @@ export class PerfReportView extends DisplayComponent<PerfReportViewProps> {
             </div>
           </div>
           <div class={{ "atmo-hidden": at("failed") }}>
-            <div class="atmo-news-text">It couldn't be sent from the sim. You can fill in the same form on the web
-              instead: {FORM_URL}</div>
+            <div class="atmo-news-text">It couldn't be sent (why is below). Try again in a moment: the
+              measurement is kept until you close this.</div>
             <div class="atmo-buttons">
               <TTButton key="Try again" type="secondary" callback={() => void model.send()} />
               <TTButton key="Close" type="secondary" callback={() => model.close()} />

@@ -802,8 +802,7 @@ The report goes to a Google Sheet I keep for these reports, through a small
 Google Apps Script ([tools/perf_report_sheet.gs](tools/perf_report_sheet.gs)).
 Google gets your IP address with it, as any website does, but the script
 can't see it and the sheet doesn't keep it. The report has no names or file
-paths. You can fill in the same questions in a browser instead, on the
-[performance form](https://form.jotform.com/263122374395054).
+paths.
 
 Every setting, including the ones the app doesn't show, is in `tunables.ini`,
 where each one is explained; edits there take effect with Ctrl+Shift+F10. The
