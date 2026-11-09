@@ -46,10 +46,26 @@ esbuild.buildSync({
   },
   logLevel: "error",
 });
+const outReport = path.join(os.tmpdir(), "atmo-perfreport-test.js");
+esbuild.buildSync({
+  entryPoints: [path.join(__dirname, "..", "src", "PerfReport.tsx")],
+  bundle: true,
+  platform: "node",
+  format: "cjs",
+  outfile: outReport,
+  jsxFactory: "FSComponent.buildComponent",
+  jsxFragment: "FSComponent.Fragment",
+  alias: {
+    "@microsoft/msfs-sdk": path.join(__dirname, "stubs", "msfs-sdk.js"),
+    "@efb/efb-api": path.join(__dirname, "stubs", "efb-api.js"),
+  },
+  logLevel: "error",
+});
 global.window = { setTimeout, clearTimeout };
 const { TABS, SettingsModel, PRESET_DEFAULT, presetChar, presetName, sameName, missingText } = require(out);
 const { DEFAULTS } = require(outDefaults);
 const { WHATS_NEW, WHATS_NEW_KEY, WhatsNewModel } = require(outNews);
+const perf = require(outReport);
 
 let failures = 0;
 function check(ok, what) {
@@ -213,9 +229,134 @@ check(model.value("T3").get() === 4 && model.effectiveValue("T3").get() === 7.5,
     check(labels.some((l) => l.startsWith(name)), `what's new: "${name}" is a setting's name in the app`);
   }
 
+  {
+  // performance report: the add-on's report (as perf_report_test printed it on the developer's PC) to the form
+  const system = {
+    pc: { gpu: "NVIDIA GeForce RTX 5080", gpuVendor: "NVIDIA", vramGB: 15.6, driver: "621.14",
+      cpu: "AMD Ryzen 9 7900X3D 12-Core Processor", threads: 24, ramGB: 64, windows: "Windows 11 (build 26200)" },
+    sim: { store: "Microsoft Store", output: "3840x2160", packages: ["tritrisim-gfx"], cfg: {
+      "Video.AntiAliasing": "DLSS", "Video.DLSSMode": "AUTO", "Video.FrameGeneration": "DLSSG",
+      "Video.NBFramesToGenerate": "2", "Video.PrimaryScaling": "1.000000", "Video.VSync": "0",
+      "Video.AntiAliasingVR": "TAA", "Video.FrameGenerationVR": "NONE", "Video.PrimaryScalingVR": "0.800000",
+      "Graphics.Preset": "Custom", "Graphics.VolumetricClouds.Quality": "3", "Graphics.RaytracedShadows.Enabled": "1",
+      "GraphicsVR.Preset": "VRMedium", "GraphicsVR.VolumetricClouds.Quality": "1",
+      "GraphicsVR.RaytracedShadows.Enabled": "0" } },
+    reshade: { loader: "dxgi.dll", version: "6.8.0.0", effectsOn: 2, addons: ["renodx-msfs2024.addon64", "other.addon64"],
+      registerSpace: 51 },
+  };
+  const result = { fpsOn: 61.24, fpsOff: 80.5, msOn: 16.3, msOff: 12.4, p99On: 21.04, p99Off: 15.5, fpsOn1: 61.0,
+    fpsOn2: 61.5, drift: 0.008, framesOn: 980, framesOff: 644 };
+  const done = { phase: "done", progress: 1, result, system };
+  const ctx = { version: "0.7.1", metar: "LIRF 090920Z 09005KT 9999 BKN040 15/12 Q1025 NOSIG", weather: "LIRF: haze",
+    altitudeFt: 5012.4, aglFt: 4890.2, changed: ["C16 = 2 (0.5)"], defaultPreset: false };
+  const answers = { vr: false, weather: "broken or overcast", impression: "noticeable but fine", stutters: "",
+    limitedBy: "GPU", comment: "", contact: "" };
+  const f = perf.formFields(done, ctx, answers);
+  check(f.q5_q5_textbox3 === "NVIDIA GeForce RTX 5080" && f.q15_gpuMemory === "16" && f.q16_gpuDriver === "621.14",
+        "report: the GPU, its memory and driver");
+  check(f.q4_q4_textbox2.startsWith("AMD Ryzen 9") && f.q6_q6_number4 === "64" && f.q17_windowsVersion === "Windows 11",
+        "report: the CPU, RAM and Windows");
+  check(f.q18_msfs2024 === "Microsoft Store / Xbox app" && f.q19_atmospheremodVersion === "0.7.1"
+        && f.q20_reshade === "ReShade with full add-on support", "report: the sim's store, the mod's version, ReShade");
+  check(JSON.stringify(f["q21_otherGraphics[]"]) === JSON.stringify(["other ReShade effects or presets", "RenoDX",
+        "TriTriSim GFX", "other"]) && f["q21_otherGraphics[other]"] === "ReShade add-ons: other.addon64",
+        "report: other graphics mods, from the effects, add-ons and Community packages");
+  check(f.q22_displayResolution === "3840x2160 (4K)" && f.q23_antialiasing === "DLSS" && f.q24_renderScaling === "100"
+        && f.q25_frameGeneration === "on" && f.q26_cloudQuality === "Ultra" && f.q27_raytracedShadows === "on",
+        "report: the sim's settings");
+  check(f.q13_q13_textbox11 === "preset Custom, DLSS AUTO, frame generation DLSSG x2",
+        `report: notable settings (${f.q13_q13_textbox11})`);
+  check(f.q9_q9_number7 === "61.2" && f.q10_q10_number8 === "80.5" && f.q34_overallHow === "noticeable but fine"
+        && f.q32_theSims === "GPU" && f.q33_stuttersWith === undefined, "report: the measurement and the answers");
+  check(f.q28_whereAnd === "LIRF, 5012 ft, 4890 ft above the ground" && f.q29_atmospheremodSettings === "my own settings",
+        "report: where, and the mod's settings");
+  check(f.formID === perf.FORM_ID && f.simple_spc === `${perf.FORM_ID}-${perf.FORM_ID}` && f.website === undefined,
+        "report: the form's id and spam check, the trap field left out");
+  check(f.q37_detailsFrom.includes("61.2 fps with the mod") && f.q37_detailsFrom.includes("C16 = 2 (0.5)")
+        && f.q37_detailsFrom.includes("register space 51") && !/[A-Z]:\\|Users/.test(f.q37_detailsFrom),
+        "report: the details have the measurement and settings, and no paths");
+  const vr = perf.formFields(done, ctx, { ...answers, vr: true });
+  check(vr.q22_displayResolution === "VR headset" && vr.q23_antialiasing === "TAA" && vr.q25_frameGeneration === "off"
+        && vr.q26_cloudQuality === "Medium" && vr.q27_raytracedShadows === "off" && vr.q24_renderScaling === "80",
+        "report: in VR, the sim's VR settings");
+  const odd = perf.formFields({ ...done, system: { ...system, sim: { ...system.sim, output: "1132x598",
+    cfg: { "Video.AntiAliasing": "DLSS", "Video.DLSSMode": "DLAA" } }, reshade: { ...system.reshade, loader: "ReShade64.dll",
+    effectsOn: 0, addons: [] } } }, ctx, answers);
+  check(odd.q22_displayResolution === "other" && odd["q22_displayResolution[other]"] === "1132x598"
+        && odd.q23_antialiasing === "DLAA" && odd.q20_reshade === "OptiShade" && odd.q26_cloudQuality === "don't know"
+        && JSON.stringify(odd["q21_otherGraphics[]"]) === JSON.stringify(["TriTriSim GFX"]),
+        "report: an odd window size, DLAA, OptiShade, no cloud setting");
+  const enc = perf.encodeForm({ a: "x y&z", "b[]": ["1", "2"] });
+  check(enc === "a=x+y%26z&b%5B%5D=1&b%5B%5D=2", `report: the form's encoding (${enc})`);
+  check(perf.weatherKind("KJFK 091051Z 18010KT 10SM FEW250 12/03 A3012") === "few or scattered clouds"
+        && perf.weatherKind("EGLL 091050Z 24012KT 9999 -RA BKN012 OVC020 10/08 Q1008") === "broken or overcast"
+        && perf.weatherKind("WMKK 090900Z 00000KT 8000 -TSRA FEW008 FEW017CB SCT028 27/25 Q1007") === "thunderstorms"
+        && perf.weatherKind("LEMD 091030Z 03005KT CAVOK 14/02 Q1027 NOSIG") === "clear"
+        && perf.weatherKind("EDDK 091050Z 09004KT 9999 FEW030 07/05 Q1019 TEMPO BKN012") === "few or scattered clouds",
+        "report: the weather from the METAR (TEMPO doesn't count)");
+  check(perf.station("METAR EDDK 091050Z 09004KT") === "EDDK" && perf.station("LIRF 090920Z") === "LIRF"
+        && perf.station("") === "", "report: the station from the METAR");
+
+  // the model: start, the add-on's phases, the review, sending
+  let t = 0;
+  const sent = [];
+  const posted = [];
+  let status = 200;
+  const model = new perf.PerfReportModel((d) => sent.push(d), () => ctx, async (url, body) => {
+    posted.push([url, body]);
+    return status;
+  }, () => t);
+  model.show();
+  model.start();
+  check(model.step.get() === "measuring" && JSON.stringify(sent.pop()) === '{"measure":true}', "model: Start asks the add-on");
+  model.onReport({ phase: "done", progress: 1, result, system });
+  check(model.step.get() === "measuring", "model: an earlier result doesn't count before the new measurement started");
+  model.onReport({ phase: "off", progress: 0.5 });
+  check(model.progress.get() === 0.5 && model.phase.get() === "off", "model: the add-on's progress");
+  model.onReport(done);
+  check(model.step.get() === "review" && model.weather.get() === "broken or overcast" && model.summary.get().includes("-24 %"),
+        `model: the result to review (${model.summary.get()})`);
+  check(model.warning.get() === "" && model.details.get().includes("RTX 5080"), "model: no warning, the details shown");
+  await model.send();
+  check(model.step.get() === "review" && model.note.get() !== "" && posted.length === 0, "model: Send needs the impression");
+  model.impression.set("too slow to use");
+  model.vr.set(true);
+  check(model.details.get().includes("in VR"), "model: the details follow the answers");
+  await model.send();
+  check(model.step.get() === "sent" && posted.length === 1 && posted[0][0] === perf.SUBMIT_URL
+        && posted[0][1].includes("q34_overallHow=too+slow+to+use") && posted[0][1].includes("q22_displayResolution=VR+headset"),
+        "model: Send posts the form");
+  status = 0;
+  model.show();
+  model.start();
+  model.onReport({ phase: "on", progress: 0.2 });
+  model.onReport({ ...done, result: { ...result, drift: 0.2 } });
+  check(model.warning.get().includes("20 %"), "model: a changing view is pointed out");
+  model.impression.set("noticeable but fine");
+  await model.send();
+  check(model.step.get() === "failed" && model.note.get().includes("no answer"), "model: a failed send says so");
+  model.show();
+  check(model.step.get() === "intro", "model: opened again after a send, it starts over");
+  model.start();
+  model.onReport({ phase: "settleOn", progress: 0.01 });
+  model.onReport({ phase: "stopped", progress: 0 });
+  check(model.step.get() === "intro" && model.note.get().startsWith("Stopped"), "model: stopped by the switch");
+  model.start();
+  model.close();
+  check(!model.open.get() && model.step.get() === "intro" && JSON.stringify(sent.pop()) === '{"measure":false}',
+        "model: closing during a measurement stops it");
+  model.show();
+  model.start();
+  t += 7000;
+  model.onReport(undefined);
+  check(model.step.get() === "intro" && model.note.get().includes("install the mod again"),
+        "model: an add-on without the report is pointed out");
+  }
+
   fs.rmSync(out, { force: true });
   fs.rmSync(outDefaults, { force: true });
   fs.rmSync(outNews, { force: true });
+  fs.rmSync(outReport, { force: true });
   console.log(failures ? "FAILED" : "all checks passed");
   process.exit(failures ? 1 : 0);
 })();

@@ -7,11 +7,12 @@
 //                                          {"reload":true} (as Ctrl+Shift+F10), {"savePreset":"name"},
 //                                          {"loadPreset":"name"} (+ "discard":true, "fill":"defaults"|"current"),
 //                                          {"deletePreset":"name"}, {"importPreset":true} (a file dialog:
-//                                          file_dialog.h)
+//                                          file_dialog.h), {"measure":true|false} (the performance
+//                                          report's measurement: perf_report.h)
 //   AtmosphereMod.State     add-on -> app  {"enabled":true,"T":[...],"C":[...],"TE":[...],"weather":"...",
 //                                          "version":"0.5.1","presets":["Default",...],"preset":"name",
 //                                          "presetSaved":true,"presetsMissing":{"name":["C34",...]},
-//                                          "presetNote":"..."}
+//                                          "presetNote":"...","report":{...}}
 //
 // T and C are tunables.ini's values, TE the atmosphere tunables the shaders
 // get (with the METAR's haze blended in by T13), enabled the Ctrl+Shift+F9
@@ -67,6 +68,7 @@ struct Requests
     bool discard = false;     // load_preset may replace settings no preset has (the user said so)
     Fill fill = Fill::none;  // load_preset: the settings it lacks
     bool import_preset = false;  // a file to choose and add as a preset
+    std::optional<bool> measure;  // the performance report: start (true) or stop (false) a measurement
 };
 
 // A message from the app (the weather feed's thread). Unreadable parts are

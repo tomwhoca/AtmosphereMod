@@ -4,7 +4,7 @@ project(AtmosphereMod VERSION 0.7.0 LANGUAGES CXX RC)
 
 configure_file(src/version.rc.in ${CMAKE_CURRENT_BINARY_DIR}/version.rc @ONLY)
 add_library(AtmosphereMod SHARED src/atmosphere_mod.cpp src/weather_feed.cpp src/settings_bridge.cpp
-            src/file_dialog.cpp ${CMAKE_CURRENT_BINARY_DIR}/version.rc)
+            src/file_dialog.cpp src/perf_report.cpp ${CMAKE_CURRENT_BINARY_DIR}/version.rc)
 
 # The weather feed is an in-process SimConnect client; the SDK's static library
 # keeps SimConnect.dll out of the sim's folder.
@@ -14,7 +14,8 @@ if(NOT EXISTS "${SIMCONNECT_DIR}/include/SimConnect.h")
 endif()
 target_include_directories(AtmosphereMod PRIVATE "${SIMCONNECT_DIR}/include")
 target_link_libraries(AtmosphereMod PRIVATE "${SIMCONNECT_DIR}/lib/static/SimConnect.lib" ws2_32 shlwapi
-                      ole32 shell32 uuid)  # (ole32, shell32, uuid: the preset import's file dialog)
+                      ole32 shell32 uuid  # (ole32, shell32, uuid: the preset import's file dialog)
+                      dxgi version)       # (the performance report: the GPU, ReShade's version)
 target_include_directories(AtmosphereMod PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/reshade/include)
 target_compile_features(AtmosphereMod PRIVATE cxx_std_20)
 target_compile_definitions(AtmosphereMod PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE

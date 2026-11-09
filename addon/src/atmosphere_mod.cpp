@@ -36,6 +36,7 @@
 #include "cloud_stations.h"
 #include "file_dialog.h"
 #include "ozone_climatology.h"
+#include "perf_report.h"
 #include "settings_bridge.h"
 #include "weather_feed.h"
 
@@ -2858,6 +2859,13 @@ settings::presets::Current g_preset_current;
 std::string g_presets_stamp;
 std::string g_preset_note;
 
+// The EFB app's performance report (perf_report.h). Present thread.
+perf::Measurement g_measurement;
+std::string g_report_system;            // perf::system_json, taken when the last measurement started
+bool g_report_asked = false;            // the app asked for one: the state carries the report
+std::optional<bool> g_measure_request;  // the app's last start (true) or stop (false), for on_present
+HMODULE g_reshade_module = nullptr;
+
 // A JSON string's content (quotes and backslashes escaped).
 std::string json_text(const std::string &text)
 {
@@ -2925,7 +2933,9 @@ std::string settings_state(bool pending)
            json_text(weather::summary()) + "\",\"version\":\"" ATMOSPHEREMOD_VERSION "\",\"presets\":" + presets +
            ",\"preset\":\"" + json_text(g_preset_current.name) + "\",\"presetSaved\":" +
            (g_preset_current.saved && !pending ? "true" : "false") + ",\"presetsMissing\":" + missing +
-           ",\"presetNote\":\"" + json_text(g_preset_note) + "\"}";
+           ",\"presetNote\":\"" + json_text(g_preset_note) + "\"" +
+           (g_report_asked ? ",\"report\":" + perf::state_json(g_measurement, perf::Clock::now(), g_report_system)
+                           : std::string()) + "}";
 }
 
 // The app's preset requests (settings_bridge.h presets): saved, loaded or deleted, in the event log;
@@ -3013,6 +3023,14 @@ bool sync_settings(bool reload_key, void *window)
     if (requests.reload)
         event(reshade::log::level::info, "reload asked for by the EFB app");
     const bool flush = reload_key || requests.reload;
+    if (requests.measure)
+        g_measure_request = requests.measure;
+    // (the user's own switching ends a measurement, and the switch stays as they set it)
+    if (requests.enabled && g_measurement.running())
+    {
+        g_measurement.stop();
+        event(reshade::log::level::info, "performance report: stopped (the mod switched in the EFB app)");
+    }
     if (requests.enabled && *requests.enabled != g_enabled)
     {
         g_enabled = *requests.enabled;
@@ -3050,12 +3068,57 @@ bool sync_settings(bool reload_key, void *window)
     }
     const bool loaded = preset && apply_preset_requests(requests);
     const bool imported = sync_import(requests.import_preset, window);
-    if (!requests.set.empty() || requests.enabled || preset || imported || now - last_publish >= 500ms)
+    if (!requests.set.empty() || requests.enabled || requests.measure || preset || imported ||
+        now - last_publish >= 500ms)
     {
         last_publish = now;
         settings::publish(settings_state(!unsaved.empty()));
     }
     return flush || loaded;
+}
+
+// The EFB app's performance report (perf_report.h): starts or stops a
+// measurement when the app asks, and switches the mod as it goes; afterwards
+// the switch is as it was, and the result is in the event log.
+void measure_performance(effect_runtime *runtime)
+{
+    const auto now = perf::Clock::now();
+    if (const std::optional<bool> want = std::exchange(g_measure_request, std::nullopt))
+    {
+        g_report_asked = true;
+        if (*want)
+        {
+            uint32_t width = 0, height = 0;
+            runtime->get_screenshot_width_and_height(&width, &height);
+            int effects = 0;
+            if (runtime->get_effects_state())
+                runtime->enumerate_techniques(nullptr, [&effects](effect_runtime *rt, effect_technique technique) {
+                    effects += rt->get_technique_state(technique) ? 1 : 0;
+                });
+            device *const dev = runtime->get_device();
+            g_report_system = perf::system_json(dev->get_api() == device_api::d3d12 ? dev->get_native() : 0,
+                                                g_reshade_module, width, height, effects, g_mod_space);
+            g_measurement.start(now, g_enabled);
+            event(reshade::log::level::info, "performance report: measuring (the mod on, off, on again)");
+        }
+        else if (const std::optional<bool> restore = g_measurement.stop())
+        {
+            g_enabled = *restore;
+            event(reshade::log::level::info, "performance report: stopped in the EFB app");
+        }
+    }
+    if (const std::optional<bool> want = g_measurement.frame(now))
+        g_enabled = *want;
+    if (const std::optional<bool> restore = g_measurement.take_restore())
+    {
+        g_enabled = *restore;
+        const perf::Result &r = g_measurement.result();
+        char buf[256];
+        snprintf(buf, sizeof(buf), "performance report: %.1f fps with the mod (%.1f and %.1f), %.1f without; 99 %% of "
+                 "frames under %.1f ms with, %.1f ms without", r.fps_on(), r.on1.fps(), r.on2.fps(), r.fps_off(),
+                 std::max(r.on1.ms_p99, r.on2.ms_p99), r.off.ms_p99);
+        event(reshade::log::level::info, buf);
+    }
 }
 
 void on_present(effect_runtime *runtime)
@@ -3075,12 +3138,18 @@ void on_present(effect_runtime *runtime)
     const bool modifiers = runtime->is_key_down(VK_CONTROL) && runtime->is_key_down(VK_SHIFT);
     if (modifiers && runtime->is_key_pressed(VK_F9))
     {
+        if (g_measurement.running())
+        {
+            g_measurement.stop();
+            event(reshade::log::level::info, "performance report: stopped (Ctrl+Shift+F9)");
+        }
         g_enabled = !g_enabled;
         event(reshade::log::level::info, g_enabled ? "replacements ON" : "replacements OFF (stock shaders)");
     }
     // (the EFB app's unsaved changes go to tunables.ini before the reload reads it)
     if (sync_settings(modifiers && runtime->is_key_pressed(VK_F10), runtime->get_hwnd()))
         reload(runtime->get_device());
+    measure_performance(runtime);
     if ((modifiers && runtime->is_key_pressed(VK_F11)) || g_auto_capture_due.exchange(false))
         request_capture(frame);
     if (modifiers && runtime->is_key_pressed(VK_F12))
@@ -3121,6 +3190,7 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE re
         return false;
 
     g_data_dir = resolve_data_dir(addon_module);
+    g_reshade_module = reshade_module;
     reshade::get_config_value(nullptr, "ATMOSPHEREMOD", "InjectRootSignature", g_inject);
     reshade::get_config_value(nullptr, "ATMOSPHEREMOD", "InjectGraphicsRootSignature", g_inject_graphics);
     reshade::get_config_value(nullptr, "ATMOSPHEREMOD", "RegisterSpace", g_mod_space);

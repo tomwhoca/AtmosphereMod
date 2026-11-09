@@ -333,6 +333,8 @@ interface State {
   /** Per preset, the settings Default has and it doesn't (only presets that lack some). */
   presetsMissing?: Record<string, string[]>;
   presetNote?: string;
+  /** The performance report (PerfReport.tsx), once one was asked for (from 0.7.1 on). */
+  report?: unknown;
 }
 
 /** Each setting the app shows, by key: its name, and its place (the tabs' order). */
@@ -406,6 +408,8 @@ export class SettingsModel {
   public readonly presetMissing = Subject.create<Readonly<Record<string, readonly string[]>>>({});
   /** Why the add-on didn't do the last preset request, or what an import did ("" if there's nothing to say). */
   public readonly presetNote = Subject.create("");
+  /** Each state's performance report (undefined while none was asked for), for PerfReport.tsx. */
+  public onReport?: (report: unknown) => void;
   private readonly raw = new Map<string, Subject<number>>();
   private readonly effective = new Map<string, Subject<number>>();
   private readonly editedAt = new Map<string, number>();
@@ -432,6 +436,12 @@ export class SettingsModel {
       this.effective.set(key, s);
     }
     return s;
+  }
+
+  /** The settings that differ from the shipping defaults, as "C16 = 2 (0.5)" (the default in brackets). */
+  public changedFromDefaults(): string[] {
+    return Object.keys(DEFAULTS).filter((k) => this.raw.has(k) && Math.abs(this.raw.get(k)!.get() - DEFAULTS[k]) > 1e-6)
+      .map((k) => `${k} = ${+this.raw.get(k)!.get().toPrecision(6)} (${DEFAULTS[k]})`);
   }
 
   public requestState(): void {
@@ -474,6 +484,7 @@ export class SettingsModel {
       this.presetMissing.set(missing);
     }
     this.presetNote.set(state.presetNote ?? "");
+    this.onReport?.(state.report);
     this.connected.set(true);
   }
 

@@ -66,6 +66,9 @@ void on_message(const std::string &json)
         in.fill = m[1] == "defaults" ? Fill::defaults : Fill::current;
     static const std::regex import_re("\"importPreset\"\\s*:\\s*true");
     in.import_preset = std::regex_search(json, import_re);
+    static const std::regex measure_re("\"measure\"\\s*:\\s*(true|false)");
+    if (std::regex_search(json, m, measure_re))
+        in.measure = m[1] == "true";
 
     const std::lock_guard lock(g_mutex);
     g_requests.set.insert(g_requests.set.end(), in.set.begin(), in.set.end());
@@ -83,6 +86,8 @@ void on_message(const std::string &json)
         g_requests.fill = in.fill;
     }
     g_requests.import_preset = g_requests.import_preset || in.import_preset;
+    if (in.measure)
+        g_requests.measure = in.measure;
     g_asked = g_asked || asked;
 }
 

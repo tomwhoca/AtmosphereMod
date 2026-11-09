@@ -11,9 +11,9 @@
 //   AtmosphereMod.Status   app -> SimConnect  {state, detail}
 //   AtmosphereMod.Request  SimConnect -> app  {} (aircraft position), {ident} or {lat, lon}
 //   AtmosphereMod.Settings app -> add-on      {get}, {set: {T3: 4.5, ...}}, {enabled}, {reload}, {savePreset},
-//                                             {loadPreset, discard}, {deletePreset}
+//                                             {loadPreset, discard}, {deletePreset}, {measure} (PerfReport.tsx)
 //   AtmosphereMod.State    add-on -> app      {enabled, T, C, TE, weather, version, presets, preset, presetSaved,
-//                                             presetNote} (addon/src/settings_bridge.h)
+//                                             presetNote, report} (addon/src/settings_bridge.h)
 
 /// <reference types="@microsoft/msfs-types/js/simvar" />
 
@@ -26,6 +26,7 @@ import {
   AppViewProps,
   Efb,
   RequiredProps,
+  TTButton,
   TVNode,
 } from "@efb/efb-api";
 import {
@@ -39,7 +40,8 @@ import {
   VNode,
 } from "@microsoft/msfs-sdk";
 
-import { EVENT_SETTINGS, EVENT_STATE, SETTINGS_CSS, SettingsModel, SettingsView } from "./Settings";
+import { AddonReport, PERF_REPORT_CSS, PerfReportModel, PerfReportView } from "./PerfReport";
+import { EVENT_SETTINGS, EVENT_STATE, PRESET_DEFAULT, SETTINGS_CSS, SettingsModel, SettingsView } from "./Settings";
 import { WHATS_NEW_CSS, WhatsNewModel, WhatsNewView } from "./WhatsNew";
 
 declare const BASE_URL: string;
@@ -171,6 +173,16 @@ class WeatherBridge {
 const bridge = new WeatherBridge();
 const settings = new SettingsModel((data) => bridge.send(EVENT_SETTINGS, data));
 const news = new WhatsNewModel();
+const report = new PerfReportModel((data) => bridge.send(EVENT_SETTINGS, data), () => ({
+  version: VERSION,
+  metar: bridge.airport.get(),
+  weather: settings.weather.get(),
+  altitudeFt: SimVar.GetSimVarValue("PLANE ALTITUDE", "feet") as number,
+  aglFt: SimVar.GetSimVarValue("PLANE ALT ABOVE GROUND", "feet") as number,
+  changed: settings.changedFromDefaults(),
+  defaultPreset: settings.preset.get() === PRESET_DEFAULT && settings.presetSaved.get(),
+}));
+settings.onReport = (r) => report.onReport(r as AddonReport | undefined);
 bridge.listen(EVENT_STATE, (args) => settings.onState(args), () => settings.requestState());
 setInterval(() => {
   if (!settings.connected.get()) {
@@ -180,7 +192,7 @@ setInterval(() => {
 
 const style = document.createElement("style");
 // (the link's status and the version, at the end of the page)
-style.textContent = SETTINGS_CSS + WHATS_NEW_CSS + `
+style.textContent = SETTINGS_CSS + WHATS_NEW_CSS + PERF_REPORT_CSS + `
 .atmo-link { padding-top: 24px; opacity: 0.6; font-size: 21px; }
 `;
 document.head.appendChild(style);
@@ -236,12 +248,17 @@ class AtmoWeatherView extends AppView<RequiredProps<AppViewProps, "bus">> {
     return (
       <div ref={this.root} class={{ "atmo-app": true, "atmo-narrow": this.narrow }}>
         <SettingsView model={settings} metar={bridge.airport}>
+          <div class="atmo-buttons">
+            <TTButton key="Performance report" type="secondary" disabled={settings.connected.map((c) => !c)}
+                      callback={() => report.show()} />
+          </div>
           <div class="atmo-link">
             <div>METAR link: {bridge.status}</div>
             <div>{versionLine}</div>
           </div>
         </SettingsView>
         <WhatsNewView model={news} />
+        <PerfReportView model={report} />
       </div>
     );
   }

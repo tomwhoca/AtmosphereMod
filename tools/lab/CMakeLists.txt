@@ -59,3 +59,12 @@ target_compile_definitions(metar_parse_test PRIVATE NOMINMAX)
 target_compile_options(metar_parse_test PRIVATE /W4 /permissive- /utf-8)
 target_include_directories(metar_parse_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../addon/src)
 set_target_properties(metar_parse_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/../../build/lab)
+
+# The performance report's measurement and the sim's settings file (tools/test_perf_report.py).
+add_executable(perf_report_test perf_report_test.cpp ../../addon/src/perf_report.cpp)
+target_compile_features(perf_report_test PRIVATE cxx_std_20)
+target_compile_definitions(perf_report_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
+target_compile_options(perf_report_test PRIVATE /W4 /permissive- /utf-8)
+target_include_directories(perf_report_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../addon/src)
+target_link_libraries(perf_report_test PRIVATE d3d12 dxgi version)
+set_target_properties(perf_report_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/../../build/lab)

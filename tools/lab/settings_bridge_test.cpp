@@ -273,6 +273,14 @@ void presets_checks()
     check(settings::take().fill == settings::Fill::none, "requests: an unknown fill: none");
     settings::on_message(R"({"importPreset":true})");
     check(settings::take().import_preset && !settings::take().import_preset, "requests: an import, taken once");
+    settings::on_message(R"({"measure":true})");
+    r = settings::take();
+    check(r.measure == std::optional<bool>(true) && !settings::take().measure, "requests: a measurement, taken once");
+    settings::on_message(R"({"measure":true})");
+    settings::on_message(R"({"measure":false})");
+    check(settings::take().measure == std::optional<bool>(false), "requests: stopping a measurement, the last one counts");
+    settings::on_message(R"({"get":true})");
+    check(!settings::take().measure, "requests: no measurement unless asked");
     std::filesystem::remove_all(dir);
 }
 } // namespace

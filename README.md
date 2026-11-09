@@ -615,7 +615,9 @@ So far the mod has been tested on one PC only:
 
 Nothing is known yet about other systems. If you try it, please report how it
 went, whether it works or not, on the
-[issues page](https://github.com/tomwhoca/AtmosphereMod/issues). Include your
+[issues page](https://github.com/tomwhoca/AtmosphereMod/issues). For how fast
+it runs, the EFB app's [performance report](#settings) measures it and sends
+the result with your system's details. Include your
 graphics card and driver version, Windows version, and whether you run the MS
 Store or Steam version. Systems that have been reported will be added here.
 
@@ -774,6 +776,28 @@ them again:
   in the same format as `tunables.ini`. Installing again keeps your own presets
   and `tunables.ini`, and adds a new version's new settings to them.
 
+**Performance report.** The button at the end of the app's page measures what
+the mod costs on your PC and, if you want, sends me the result, so I can see
+which systems it runs well on and which it doesn't:
+1. Find a view with clouds (most of the mod's cost is in them) and hold it
+   still: pause the sim or slew. Switch off V-Sync and frame-rate limits for
+   now if you can: with a cap, both results come out the same.
+2. Tap **Start**. For about 36 seconds the mod switches itself on, off and on
+   again while the add-on times the frames. Ctrl+Shift+F9, or the app's own
+   switch, stops it; afterwards the mod is as it was.
+3. The app shows the result and everything that would be sent: the graphics
+   card, driver, CPU, memory and Windows version, the sim's own graphics
+   settings (from its `UserCfg.opt`: anti-aliasing and upscaling, frame
+   generation, render scaling, cloud quality, ray-traced shadows), how ReShade
+   is loaded and which other add-ons and effects run, the mod's settings that
+   differ from the defaults, the METAR and your altitude. Add how the mod runs
+   for you, and tap **Send**. Nothing is sent before.
+
+The report goes to the mod's
+[performance form](https://form.jotform.com/263122374395054) on Jotform, which
+also gets your IP address, as any website does. It has no names or file
+paths. You can fill in the same form in a browser instead.
+
 Every setting, including the ones the app doesn't show, is in `tunables.ini`,
 where each one is explained; edits there take effect with Ctrl+Shift+F10. The
 ones you're most likely to touch:
@@ -884,8 +908,9 @@ Open an issue on the
   drawn like cumulus.
 - After a sim update, parts of the mod fall back to stock until it is
   re-patched.
-- DirectX 12 only. The performance cost hasn't been measured on other systems
-  yet.
+- DirectX 12 only. The performance cost hasn't been measured on many other
+  systems yet: the EFB app's [performance report](#settings) measures it on
+  yours.
 - Inside a dense cloud, the aircraft's outline (a wing's edge against the
   fogged background) can flicker by a pixel or two: MSFS draws its clouds at
   a reduced resolution and rebuilds the full picture over several frames,
