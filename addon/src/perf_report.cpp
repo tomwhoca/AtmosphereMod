@@ -322,17 +322,15 @@ double Result::gpu_on() const
     return n > 0 ? (on1.gpu_ms_sum + on2.gpu_ms_sum) / n : 0.0;
 }
 
-double busy_ms(std::vector<std::pair<uint64_t, uint64_t>> spans, uint64_t frequency)
+double busy_ms(std::vector<std::pair<double, double>> spans_ms)
 {
-    if (spans.empty() || frequency == 0)
+    if (spans_ms.empty())
         return -1.0;
-    std::sort(spans.begin(), spans.end());
-    if (spans.back().first - spans.front().first > frequency)
-        return -1.0;
-    uint64_t total = 0, start = spans.front().first, end = spans.front().second;
-    for (const auto &[b, e] : spans)
+    std::sort(spans_ms.begin(), spans_ms.end());
+    double total = 0.0, start = spans_ms.front().first, end = spans_ms.front().second;
+    for (const auto &[b, e] : spans_ms)
     {
-        if (b == 0 || e < b || e - b > frequency)
+        if (!(e >= b) || e - start > 1000.0)
             return -1.0;
         if (b > end)
         {
@@ -343,8 +341,7 @@ double busy_ms(std::vector<std::pair<uint64_t, uint64_t>> spans, uint64_t freque
         else
             end = std::max(end, e);
     }
-    total += end - start;
-    return double(total) * 1000.0 / double(frequency);
+    return total + (end - start);
 }
 
 void Measurement::gpu_frame(Phase measured_in, double ms)

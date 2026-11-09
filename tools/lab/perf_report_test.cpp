@@ -132,20 +132,18 @@ int main()
         check(get("InstalledPackagesPath") == "D:\\MSFS 2024", "back at the top level after the sections");
     }
     {
-        // The GPU's working time from command lists' (start, end) timestamps, 1 MHz: 1 tick = 1 us
-        using Spans = std::vector<std::pair<uint64_t, uint64_t>>;
-        check(close_to(perf::busy_ms(Spans{{1000, 3000}, {5000, 6000}}, 1000000), 3.0, 1e-9),
+        // The GPU's working time from command lists' (start, end) times, in ms on the CPU's clock
+        using Spans = std::vector<std::pair<double, double>>;
+        check(close_to(perf::busy_ms(Spans{{1.0, 3.0}, {5.0, 6.0}}), 3.0, 1e-9),
               "two lists one after the other: their times add, the gap between them doesn't count");
-        check(close_to(perf::busy_ms(Spans{{1000, 5000}, {2000, 7000}, {3000, 4000}}, 1000000), 6.0, 1e-9),
+        check(close_to(perf::busy_ms(Spans{{1.0, 5.0}, {2.0, 7.0}, {3.0, 4.0}}), 6.0, 1e-9),
               "overlapping lists (async compute) count once");
-        check(close_to(perf::busy_ms(Spans{{9000, 9500}, {1000, 2000}}, 1000000), 1.5, 1e-9), "in any order");
-        check(perf::busy_ms(Spans{}, 1000000) < 0 && perf::busy_ms(Spans{{1, 2}}, 0) < 0,
-              "nothing to time, or no clock: none");
-        check(perf::busy_ms(Spans{{1000, 2000}, {0, 0}}, 1000000) < 0 &&
-                  perf::busy_ms(Spans{{3000, 2000}}, 1000000) < 0,
-              "a list not run yet (0, or an end before its start): none");
-        check(perf::busy_ms(Spans{{1000, 2000}, {3000000, 3001000}}, 1000000) < 0,
-              "lists seconds apart (a stale slot): none");
+        check(close_to(perf::busy_ms(Spans{{9.0, 9.5}, {1.0, 2.0}}), 1.5, 1e-9), "in any order");
+        check(close_to(perf::busy_ms(Spans{{1e9 + 1.0, 1e9 + 3.5}, {1e9 + 2.0, 1e9 + 4.0}}), 3.0, 1e-6),
+              "on the CPU's clock (large times): still to the microsecond");
+        check(perf::busy_ms(Spans{}) < 0, "nothing to time: none");
+        check(perf::busy_ms(Spans{{3.0, 2.0}}) < 0, "an end before its start: none");
+        check(perf::busy_ms(Spans{{1.0, 2.0}, {3000.0, 3001.0}}) < 0, "lists seconds apart (a stale slot): none");
 
         // ... to the part each frame was rendered in, while the measurement runs
         const auto t0 = perf::Clock::now();

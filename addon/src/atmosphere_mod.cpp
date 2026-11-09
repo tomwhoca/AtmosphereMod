@@ -347,8 +347,10 @@ struct __declspec(uuid("7c1f3d52-9a4e-4f0b-8e2d-5b6a1c9d0e47")) CommandListState
     float viewport_width = 0.0f, viewport_height = 0.0f;  // first viewport, for draw logs
     bool timeable = false;          // a direct or compute list of the game's device (kept over resets)
     std::vector<uint32_t> timers;   // its timestamps since the reset, resolved at the close
-    // the performance report's timestamps at its start and its close (g_frame_timer_next counts), or none
+    // the performance report's timestamps at its start and its close (g_frame_timer_next counts), or none;
+    // pending: reset while measuring, the start comes with its first command (start_frame_timing)
     uint64_t frame_begin = UINT64_MAX, frame_end = UINT64_MAX;
+    bool frame_pending = false;
 };
 
 // Every graphics pipeline's pixel shader and how it writes its targets
@@ -491,9 +493,23 @@ ID3D12QueryHeap *g_frame_timer_heap = nullptr;  // the game's device (g_debug_de
 resource g_frame_timer_readback = {};
 std::atomic<bool> g_frame_timing{false};
 std::atomic<uint64_t> g_frame_timer_next{0};  // timestamps taken so far; slot = count % kFrameTimers
-std::mutex g_frame_timer_mutex;               // guards the two maps
-std::map<uint64_t, std::vector<std::pair<uint64_t, uint64_t>>> g_frame_lists;  // frame -> its lists' (start, close)
+std::mutex g_frame_timer_mutex;               // guards the maps and the counts
+struct TimedList
+{
+    uint64_t begin, end;          // g_frame_timer_next counts: slot = count % kFrameTimers
+    ID3D12CommandQueue *queue;    // where it ran: its timestamps are on that queue's clock
+};
+std::map<uint64_t, std::vector<TimedList>> g_frame_lists;  // frame -> the lists executed in it
 std::map<uint64_t, perf::Phase> g_frame_phase;  // frame -> the part of the measurement it was rendered in
+void start_frame_timing(command_list *cmd_list);
+// What became of the frames, for the log: GPU-timed, or why not.
+struct GpuTimingCounts
+{
+    uint64_t lists = 0, timed = 0, unrun = 0, invalid = 0, overwritten = 0, no_clock = 0;
+    uint64_t stamps_at_start = 0, frames_ready = 0, frames_outside = 0;  // (outside: not in a measured part)
+    std::map<ID3D12CommandQueue *, uint64_t> queues;  // -> its timestamp frequency
+    std::string first;  // the first frame read back, in detail
+} g_gpu_counts;
 bool g_inject = false;
 bool g_inject_graphics = false;
 fs::path g_data_dir;
@@ -2308,6 +2324,10 @@ uint64_t frame_timestamp(command_list *cmd_list)
     return n;
 }
 
+// ReShade calls reset_command_list before ID3D12GraphicsCommandList::Reset, while
+// the list is still closed: a timestamp there would be lost. So the list's
+// start is stamped at its first command (barrier, bind, clear, copy, draw,
+// dispatch, ...), each of which calls this first.
 void on_reset_command_list(command_list *cmd_list)
 {
     if (auto *state = cmd_list->get_private_data<CommandListState>())
@@ -2315,10 +2335,34 @@ void on_reset_command_list(command_list *cmd_list)
         const bool timeable = state->timeable;
         *state = {};
         state->timeable = timeable;
-        if (timeable && g_frame_timing.load(std::memory_order_relaxed) && g_frame_timer_heap != nullptr &&
-            cmd_list->get_device() == g_debug_device)
-            state->frame_begin = frame_timestamp(cmd_list);
+        state->frame_pending = timeable && g_frame_timing.load(std::memory_order_relaxed) &&
+                               g_frame_timer_heap != nullptr && cmd_list->get_device() == g_debug_device;
     }
+}
+
+void start_frame_timing(command_list *cmd_list)
+{
+    if (!g_frame_timing.load(std::memory_order_relaxed))
+        return;
+    auto *state = cmd_list->get_private_data<CommandListState>();
+    if (state == nullptr || !state->frame_pending)
+        return;
+    state->frame_pending = false;
+    if (g_frame_timer_heap != nullptr)
+        state->frame_begin = frame_timestamp(cmd_list);
+}
+
+// The commands a list may start with that the add-on doesn't handle otherwise.
+template <typename... Args>
+void start_frame_timing_void(command_list *cmd_list, Args...)
+{
+    start_frame_timing(cmd_list);
+}
+template <typename... Args>
+bool start_frame_timing_bool(command_list *cmd_list, Args...)
+{
+    start_frame_timing(cmd_list);
+    return false;
 }
 
 // A list with draw log timestamps: one more at its end, then all of them resolved into
@@ -2548,6 +2592,7 @@ void on_destroy_pipeline(device *dev, pipeline pipe)
 
 void on_bind_pipeline(command_list *cmd_list, pipeline_stage stages, pipeline pipe)
 {
+    start_frame_timing(cmd_list);
     pipeline replacement = {};
     bool graphics = true;  // every compute pipeline is tracked, so an unknown one is graphics
     bool tracked = false, shaded = false;
@@ -2633,6 +2678,7 @@ void before_dispatch(command_list *cmd_list, const std::string &size)
 
 void on_bind_viewports(command_list *cmd_list, uint32_t first, uint32_t count, const viewport *viewports)
 {
+    start_frame_timing(cmd_list);
     if (first != 0 || count == 0)
         return;
     if (auto *state = cmd_list->get_private_data<CommandListState>())
@@ -2673,6 +2719,7 @@ bool on_build_acceleration_structure(command_list *cmd_list, acceleration_struct
                                      const acceleration_structure_build_input *inputs, resource, uint64_t,
                                      resource_view source, resource_view dest, acceleration_structure_build_mode mode)
 {
+    start_frame_timing(cmd_list);
     const bool top = type == acceleration_structure_type::top_level;
     uint32_t instances = 0;
     for (uint32_t i = 0; top && i < input_count; ++i)
@@ -2709,6 +2756,7 @@ bool on_dispatch_rays(command_list *cmd_list, resource, uint64_t, uint64_t, reso
                       resource, uint64_t, uint64_t, uint64_t, resource, uint64_t, uint64_t, uint64_t, uint32_t width,
                       uint32_t height, uint32_t depth)
 {
+    start_frame_timing(cmd_list);
     const std::lock_guard lock(g_seen_mutex);
     ++g_dispatch_counts["dispatch_rays"];
     if (g_capture.load(std::memory_order_relaxed) == Capture::armed && g_capture_order.size() < 400)
@@ -2745,6 +2793,7 @@ void log_dispatch_draw_log(command_list *cmd_list, const std::string &what)
 
 bool on_dispatch(command_list *cmd_list, uint32_t x, uint32_t y, uint32_t z)
 {
+    start_frame_timing(cmd_list);
     log_dispatch_draw_log(cmd_list, std::to_string(x) + " x " + std::to_string(y) + " x " + std::to_string(z) +
                                         " groups");
     before_dispatch(cmd_list, std::to_string(x) + '\t' + std::to_string(y) + '\t' + std::to_string(z));
@@ -2799,6 +2848,7 @@ void before_draw(command_list *cmd_list, const std::string &size)
 
 bool on_draw(command_list *cmd_list, uint32_t vertices, uint32_t instances, uint32_t, uint32_t)
 {
+    start_frame_timing(cmd_list);
     if (draw_log_on())
         log_draw(cmd_list, std::to_string(vertices) + " vertices x" + std::to_string(instances));
     if (tracked_graphics_bound(cmd_list))
@@ -2809,6 +2859,7 @@ bool on_draw(command_list *cmd_list, uint32_t vertices, uint32_t instances, uint
 
 bool on_draw_indexed(command_list *cmd_list, uint32_t indices, uint32_t instances, uint32_t, int32_t, uint32_t)
 {
+    start_frame_timing(cmd_list);
     if (draw_log_on())
         log_draw(cmd_list, std::to_string(indices) + " indices x" + std::to_string(instances));
     if (tracked_graphics_bound(cmd_list))
@@ -2820,6 +2871,7 @@ bool on_draw_indexed(command_list *cmd_list, uint32_t indices, uint32_t instance
 bool on_draw_or_dispatch_indirect(command_list *cmd_list, indirect_command type, resource, uint64_t, uint32_t count,
                                   uint32_t)
 {
+    start_frame_timing(cmd_list);
     if (type == indirect_command::dispatch)
     {
         log_dispatch_draw_log(cmd_list, "indirect x" + std::to_string(count));
@@ -2845,7 +2897,9 @@ void on_execute_command_list(command_queue *queue, command_list *cmd_list)
             state != nullptr && state->frame_end != UINT64_MAX)
         {
             const std::lock_guard lock(g_frame_timer_mutex);
-            g_frame_lists[g_frame.load(std::memory_order_relaxed)].emplace_back(state->frame_begin, state->frame_end);
+            g_frame_lists[g_frame.load(std::memory_order_relaxed)].push_back(
+                {state->frame_begin, state->frame_end, reinterpret_cast<ID3D12CommandQueue *>(queue->get_native())});
+            g_gpu_counts.lists += 1;
         }
     if (!draw_log_on())
         return;
@@ -3153,11 +3207,16 @@ void time_gpu_frames(uint64_t frame)
         const std::lock_guard lock(g_frame_timer_mutex);
         g_frame_lists.clear();
         g_frame_phase.clear();
+        if (on)
+        {
+            g_gpu_counts = {};
+            g_gpu_counts.stamps_at_start = g_frame_timer_next.load();
+        }
     }
     if (!on)
         return;
     const perf::Phase phase = g_measurement.phase();
-    std::vector<std::pair<perf::Phase, std::vector<std::pair<uint64_t, uint64_t>>>> ready;
+    std::vector<std::pair<perf::Phase, std::vector<TimedList>>> ready;
     {
         const std::lock_guard lock(g_frame_timer_mutex);
         if (phase == perf::Phase::on || phase == perf::Phase::off || phase == perf::Phase::on2)
@@ -3165,14 +3224,16 @@ void time_gpu_frames(uint64_t frame)
         while (!g_frame_lists.empty() && g_frame_lists.begin()->first + kFrameTimerDelay <= frame)
         {
             auto node = g_frame_lists.extract(g_frame_lists.begin());
+            g_gpu_counts.frames_ready += 1;
             if (const auto it = g_frame_phase.find(node.key()); it != g_frame_phase.end())
                 ready.emplace_back(it->second, std::move(node.mapped()));
+            else
+                g_gpu_counts.frames_outside += 1;
         }
         g_frame_phase.erase(g_frame_phase.begin(),
                             g_frame_phase.lower_bound(frame > kFrameTimerDelay ? frame - kFrameTimerDelay : 0));
     }
-    const uint64_t frequency = g_timer_frequency.load();
-    if (ready.empty() || frequency == 0)
+    if (ready.empty())
         return;
     void *mapped = nullptr;
     if (!g_debug_device->map_buffer_region(g_frame_timer_readback, 0, uint64_t(kFrameTimers) * 8,
@@ -3181,19 +3242,94 @@ void time_gpu_frames(uint64_t frame)
         return;
     const auto *ticks = static_cast<const uint64_t *>(mapped);
     const uint64_t taken = g_frame_timer_next.load();
-    for (auto &[measured_in, lists] : ready)
+    // Each queue's clock against the CPU's, now (the frames are ~8 frames old: the
+    // clocks don't drift apart in that time): a timestamp t is at
+    // cpu + (t - gpu) / frequency on the CPU's clock.
+    struct QueueClock
     {
-        std::vector<std::pair<uint64_t, uint64_t>> spans;
-        bool fresh = true;
-        for (const auto &[begin, end] : lists)
+        uint64_t frequency = 0, gpu = 0, cpu = 0;
+    };
+    std::unordered_map<ID3D12CommandQueue *, QueueClock> clocks;
+    LARGE_INTEGER qpc_frequency = {};
+    QueryPerformanceFrequency(&qpc_frequency);
+    const auto clock_of = [&](ID3D12CommandQueue *queue) -> const QueueClock * {
+        auto [it, added] = clocks.try_emplace(queue);
+        if (added && queue != nullptr &&
+            (FAILED(queue->GetTimestampFrequency(&it->second.frequency)) ||
+             FAILED(queue->GetClockCalibration(&it->second.gpu, &it->second.cpu))))
+            it->second.frequency = 0;
+        return it->second.frequency > 0 ? &it->second : nullptr;
+    };
+    const double qpc_ms = 1000.0 / double(qpc_frequency.QuadPart);
+    std::vector<std::pair<perf::Phase, double>> timed;
+    {
+        const std::lock_guard lock(g_frame_timer_mutex);
+        for (auto &[measured_in, lists] : ready)
         {
-            fresh = fresh && taken - begin < kFrameTimers - 1024;  // (its slots not taken again since)
-            spans.emplace_back(ticks[begin % kFrameTimers], ticks[end % kFrameTimers]);
+            std::vector<std::pair<double, double>> spans;
+            bool fresh = true, run = true, valid = true, clocked = true;
+            for (const TimedList &l : lists)
+            {
+                fresh = fresh && taken - l.begin < kFrameTimers - 1024;  // (its slots not taken again since)
+                const uint64_t b = ticks[l.begin % kFrameTimers], e = ticks[l.end % kFrameTimers];
+                run = run && b != 0 && e != 0;
+                valid = valid && e >= b;
+                const QueueClock *c = clock_of(l.queue);
+                clocked = clocked && c != nullptr;
+                if (c == nullptr)
+                    continue;
+                g_gpu_counts.queues[l.queue] = c->frequency;
+                const double at = double(c->cpu) * qpc_ms;
+                const double per_tick = 1000.0 / double(c->frequency);
+                spans.emplace_back(at + double(int64_t(b - c->gpu)) * per_tick,
+                                   at + double(int64_t(e - c->gpu)) * per_tick);
+            }
+            if (g_gpu_counts.first.empty() && !lists.empty())
+            {
+                double lo = 0.0, hi = 0.0;
+                for (size_t i = 0; i < spans.size(); ++i)
+                    lo = i == 0 ? spans[i].first : std::min(lo, spans[i].first),
+                    hi = i == 0 ? spans[i].second : std::max(hi, spans[i].second);
+                const uint64_t b0 = ticks[lists.front().begin % kFrameTimers];
+                const uint64_t e0 = ticks[lists.front().end % kFrameTimers];
+                char line[320];
+                snprintf(line, sizeof(line), "first frame read back: %zu lists, slots %llu..%llu of %llu taken, the first "
+                         "list's ticks %llu..%llu; %s%s%s%sfrom first start to last end %.3f ms, busy %.3f ms",
+                         lists.size(), (unsigned long long)lists.front().begin, (unsigned long long)lists.back().end,
+                         (unsigned long long)taken, (unsigned long long)b0, (unsigned long long)e0,
+                         fresh ? "" : "overwritten, ", run ? "" : "not run yet, ", valid ? "" : "an end before its start, ",
+                         clocked ? "" : "no clock, ", hi - lo, perf::busy_ms(spans));
+                g_gpu_counts.first = line;
+            }
+            const double ms = fresh && run && valid && clocked ? perf::busy_ms(std::move(spans)) : -1.0;
+            uint64_t &count = !fresh ? g_gpu_counts.overwritten : !run ? g_gpu_counts.unrun
+                              : !clocked ? g_gpu_counts.no_clock : ms < 0.0 || !valid ? g_gpu_counts.invalid
+                              : g_gpu_counts.timed;
+            count += 1;
+            if (ms > 0.0)
+                timed.emplace_back(measured_in, ms);
         }
-        if (fresh)
-            g_measurement.gpu_frame(measured_in, perf::busy_ms(std::move(spans), frequency));
     }
     g_debug_device->unmap_buffer_region(g_frame_timer_readback);
+    for (const auto &[measured_in, ms] : timed)
+        g_measurement.gpu_frame(measured_in, ms);
+}
+
+// The GPU timing's counts, for the log line at the end of a measurement.
+std::string gpu_timing_counts()
+{
+    const std::lock_guard lock(g_frame_timer_mutex);
+    const GpuTimingCounts &c = g_gpu_counts;
+    std::string queues;
+    for (const auto &[queue, frequency] : c.queues)
+        queues += (queues.empty() ? "" : ", ") + std::to_string(frequency) + " Hz";
+    return "GPU timing: " + std::to_string(g_frame_timer_next.load() - c.stamps_at_start) + " timestamps, " +
+           std::to_string(c.lists) + " lists executed, " + std::to_string(c.frames_ready) + " frames read back (" +
+           std::to_string(c.frames_outside) + " outside the measured parts), " + std::to_string(c.timed) + " timed, " +
+           std::to_string(c.unrun) + " not run yet, " + std::to_string(c.invalid) + " invalid, " +
+           std::to_string(c.overwritten) + " overwritten, " + std::to_string(c.no_clock) + " without a clock; " +
+           std::to_string(c.queues.size()) + " queue(s)" + (queues.empty() ? "" : " (" + queues + ")") +
+           (c.first.empty() ? "; no frame read back" : "; " + c.first);
 }
 
 void measure_performance(effect_runtime *runtime)
@@ -3244,6 +3380,7 @@ void measure_performance(effect_runtime *runtime)
                 snprintf(buf + n, sizeof(buf) - n, "; no GPU times");
         }
         event(reshade::log::level::info, buf);
+        event(reshade::log::level::info, "performance report: " + gpu_timing_counts());
     }
 }
 
@@ -3361,6 +3498,20 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE re
     reshade::register_event<reshade::addon_event::draw_indexed>(on_draw_indexed);
     reshade::register_event<reshade::addon_event::draw_or_dispatch_indirect>(on_draw_or_dispatch_indirect);
     reshade::register_event<reshade::addon_event::execute_command_list>(on_execute_command_list);
+    // (the performance report's GPU time: a list's start, at its first command; see on_reset_command_list)
+    reshade::register_event<reshade::addon_event::barrier>(start_frame_timing_void);
+    reshade::register_event<reshade::addon_event::bind_render_targets_and_depth_stencil>(start_frame_timing_void);
+    reshade::register_event<reshade::addon_event::begin_render_pass>(start_frame_timing_bool);
+    reshade::register_event<reshade::addon_event::clear_depth_stencil_view>(start_frame_timing_bool);
+    reshade::register_event<reshade::addon_event::clear_render_target_view>(start_frame_timing_bool);
+    reshade::register_event<reshade::addon_event::clear_unordered_access_view_uint>(start_frame_timing_bool);
+    reshade::register_event<reshade::addon_event::clear_unordered_access_view_float>(start_frame_timing_bool);
+    reshade::register_event<reshade::addon_event::copy_resource>(start_frame_timing_bool);
+    reshade::register_event<reshade::addon_event::copy_buffer_region>(start_frame_timing_bool);
+    reshade::register_event<reshade::addon_event::copy_buffer_to_texture>(start_frame_timing_bool);
+    reshade::register_event<reshade::addon_event::copy_texture_region>(start_frame_timing_bool);
+    reshade::register_event<reshade::addon_event::copy_texture_to_buffer>(start_frame_timing_bool);
+    reshade::register_event<reshade::addon_event::resolve_texture_region>(start_frame_timing_bool);
     reshade::register_event<reshade::addon_event::reshade_present>(on_present);
 
     event(reshade::log::level::info, "data dir " + g_data_dir.string() + ", " + std::to_string(g_names.size()) +

@@ -82,11 +82,12 @@ struct Result
     bool has_gpu() const { return (on1.gpu_frames + on2.gpu_frames) > 0 && off.gpu_frames > 0; }
 };
 
-// The GPU's working time in ms from its command lists' (start, end) timestamps:
-// their union, so work that overlaps (async compute) counts once and idle time
-// between them doesn't count. -1 if there are none, or any wasn't run yet (0, an
-// end before its start) or is stale (spans more than a second apart).
-double busy_ms(std::vector<std::pair<uint64_t, uint64_t>> spans, uint64_t frequency);
+// The GPU's working time in ms from its command lists' (start, end) times, in ms
+// on one clock (the CPU's: each queue's timestamps converted with its own clock
+// calibration, as queues needn't share a clock): their union, so work that
+// overlaps (async compute) counts once and idle time between them doesn't. -1 if
+// there are none, or any ends before it starts, or they're more than a second apart.
+double busy_ms(std::vector<std::pair<double, double>> spans_ms);
 
 // The measurement's clock and switching; no sim, no GPU (tested in tools/lab/perf_report_test.cpp).
 class Measurement

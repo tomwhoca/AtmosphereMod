@@ -68,3 +68,8 @@ target_compile_options(perf_report_test PRIVATE /W4 /permissive- /utf-8)
 target_include_directories(perf_report_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../addon/src)
 target_link_libraries(perf_report_test PRIVATE d3d12 dxgi version)
 set_target_properties(perf_report_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/../../build/lab)
+
+# Do the GPU's graphics and compute queues share a timestamp clock? (the performance report's GPU time)
+add_executable(queue_clocks_probe queue_clocks_probe.cpp)
+target_compile_definitions(queue_clocks_probe PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
+target_link_libraries(queue_clocks_probe PRIVATE d3d12)
