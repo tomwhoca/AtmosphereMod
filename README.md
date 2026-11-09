@@ -115,27 +115,6 @@ on, on two days. The settings were the shipping ones except:
     <th width="50%">Mod on</th>
   </tr>
   <tr>
-    <td><img src="Screenshots/sky-san-francisco-dawn-off.jpg" alt="Mod off: San Francisco before sunrise"></td>
-    <td><img src="Screenshots/sky-san-francisco-dawn-on.jpg" alt="Mod on: San Francisco before sunrise"></td>
-  </tr>
-  <tr>
-    <td colspan="2"><b>San Francisco</b> before sunrise: the sky and the bay turn pink and violet, with the clouds dark against them. MSFS's dawn is blue-grey.<br><sub>METAR <code>KSFO 261356Z 17003KT 10SM FEW009 BKN027 13/12 A3014 RMK AO2 SLP205 T01330117 $</code></sub></td>
-  </tr>
-  <tr>
-    <td><img src="Screenshots/sky-jackson-hole-sunrise-off.jpg" alt="Mod off: Jackson Hole at sunrise"></td>
-    <td><img src="Screenshots/sky-jackson-hole-sunrise-on.jpg" alt="Mod on: Jackson Hole at sunrise"></td>
-  </tr>
-  <tr>
-    <td colspan="2"><b>Jackson Hole</b> at sunrise: the underside of the overcast glows orange above the Tetons. MSFS's is a flat yellow.<br><sub>METAR <code>KJAC 261356Z 00000KT 10SM BKN041 OVC070 01/M01 A3022 RMK AO2 SLP244 T00111006</code></sub></td>
-  </tr>
-  <tr>
-    <td><img src="Screenshots/sky-tbilisi-off.jpg" alt="Mod off: Tbilisi in the late afternoon"></td>
-    <td><img src="Screenshots/sky-tbilisi-on.jpg" alt="Mod on: Tbilisi in the late afternoon"></td>
-  </tr>
-  <tr>
-    <td colspan="2"><b>Tbilisi</b> in the late afternoon: the low sun lights the cumulus in warm colours, with deeper shading. MSFS's clouds stay white.<br><sub>METAR <code>UGTB 261300Z 16004KT 9999 SCT025 BKN039 15/11 Q1022 NOSIG</code></sub></td>
-  </tr>
-  <tr>
     <td><img src="Screenshots/sky-canberra-sunset-off.jpg" alt="Mod off: Canberra at sunset"></td>
     <td><img src="Screenshots/sky-canberra-sunset-on.jpg" alt="Mod on: Canberra at sunset"></td>
   </tr>
