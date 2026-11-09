@@ -11,6 +11,12 @@
 // shows as a difference between the two "on" parts. Afterwards the switch is
 // as it was. Ctrl+Shift+F9 or the app's own switch stops it.
 //
+// The frame rate hides the mod's cost wherever it's capped (V-Sync, a 60 Hz
+// screen, a frame limit, frame generation, another window over the sim): then
+// both states run at the cap. So the add-on also times the GPU's work on each
+// frame (timestamps at the start and end of each of the sim's command lists,
+// overlaps merged: busy_ms), which a cap only pads with idle time.
+//
 // With it, the PC (GPU, driver, CPU, memory, Windows), how ReShade is loaded,
 // and the sim's own graphics settings (its UserCfg.opt: anti-aliasing and
 // upscaling, frame generation, render scaling, cloud quality, ray-traced
@@ -24,6 +30,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace perf
@@ -57,6 +64,10 @@ struct Part
     double seconds = 0.0;
     double fps() const { return seconds > 0.0 ? frames / seconds : 0.0; }
     double ms_p99 = 0.0;  // the frame time 99 % of the frames are faster than: stutters
+    // The GPU's working time per frame (gpu_frame), from the frames whose timestamps came back.
+    uint32_t gpu_frames = 0;
+    double gpu_ms_sum = 0.0;
+    double gpu_ms() const { return gpu_frames > 0 ? gpu_ms_sum / gpu_frames : 0.0; }
 };
 
 struct Result
@@ -66,7 +77,16 @@ struct Result
     double fps_off() const { return off.fps(); }
     // How much the two "on" parts differ (0.05 = 5 %): over ~10 % the scene changed while measuring.
     double drift() const;
+    double gpu_on() const;  // both "on" parts together
+    double gpu_off() const { return off.gpu_ms(); }
+    bool has_gpu() const { return (on1.gpu_frames + on2.gpu_frames) > 0 && off.gpu_frames > 0; }
 };
+
+// The GPU's working time in ms from its command lists' (start, end) timestamps:
+// their union, so work that overlaps (async compute) counts once and idle time
+// between them doesn't count. -1 if there are none, or any wasn't run yet (0, an
+// end before its start) or is stale (spans more than a second apart).
+double busy_ms(std::vector<std::pair<uint64_t, uint64_t>> spans, uint64_t frequency);
 
 // The measurement's clock and switching; no sim, no GPU (tested in tools/lab/perf_report_test.cpp).
 class Measurement
@@ -80,6 +100,9 @@ public:
     std::optional<bool> stop();
     // Each frame (present): the switch the mod should have now, while measuring.
     std::optional<bool> frame(Clock::time_point now);
+    // A frame's GPU time, once it's known (some frames later): to the part it was rendered in
+    // (`measured_in`, the phase() it was in), while the measurement runs.
+    void gpu_frame(Phase measured_in, double ms);
 
     Phase phase() const { return phase_; }
     bool running() const { return phase_ != Phase::idle && phase_ != Phase::done && phase_ != Phase::stopped; }

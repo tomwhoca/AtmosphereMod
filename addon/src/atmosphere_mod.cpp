@@ -347,6 +347,8 @@ struct __declspec(uuid("7c1f3d52-9a4e-4f0b-8e2d-5b6a1c9d0e47")) CommandListState
     float viewport_width = 0.0f, viewport_height = 0.0f;  // first viewport, for draw logs
     bool timeable = false;          // a direct or compute list of the game's device (kept over resets)
     std::vector<uint32_t> timers;   // its timestamps since the reset, resolved at the close
+    // the performance report's timestamps at its start and its close (g_frame_timer_next counts), or none
+    uint64_t frame_begin = UINT64_MAX, frame_end = UINT64_MAX;
 };
 
 // Every graphics pipeline's pixel shader and how it writes its targets
@@ -478,6 +480,20 @@ ID3D12QueryHeap *g_timer_heap = nullptr;  // the game's device (g_debug_device)
 resource g_timer_readback = {};
 std::atomic<uint32_t> g_timer_next{0};
 std::atomic<uint64_t> g_timer_frequency{0};  // the graphics queue's ticks per second
+// The performance report's GPU time per frame (perf_report.h): while a measurement
+// runs, a timestamp at the start and at the close of each direct or compute list
+// of the game's, each resolved at the close into its slot of a ring; at execute
+// the list is filed under the frame (g_frame); kFrameTimerDelay frames later,
+// when the GPU has run it, the frame's lists give its working time (busy_ms).
+constexpr uint32_t kFrameTimers = 32768;
+constexpr uint64_t kFrameTimerDelay = 8;
+ID3D12QueryHeap *g_frame_timer_heap = nullptr;  // the game's device (g_debug_device)
+resource g_frame_timer_readback = {};
+std::atomic<bool> g_frame_timing{false};
+std::atomic<uint64_t> g_frame_timer_next{0};  // timestamps taken so far; slot = count % kFrameTimers
+std::mutex g_frame_timer_mutex;               // guards the two maps
+std::map<uint64_t, std::vector<std::pair<uint64_t, uint64_t>>> g_frame_lists;  // frame -> its lists' (start, close)
+std::map<uint64_t, perf::Phase> g_frame_phase;  // frame -> the part of the measurement it was rendered in
 bool g_inject = false;
 bool g_inject_graphics = false;
 fs::path g_data_dir;
@@ -2188,6 +2204,18 @@ void create_debug_resources(device *dev)
             g_timer_heap = nullptr;
             event(reshade::log::level::warning, "failed to create the GPU timestamps; the draw log has no GPU times");
         }
+        // the performance report's: without them it has the frame rate only
+        const D3D12_QUERY_HEAP_DESC frame_timers = {D3D12_QUERY_HEAP_TYPE_TIMESTAMP, kFrameTimers, 0};
+        if (!dev->create_resource(resource_desc(uint64_t(kFrameTimers) * 8, memory_heap::readback,
+                                                resource_usage::copy_dest),
+                                  nullptr, resource_usage::copy_dest, &g_frame_timer_readback) ||
+            FAILED(reinterpret_cast<ID3D12Device *>(dev->get_native())
+                       ->CreateQueryHeap(&frame_timers, IID_PPV_ARGS(&g_frame_timer_heap))))
+        {
+            g_frame_timer_heap = nullptr;
+            event(reshade::log::level::warning,
+                  "failed to create the performance report's GPU timestamps; it measures the frame rate only");
+        }
         event(reshade::log::level::info, "debug resources created");
         return;
     }
@@ -2248,6 +2276,11 @@ void on_destroy_device(device *dev)
         std::exchange(g_timer_heap, nullptr)->Release();
     if (g_timer_readback.handle != 0)
         dev->destroy_resource(std::exchange(g_timer_readback, resource{}));
+    g_frame_timing = false;
+    if (g_frame_timer_heap != nullptr)
+        std::exchange(g_frame_timer_heap, nullptr)->Release();
+    if (g_frame_timer_readback.handle != 0)
+        dev->destroy_resource(std::exchange(g_frame_timer_readback, resource{}));
 }
 
 void on_init_command_list(command_list *cmd_list)
@@ -2266,6 +2299,15 @@ void on_destroy_command_list(command_list *cmd_list)
     cmd_list->destroy_private_data<CommandListState>();
 }
 
+// The performance report's timestamp on a list now: its count (g_frame_timer_next).
+uint64_t frame_timestamp(command_list *cmd_list)
+{
+    const uint64_t n = g_frame_timer_next.fetch_add(1, std::memory_order_relaxed);
+    reinterpret_cast<ID3D12GraphicsCommandList *>(cmd_list->get_native())
+        ->EndQuery(g_frame_timer_heap, D3D12_QUERY_TYPE_TIMESTAMP, UINT(n % kFrameTimers));
+    return n;
+}
+
 void on_reset_command_list(command_list *cmd_list)
 {
     if (auto *state = cmd_list->get_private_data<CommandListState>())
@@ -2273,6 +2315,9 @@ void on_reset_command_list(command_list *cmd_list)
         const bool timeable = state->timeable;
         *state = {};
         state->timeable = timeable;
+        if (timeable && g_frame_timing.load(std::memory_order_relaxed) && g_frame_timer_heap != nullptr &&
+            cmd_list->get_device() == g_debug_device)
+            state->frame_begin = frame_timestamp(cmd_list);
     }
 }
 
@@ -2281,6 +2326,15 @@ void on_reset_command_list(command_list *cmd_list)
 void on_close_command_list(command_list *cmd_list)
 {
     auto *state = cmd_list->get_private_data<CommandListState>();
+    if (state != nullptr && state->frame_begin != UINT64_MAX && g_frame_timer_heap != nullptr)
+    {
+        state->frame_end = frame_timestamp(cmd_list);
+        auto *native = reinterpret_cast<ID3D12GraphicsCommandList *>(cmd_list->get_native());
+        for (const uint64_t n : {state->frame_begin, state->frame_end})
+            native->ResolveQueryData(g_frame_timer_heap, D3D12_QUERY_TYPE_TIMESTAMP, UINT(n % kFrameTimers), 1,
+                                     reinterpret_cast<ID3D12Resource *>(g_frame_timer_readback.handle),
+                                     (n % kFrameTimers) * 8);
+    }
     if (state == nullptr || state->timers.empty() || g_timer_heap == nullptr)
         return;
     const std::string stamp = gpu_timestamp(cmd_list, *state);
@@ -2783,11 +2837,18 @@ bool on_draw_or_dispatch_indirect(command_list *cmd_list, indirect_command type,
 
 void on_execute_command_list(command_queue *queue, command_list *cmd_list)
 {
-    if (!draw_log_on())
-        return;
     if (g_timer_frequency.load(std::memory_order_relaxed) == 0 &&
         (queue->get_type() & command_queue_type::graphics) == command_queue_type::graphics)
         g_timer_frequency = queue->get_timestamp_frequency();
+    if (g_frame_timing.load(std::memory_order_relaxed))
+        if (const auto *state = cmd_list->get_private_data<CommandListState>();
+            state != nullptr && state->frame_end != UINT64_MAX)
+        {
+            const std::lock_guard lock(g_frame_timer_mutex);
+            g_frame_lists[g_frame.load(std::memory_order_relaxed)].emplace_back(state->frame_begin, state->frame_end);
+        }
+    if (!draw_log_on())
+        return;
     const std::lock_guard lock(g_draw_log_mutex);
     if (g_draw_log.size() < kDrawLogMax)
         g_draw_log.push_back("execute\t" + hex64(reinterpret_cast<uintptr_t>(cmd_list)) + "\t-\tqueue " +
@@ -3080,6 +3141,61 @@ bool sync_settings(bool reload_key, void *window)
 // The EFB app's performance report (perf_report.h): starts or stops a
 // measurement when the app asks, and switches the mod as it goes; afterwards
 // the switch is as it was, and the result is in the event log.
+// The performance report's GPU times: the frame now presented is filed under the
+// part it's measured in (the lists executed from now on are rendered with the
+// switch frame() just set), and the frames kFrameTimerDelay ago, whose lists the
+// GPU has run, go to the measurement with their GPU time.
+void time_gpu_frames(uint64_t frame)
+{
+    const bool on = g_measurement.running() && g_frame_timer_heap != nullptr && g_debug_device != nullptr;
+    if (on != g_frame_timing.exchange(on))
+    {
+        const std::lock_guard lock(g_frame_timer_mutex);
+        g_frame_lists.clear();
+        g_frame_phase.clear();
+    }
+    if (!on)
+        return;
+    const perf::Phase phase = g_measurement.phase();
+    std::vector<std::pair<perf::Phase, std::vector<std::pair<uint64_t, uint64_t>>>> ready;
+    {
+        const std::lock_guard lock(g_frame_timer_mutex);
+        if (phase == perf::Phase::on || phase == perf::Phase::off || phase == perf::Phase::on2)
+            g_frame_phase[frame] = phase;
+        while (!g_frame_lists.empty() && g_frame_lists.begin()->first + kFrameTimerDelay <= frame)
+        {
+            auto node = g_frame_lists.extract(g_frame_lists.begin());
+            if (const auto it = g_frame_phase.find(node.key()); it != g_frame_phase.end())
+                ready.emplace_back(it->second, std::move(node.mapped()));
+        }
+        g_frame_phase.erase(g_frame_phase.begin(),
+                            g_frame_phase.lower_bound(frame > kFrameTimerDelay ? frame - kFrameTimerDelay : 0));
+    }
+    const uint64_t frequency = g_timer_frequency.load();
+    if (ready.empty() || frequency == 0)
+        return;
+    void *mapped = nullptr;
+    if (!g_debug_device->map_buffer_region(g_frame_timer_readback, 0, uint64_t(kFrameTimers) * 8,
+                                           map_access::read_only, &mapped) ||
+        mapped == nullptr)
+        return;
+    const auto *ticks = static_cast<const uint64_t *>(mapped);
+    const uint64_t taken = g_frame_timer_next.load();
+    for (auto &[measured_in, lists] : ready)
+    {
+        std::vector<std::pair<uint64_t, uint64_t>> spans;
+        bool fresh = true;
+        for (const auto &[begin, end] : lists)
+        {
+            fresh = fresh && taken - begin < kFrameTimers - 1024;  // (its slots not taken again since)
+            spans.emplace_back(ticks[begin % kFrameTimers], ticks[end % kFrameTimers]);
+        }
+        if (fresh)
+            g_measurement.gpu_frame(measured_in, perf::busy_ms(std::move(spans), frequency));
+    }
+    g_debug_device->unmap_buffer_region(g_frame_timer_readback);
+}
+
 void measure_performance(effect_runtime *runtime)
 {
     const auto now = perf::Clock::now();
@@ -3109,14 +3225,24 @@ void measure_performance(effect_runtime *runtime)
     }
     if (const std::optional<bool> want = g_measurement.frame(now))
         g_enabled = *want;
+    time_gpu_frames(g_frame.load());
     if (const std::optional<bool> restore = g_measurement.take_restore())
     {
         g_enabled = *restore;
         const perf::Result &r = g_measurement.result();
-        char buf[256];
-        snprintf(buf, sizeof(buf), "performance report: %.1f fps with the mod (%.1f and %.1f), %.1f without; 99 %% of "
-                 "frames under %.1f ms with, %.1f ms without", r.fps_on(), r.on1.fps(), r.on2.fps(), r.fps_off(),
-                 std::max(r.on1.ms_p99, r.on2.ms_p99), r.off.ms_p99);
+        char buf[384];
+        const int n = snprintf(buf, sizeof(buf), "performance report: %.1f fps with the mod (%.1f and %.1f), %.1f "
+                               "without; 99 %% of frames under %.1f ms with, %.1f ms without", r.fps_on(), r.on1.fps(),
+                               r.on2.fps(), r.fps_off(), std::max(r.on1.ms_p99, r.on2.ms_p99), r.off.ms_p99);
+        if (n > 0 && size_t(n) < sizeof(buf))
+        {
+            if (r.has_gpu())
+                snprintf(buf + n, sizeof(buf) - n, "; GPU %.2f ms per frame with (%.2f and %.2f), %.2f ms without "
+                         "(%u and %u frames)", r.gpu_on(), r.on1.gpu_ms(), r.on2.gpu_ms(), r.gpu_off(),
+                         r.on1.gpu_frames + r.on2.gpu_frames, r.off.gpu_frames);
+            else
+                snprintf(buf + n, sizeof(buf) - n, "; no GPU times");
+        }
         event(reshade::log::level::info, buf);
     }
 }

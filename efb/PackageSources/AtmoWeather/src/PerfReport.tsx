@@ -28,6 +28,8 @@ export interface AddonReport {
   result?: {
     fpsOn: number; fpsOff: number; msOn: number; msOff: number; p99On: number; p99Off: number;
     fpsOn1: number; fpsOn2: number; drift: number; framesOn: number; framesOff: number;
+    /** The GPU's working time per frame, ms (none if the add-on couldn't time it). */
+    gpuOn?: number; gpuOff?: number; gpuOn1?: number; gpuOn2?: number; gpuFramesOn?: number; gpuFramesOff?: number;
   };
   system?: {
     pc: { gpu: string; gpuVendor: string; vramGB: number; driver: string; cpu: string; threads: number; ramGB: number;
@@ -127,6 +129,7 @@ export function reportFields(report: AddonReport, ctx: Context, answers: Answers
   const s = simSettings(report, answers.vr);
   const cfg = sim?.cfg ?? {};
   const num1 = (x: number): number => Math.round(x * 10) / 10;
+  const num2 = (x: number): number => Math.round(x * 100) / 100;
   const f: ReportFields = {
     kind: "performance-report",
     schema: 1,
@@ -150,6 +153,12 @@ export function reportFields(report: AddonReport, ctx: Context, answers: Answers
       fpsOn1: num1(r.fpsOn1), fpsOn2: num1(r.fpsOn2), driftPct: num1(r.drift * 100),
       framesOn: r.framesOn, framesOff: r.framesOff,
     });
+    if (r.gpuOn !== undefined && r.gpuOff !== undefined) {
+      Object.assign(f, {
+        gpuMsOn: num2(r.gpuOn), gpuMsOff: num2(r.gpuOff), gpuMsOn1: num2(r.gpuOn1 ?? 0), gpuMsOn2: num2(r.gpuOn2 ?? 0),
+        gpuFramesOn: r.gpuFramesOn ?? 0, gpuFramesOff: r.gpuFramesOff ?? 0,
+      });
+    }
   }
   if (pc) {
     Object.assign(f, {
@@ -168,7 +177,7 @@ export function reportFields(report: AddonReport, ctx: Context, answers: Answers
       frameGeneration: s.frameGen === "" ? "" : /^(NONE|OFF|0)$/i.test(s.frameGen) ? "off"
         : `${s.frameGen}${s.frames ? ` x${s.frames}` : ""}`,
       vsync: answers.vr ? "" : cfg["Video.VSync"] === "1" ? "on" : cfg["Video.VSync"] === "0" ? "off" : "",
-      frameLimiter: answers.vr ? "" : cfg["Video.FrameLimiter"] ?? "",
+      frameLimiter: answers.vr ? "" : cfg["Video.FrameLimiter"] === "0" ? "off" : cfg["Video.FrameLimiter"] ?? "",
       preset: s.preset,
       cloudQuality: quality >= 0 && quality < CLOUD_QUALITY.length ? CLOUD_QUALITY[quality] : "",
       rtShadows: s.rtShadows === "1" ? "on" : s.rtShadows === "0" ? "off" : "",
@@ -202,6 +211,11 @@ export function detailsText(report: AddonReport, ctx: Context, answers: Answers)
     lines.push(`Measured: ${round1(r.fpsOn)} fps with the mod (${round1(r.fpsOn1)} and ${round1(r.fpsOn2)}), `
       + `${round1(r.fpsOff)} without; 99 % of frames under ${round1(r.p99On)} ms with the mod, ${round1(r.p99Off)} ms `
       + `without; ${r.framesOn} + ${r.framesOff} frames; the two parts with the mod differ by ${Math.round(r.drift * 100)} %`);
+    if (r.gpuOn !== undefined && r.gpuOff !== undefined) {
+      lines.push(`GPU time per frame: ${r.gpuOn.toFixed(2)} ms with the mod (${(r.gpuOn1 ?? 0).toFixed(2)} and `
+        + `${(r.gpuOn2 ?? 0).toFixed(2)}), ${r.gpuOff.toFixed(2)} ms without; ${r.gpuFramesOn ?? 0} + `
+        + `${r.gpuFramesOff ?? 0} frames`);
+    }
   }
   if (pc) {
     lines.push(`GPU: ${pc.gpu} (${pc.gpuVendor}), ${round1(pc.vramGB)} GB, driver ${pc.driver}`);
@@ -323,6 +337,25 @@ export const WEB_TRANSPORT: Transport = {
 
 export type Step = "intro" | "measuring" | "review" | "sending" | "sent" | "failed";
 
+/** The result in a few sentences: the frame rate, the GPU time per frame (which shows the cost where the frame
+ * rate is capped), and the stutters. */
+export function summaryText(r: NonNullable<AddonReport["result"]>): string {
+  const change = r.fpsOff > 0 ? Math.round((r.fpsOn / r.fpsOff - 1) * 100) : 0;
+  let s = `With the mod: ${round1(r.fpsOn)} fps. Without: ${round1(r.fpsOff)} fps`
+    + ` (${change > 0 ? "+" : ""}${change} % with the mod).`;
+  if (r.gpuOn !== undefined && r.gpuOff !== undefined && r.gpuOff > 0) {
+    const ms = r.gpuOn - r.gpuOff;
+    const pct = Math.round((r.gpuOn / r.gpuOff - 1) * 100);
+    s += ` The GPU works ${r.gpuOn.toFixed(1)} ms per frame with the mod, ${r.gpuOff.toFixed(1)} ms without`
+      + ` (${ms >= 0 ? "+" : ""}${ms.toFixed(1)} ms, ${pct >= 0 ? "+" : ""}${pct} %).`;
+    if (Math.abs(change) < 2) {
+      s += ` The frame rate was the same both ways (held at about ${Math.round(r.fpsOff)} fps), so the GPU time`
+        + " shows the mod's cost here.";
+    }
+  }
+  return s + ` 99 % of frames take under ${round1(r.p99On)} ms with the mod, ${round1(r.p99Off)} ms without.`;
+}
+
 const RUNNING = ["settleOn", "on", "settleOff", "off", "settleOn2", "on2"];
 /** No sign of a measurement this long after Start: the add-on is older than the app. */
 const START_WAIT_MS = 6000;
@@ -434,10 +467,7 @@ export class PerfReportModel {
       return;
     }
     const r = report.result;
-    const change = r.fpsOff > 0 ? Math.round((r.fpsOn / r.fpsOff - 1) * 100) : 0;
-    this.summary.set(`With the mod: ${round1(r.fpsOn)} fps. Without: ${round1(r.fpsOff)} fps`
-      + ` (${change > 0 ? "+" : ""}${change} % with the mod).`
-      + ` 99 % of frames take under ${round1(r.p99On)} ms with the mod, ${round1(r.p99Off)} ms without.`);
+    this.summary.set(summaryText(r));
     this.warning.set(r.drift > 0.1 ? `The view changed while measuring: the two parts with the mod differ by `
       + `${Math.round(r.drift * 100)} %. Measure again with the sim paused, if you can.` : "");
     this.details.set(detailsText(report, ctx, this.answers()));
@@ -556,7 +586,8 @@ export class PerfReportView extends DisplayComponent<PerfReportViewProps> {
             </div>
             <div class="atmo-news-item">
               <div class="atmo-news-text">1. Find a view with clouds (most of the mod's cost is in them) and hold it
-                still: pause the sim or slew. If you can, switch off V-Sync and frame-rate limits for now.</div>
+                still: pause the sim or slew. Keep other windows off the sim meanwhile. A frame-rate cap is fine: the
+                GPU's time per frame shows the cost anyway.</div>
               <div class="atmo-news-text">2. Tap Start. For about 36 seconds the mod switches itself on, off and on
                 again while the frames are timed. Don't touch anything meanwhile; you can close the tablet.</div>
               <div class="atmo-news-text">3. Check what will be sent, add how the mod runs for you, and tap Send.

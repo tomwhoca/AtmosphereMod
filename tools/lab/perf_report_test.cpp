@@ -132,6 +132,64 @@ int main()
         check(get("InstalledPackagesPath") == "D:\\MSFS 2024", "back at the top level after the sections");
     }
     {
+        // The GPU's working time from command lists' (start, end) timestamps, 1 MHz: 1 tick = 1 us
+        using Spans = std::vector<std::pair<uint64_t, uint64_t>>;
+        check(close_to(perf::busy_ms(Spans{{1000, 3000}, {5000, 6000}}, 1000000), 3.0, 1e-9),
+              "two lists one after the other: their times add, the gap between them doesn't count");
+        check(close_to(perf::busy_ms(Spans{{1000, 5000}, {2000, 7000}, {3000, 4000}}, 1000000), 6.0, 1e-9),
+              "overlapping lists (async compute) count once");
+        check(close_to(perf::busy_ms(Spans{{9000, 9500}, {1000, 2000}}, 1000000), 1.5, 1e-9), "in any order");
+        check(perf::busy_ms(Spans{}, 1000000) < 0 && perf::busy_ms(Spans{{1, 2}}, 0) < 0,
+              "nothing to time, or no clock: none");
+        check(perf::busy_ms(Spans{{1000, 2000}, {0, 0}}, 1000000) < 0 &&
+                  perf::busy_ms(Spans{{3000, 2000}}, 1000000) < 0,
+              "a list not run yet (0, or an end before its start): none");
+        check(perf::busy_ms(Spans{{1000, 2000}, {3000000, 3001000}}, 1000000) < 0,
+              "lists seconds apart (a stale slot): none");
+
+        // ... to the part each frame was rendered in, while the measurement runs
+        const auto t0 = perf::Clock::now();
+        perf::Measurement m(perf::Timing{0.5, 1.0});
+        m.start(t0, true);
+        m.gpu_frame(perf::Phase::settle_on, 9.0);  // (settling: not counted)
+        m.gpu_frame(perf::Phase::on, 10.0);
+        m.gpu_frame(perf::Phase::on, 12.0);
+        m.gpu_frame(perf::Phase::off, 6.0);
+        m.gpu_frame(perf::Phase::on2, 11.0);
+        m.gpu_frame(perf::Phase::off, -1.0);  // (no GPU time: not counted)
+        const perf::Result &r = m.result();
+        check(r.has_gpu() && close_to(r.gpu_on(), 11.0, 1e-9) && close_to(r.gpu_off(), 6.0, 1e-9) &&
+                  r.on1.gpu_frames == 2 && r.on2.gpu_frames == 1 && r.off.gpu_frames == 1,
+              "GPU times go to their parts; settling and missing ones don't count");
+        m.stop();
+        m.gpu_frame(perf::Phase::on, 50.0);
+        check(close_to(m.result().gpu_on(), 11.0, 1e-9), "after the measurement, late GPU times don't count");
+
+        // ... and in the report's JSON once it's done
+        perf::Measurement done(perf::Timing{0.05, 0.1});
+        auto t = perf::Clock::now();
+        done.start(t, true);
+        int guard = 0;
+        while (done.phase() != perf::Phase::done && guard++ < 1000)
+        {
+            t += std::chrono::milliseconds(10);
+            done.frame(t);
+            done.gpu_frame(done.phase(), done.phase() == perf::Phase::off ? 4.0 : 5.0);
+        }
+        const std::string json = perf::state_json(done, t, "");
+        check(json.find("\"gpuOn\":5.00") != std::string::npos && json.find("\"gpuOff\":4.00") != std::string::npos &&
+                  json.find("\"gpuFramesOn\":") != std::string::npos,
+              "the result has the GPU time per frame with and without the mod");
+        perf::Measurement none(perf::Timing{0.05, 0.1});
+        t = perf::Clock::now();
+        none.start(t, true);
+        guard = 0;
+        while (none.phase() != perf::Phase::done && guard++ < 1000)
+            none.frame(t += std::chrono::milliseconds(10));
+        check(perf::state_json(none, t, "").find("gpuOn") == std::string::npos,
+              "without GPU times the result has none");
+    }
+    {
         // MicrosoftGame.Config's <Identity> (as in the MS Store version's, 9 November 2026)
         check(perf::game_config_version(
                   "<?xml version=\"1.0\" encoding=\"utf-8\"?>\r\n<Game configVersion=\"1\">\r\n  <Identity "

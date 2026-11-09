@@ -316,6 +316,50 @@ double Result::drift() const
     return a + b > 0.0 ? std::abs(a - b) / ((a + b) / 2.0) : 0.0;
 }
 
+double Result::gpu_on() const
+{
+    const uint32_t n = on1.gpu_frames + on2.gpu_frames;
+    return n > 0 ? (on1.gpu_ms_sum + on2.gpu_ms_sum) / n : 0.0;
+}
+
+double busy_ms(std::vector<std::pair<uint64_t, uint64_t>> spans, uint64_t frequency)
+{
+    if (spans.empty() || frequency == 0)
+        return -1.0;
+    std::sort(spans.begin(), spans.end());
+    if (spans.back().first - spans.front().first > frequency)
+        return -1.0;
+    uint64_t total = 0, start = spans.front().first, end = spans.front().second;
+    for (const auto &[b, e] : spans)
+    {
+        if (b == 0 || e < b || e - b > frequency)
+            return -1.0;
+        if (b > end)
+        {
+            total += end - start;
+            start = b;
+            end = e;
+        }
+        else
+            end = std::max(end, e);
+    }
+    total += end - start;
+    return double(total) * 1000.0 / double(frequency);
+}
+
+void Measurement::gpu_frame(Phase measured_in, double ms)
+{
+    if (!running() || !(ms > 0.0))
+        return;
+    Part *p = measured_in == Phase::on ? &result_.on1 : measured_in == Phase::off ? &result_.off
+              : measured_in == Phase::on2 ? &result_.on2 : nullptr;
+    if (p != nullptr)
+    {
+        p->gpu_frames += 1;
+        p->gpu_ms_sum += ms;
+    }
+}
+
 void Measurement::start(Clock::time_point now, bool enabled)
 {
     restore_enabled_ = running() ? restore_enabled_ : enabled;
@@ -552,7 +596,13 @@ std::string state_json(const Measurement &m, Clock::time_point now, const std::s
              ",\"p99On\":" + number(std::max(r.on1.ms_p99, r.on2.ms_p99)) + ",\"p99Off\":" + number(r.off.ms_p99) +
              ",\"fpsOn1\":" + number(r.on1.fps()) + ",\"fpsOn2\":" + number(r.on2.fps()) +
              ",\"drift\":" + number(r.drift(), 3) + ",\"framesOn\":" + std::to_string(r.on1.frames + r.on2.frames) +
-             ",\"framesOff\":" + std::to_string(r.off.frames) + "}";
+             ",\"framesOff\":" + std::to_string(r.off.frames);
+        if (r.has_gpu())
+            s += ",\"gpuOn\":" + number(r.gpu_on(), 2) + ",\"gpuOff\":" + number(r.gpu_off(), 2) +
+                 ",\"gpuOn1\":" + number(r.on1.gpu_ms(), 2) + ",\"gpuOn2\":" + number(r.on2.gpu_ms(), 2) +
+                 ",\"gpuFramesOn\":" + std::to_string(r.on1.gpu_frames + r.on2.gpu_frames) +
+                 ",\"gpuFramesOff\":" + std::to_string(r.off.gpu_frames);
+        s += "}";
     }
     if (!system.empty())
         s += ",\"system\":" + system;

@@ -44,7 +44,8 @@ const MAX_TEXT = 1000;
 const ID_SECONDS = 600;
 const IMPRESSIONS = ["no noticeable difference", "noticeable but fine", "too slow to use"];
 
-// [key in the report, column header]; "received", "changePct" and "extra" are this script's.
+// [key in the report, column header]; "received", "changePct", "gpuChangePct" and "extra" are this script's.
+// New columns go at the end, so rows already in the sheet keep theirs.
 const COLUMNS = [
   ["received", "Received (UTC)"],
   ["version", "Mod version"],
@@ -53,6 +54,9 @@ const COLUMNS = [
   ["changePct", "Change with the mod (%)"],
   ["p99On", "99 % of frames under (ms), with"],
   ["p99Off", "99 % of frames under (ms), without"],
+  ["gpuMsOn", "GPU ms per frame, with"],
+  ["gpuMsOff", "GPU ms per frame, without"],
+  ["gpuChangePct", "GPU time change with the mod (%)"],
   ["impression", "How it runs"],
   ["stutters", "Stutters"],
   ["limitedBy", "Limited by (sim's counter)"],
@@ -91,6 +95,10 @@ const COLUMNS = [
   ["driftPct", "The parts with the mod differ by (%)"],
   ["framesOn", "Frames timed with"],
   ["framesOff", "Frames timed without"],
+  ["gpuMsOn1", "GPU ms, 1st part with"],
+  ["gpuMsOn2", "GPU ms, 2nd part with"],
+  ["gpuFramesOn", "GPU frames timed with"],
+  ["gpuFramesOff", "GPU frames timed without"],
   ["simSettings", "Sim settings (all)"],
   ["gpuVendor", "GPU vendor"],
   ["comment", "Comment"],
@@ -98,6 +106,7 @@ const COLUMNS = [
   ["extra", "Other fields"],
 ];
 const NUMBERS = ["fpsOn", "fpsOff", "p99On", "p99Off", "fpsOn1", "fpsOn2", "driftPct", "framesOn", "framesOff",
+                 "gpuMsOn", "gpuMsOff", "gpuChangePct", "gpuMsOn1", "gpuMsOn2", "gpuFramesOn", "gpuFramesOff",
                  "vramGB", "threads", "ramGB", "renderScaling", "reshadeEffects", "registerSpace", "altitudeFt", "aglFt"];
 
 /** The answer as JSON, or as JSONP when the request names a callback (a plain identifier only). */
@@ -215,6 +224,8 @@ function row(r) {
   const values = Object.assign({}, r);
   values.received = Utilities.formatDate(new Date(), "UTC", "yyyy-MM-dd HH:mm:ss");
   values.changePct = Math.round((r.fpsOn / r.fpsOff - 1) * 1000) / 10;
+  values.gpuChangePct = typeof r.gpuMsOn === "number" && typeof r.gpuMsOff === "number" && r.gpuMsOff > 0
+    ? Math.round((r.gpuMsOn / r.gpuMsOff - 1) * 1000) / 10 : undefined;
   const extra = {};
   Object.keys(r).forEach((k) => {
     if (!known[k] && k !== "kind" && k !== "schema" && k !== "id") extra[k] = r[k];

@@ -780,12 +780,16 @@ them again:
 the mod costs on your PC and, if you want, sends me the result, so I can see
 which systems it runs well on and which it doesn't:
 1. Find a view with clouds (most of the mod's cost is in them) and hold it
-   still: pause the sim or slew. Switch off V-Sync and frame-rate limits for
-   now if you can: with a cap, both results come out the same.
+   still: pause the sim or slew. Keep other windows off the sim meanwhile.
 2. Tap **Start**. For about 36 seconds the mod switches itself on, off and on
-   again while the add-on times the frames. Ctrl+Shift+F9, or the app's own
-   switch, stops it; afterwards the mod is as it was.
-3. The app shows the result and everything that would be sent: the graphics
+   again while the add-on times the frames: the frame rate, and how long the
+   GPU works on each frame. Ctrl+Shift+F9, or the app's own switch, stops it;
+   afterwards the mod is as it was.
+3. The app shows the result: the frame rate and the GPU's time per frame, with
+   and without the mod. Where the frame rate is capped (V-Sync, a 60 Hz
+   screen, a frame limit, frame generation), it comes out the same both ways,
+   and the GPU time shows the cost. It also shows everything that would be
+   sent: the graphics
    card, driver, CPU, memory and Windows version, the sim's version (MS Store
    or Steam, and its version number, such as 1.9.24.0), its own graphics
    settings (from its `UserCfg.opt`: anti-aliasing and upscaling, frame
