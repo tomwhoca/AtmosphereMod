@@ -246,8 +246,8 @@ above, except solid clouds 0.5 and a 60 km anchoring radius.
 
 ### Settings on the EFB tablet
 
-The AtmosphereMod app's four tabs (see [Settings](#settings)), here with a few
-settings changed from the defaults.
+The AtmosphereMod app's five tabs in 0.7.0 (see [Settings](#settings)), here
+with a few settings changed from the defaults.
 
 <table>
   <tr>
@@ -255,7 +255,7 @@ settings changed from the defaults.
     <td width="50%"><a href="Screenshots/efb-sky-light.png"><img src="Screenshots/efb-sky-light.png" alt="EFB app: the Sky &amp; light tab"></a></td>
   </tr>
   <tr>
-    <td><b>Haze</b>: the atmosphere and the METAR's haze; the manual haze is folded away.</td>
+    <td><b>Haze</b>: the atmosphere, the METAR's haze and its strength; the manual haze is folded away.</td>
     <td><b>Sky &amp; light</b>: real-world sky colours and the daylight white balance.</td>
   </tr>
   <tr>
@@ -263,8 +263,16 @@ settings changed from the defaults.
     <td><a href="Screenshots/efb-clouds.png"><img src="Screenshots/efb-clouds.png" alt="EFB app: the Clouds tab"></a></td>
   </tr>
   <tr>
-    <td><b>Cloud lighting</b>, with its "More" section open: silver lining, glory, your aircraft's shadow.</td>
-    <td><b>Clouds</b>, with "More" open: the METAR anchoring, solid clouds, cloud types and smooth bases; under "More", each cloud type's thickness.</td>
+    <td><b>Cloud lighting</b>: silver lining, glory, your aircraft's shadow and Sun-facing cloud sides; the powder effect, crisper edges and the finer settings are under "More".</td>
+    <td><b>Clouds</b>: the METAR anchoring, solid clouds, fly-through clouds, cloud types, smooth bases and thunderstorms; under "More", each cloud type's thickness.</td>
+  </tr>
+  <tr>
+    <td><a href="Screenshots/efb-presets.png"><img src="Screenshots/efb-presets.png" alt="EFB app: the Presets tab"></a></td>
+    <td></td>
+  </tr>
+  <tr>
+    <td><b>Presets</b>: your settings saved under a name, the mod's Default, and presets imported from a file.</td>
+    <td></td>
   </tr>
 </table>
 
