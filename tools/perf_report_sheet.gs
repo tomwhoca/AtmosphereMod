@@ -7,7 +7,7 @@
 //      this file, save.
 //   2. Deploy > New deployment > type Web app; Execute as: Me; Who has
 //      access: Anyone. Deploy, and allow the access it asks for (only this
-//      spreadsheet, through SpreadsheetApp).
+//      spreadsheet: @OnlyCurrentDoc below).
 //   3. The web app URL (https://script.google.com/macros/s/.../exec) goes
 //      into REPORT_URL in PerfReport.tsx.
 // After changing this file: Deploy > Manage deployments > edit > Version: New
@@ -23,6 +23,8 @@
 // GET answers {"ok":true,...} without writing anything (to check that the URL
 // works); POST takes the report as JSON (text/plain, so a browser sends it
 // without a CORS preflight) and answers {"ok":true} or {"ok":false,"error":...}.
+
+/** @OnlyCurrentDoc  (the script asks for access to this spreadsheet only) */
 
 const SHEET = "Reports";
 const RATE_PER_MINUTE = 20;
