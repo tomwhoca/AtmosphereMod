@@ -51,12 +51,17 @@ rendering, and consists of several components:
 
 ## Screenshots
 
-Taken on 26 October 2026 (the thunderstorms on 29 October) with live weather,
-each pair a few seconds apart with the mod off and on.
-The settings were the shipping ones except for solid clouds 4 (2 by default
-then, 0.5 since 0.6.0),
-crisper cloud edges 2 (off by default) and small changes to the cloud
-lighting.
+Taken with live weather, each pair a few seconds apart with the mod off and
+on, on two days. The settings were the shipping ones except:
+
+- **9 November 2026**, with 0.7.0 (Cologne, Mumbai, Canberra, Stavanger and
+  Vigo): solid clouds 2 (0.5 by default), crisper cloud edges 2 (off by
+  default), Sun-facing cloud sides 40 % with Powder effect 0 %, haze strength
+  105 % (75 % in Cologne and Mumbai), sun glare in haze 30 % (57 % by
+  default), a 60 km station radius and small changes to the cloud lighting.
+- **26 October 2026** (the thunderstorms on 29 October), the others: solid
+  clouds 4 (2 by default then), crisper cloud edges 2 and small changes to the
+  cloud lighting.
 
 ### Haze
 
@@ -73,11 +78,11 @@ lighting.
     <td colspan="2"><b>Monterrey</b>, humid haze at 8 km: a bright, milky haze, with the mountains fading into it. MSFS shows clear air under a dark overcast.<br><sub>METAR <code>MMMY 261340Z 00000KT 5SM BKN020 BKN080 20/19 A3022 RMK 8/530 HZY</code></sub></td>
   </tr>
   <tr>
-    <td><img src="Screenshots/haze-tenerife-south-off.jpg" alt="Mod off: Tenerife South, haze at 9 km"></td>
-    <td><img src="Screenshots/haze-tenerife-south-on.jpg" alt="Mod on: Tenerife South, haze at 9 km"></td>
+    <td><img src="Screenshots/haze-cologne-off.jpg" alt="Mod off: Cologne, humid air with 10 km or more"></td>
+    <td><img src="Screenshots/haze-cologne-on.jpg" alt="Mod on: Cologne, humid air with 10 km or more"></td>
   </tr>
   <tr>
-    <td colspan="2"><b>Tenerife South</b>, haze at 9 km: a pale haze over the coast, with the distance fading as reported. MSFS's air is clear.<br><sub>METAR <code>GCTS 261400Z 11008KT 9000 NSC 27/22 Q1016 NOSIG</code></sub></td>
+    <td colspan="2"><b>Cologne</b>, humid air under an overcast, with 10 km or more reported: a light haze over the city and the Rhine, with the distance fading. MSFS's view is clear to the horizon.<br><sub>METAR <code>EDDK 090850Z AUTO 09004KT 050V140 9999 OVC033 07/05 Q1019 NOSIG</code></sub></td>
   </tr>
   <tr>
     <td><img src="Screenshots/haze-keflavik-off.jpg" alt="Mod off: Keflavík, drizzle and mist at 2 km"></td>
@@ -94,11 +99,11 @@ lighting.
     <td colspan="2"><b>Nouakchott</b>, 6 km in very dry air (the METAR has no weather code; the mod infers dust from the humidity): the haze closes in to the reported visibility. MSFS's view is clear to the horizon.<br><sub>METAR <code>GQNO 261400Z 12014KT 6000 NSC 41/07 Q1011 NOSIG</code></sub></td>
   </tr>
   <tr>
-    <td><img src="Screenshots/haze-itaituba-off.jpg" alt="Mod off: Itaituba, smoke and mist at 3 km"></td>
-    <td><img src="Screenshots/haze-itaituba-on.jpg" alt="Mod on: Itaituba, smoke and mist at 3 km"></td>
+    <td><img src="Screenshots/haze-mumbai-off.jpg" alt="Mod off: Mumbai, smoke at 4 km"></td>
+    <td><img src="Screenshots/haze-mumbai-on.jpg" alt="Mod on: Mumbai, smoke at 4 km"></td>
   </tr>
   <tr>
-    <td colspan="2"><b>Itaituba</b>, in the Amazon, smoke and mist at 3 km: the haze closes in to the reported visibility. MSFS keeps a shallow haze layer below.<br><sub>METAR <code>SBIH 261400Z 12004KT 3000 BR FU SCT017 BKN080 27/24 Q1014</code></sub></td>
+    <td colspan="2"><b>Mumbai</b>, smoke at 4 km in dry air: the haze takes the colour of smoke and closes in to the reported visibility. MSFS's haze is a pale blue-white.<br><sub>METAR <code>VABB 090800Z 11012KT 4000 FU NSC 35/08 Q1013 NOSIG</code></sub></td>
   </tr>
 </table>
 
@@ -131,11 +136,11 @@ lighting.
     <td colspan="2"><b>Tbilisi</b> in the late afternoon: the low sun lights the cumulus in warm colours, with deeper shading. MSFS's clouds stay white.<br><sub>METAR <code>UGTB 261300Z 16004KT 9999 SCT025 BKN039 15/11 Q1022 NOSIG</code></sub></td>
   </tr>
   <tr>
-    <td><img src="Screenshots/sky-santorini-off.jpg" alt="Mod off: Santorini in the late afternoon"></td>
-    <td><img src="Screenshots/sky-santorini-on.jpg" alt="Mod on: Santorini in the late afternoon"></td>
+    <td><img src="Screenshots/sky-canberra-sunset-off.jpg" alt="Mod off: Canberra at sunset"></td>
+    <td><img src="Screenshots/sky-canberra-sunset-on.jpg" alt="Mod on: Canberra at sunset"></td>
   </tr>
   <tr>
-    <td colspan="2"><b>Santorini</b> in the late afternoon: a warm, hazy sky over the caldera, with a flat band of low cloud, as reported. MSFS covers the sky in white cloud.<br><sub>METAR <code>LGSR 261350Z 24007KT 9999 SCT020 20/12 Q1009</code></sub></td>
+    <td colspan="2"><b>Canberra</b> at sunset, the sun 2&deg; high: an orange band along the horizon, with the cumulus lit from below. MSFS's sunset is a paler yellow, with greyer clouds.<br><sub>METAR <code>YSCB 090800Z AUTO 29006KT 9999 // FEW079 17/04 Q1017</code></sub></td>
   </tr>
   <tr>
     <td><img src="Screenshots/sky-bergen-off.jpg" alt="Mod off: Bergen in the low afternoon sun"></td>
@@ -193,11 +198,11 @@ With the mod only: MSFS has neither a glory nor its strong silver lining.
     <td colspan="2"><b>Clermont-Ferrand</b>, layered stratocumulus: smooth, flat bases with soft edges. MSFS's clouds are streaky grey.<br><sub>METAR <code>LFLC 261400Z AUTO 15003KT 090V230 9999 SCT029 BKN041 BKN047 16/09 Q1020 NOSIG</code></sub></td>
   </tr>
   <tr>
-    <td><img src="Screenshots/clouds-shannon-off.jpg" alt="Mod off: above Shannon"></td>
-    <td><img src="Screenshots/clouds-shannon-on.jpg" alt="Mod on: above Shannon"></td>
+    <td><img src="Screenshots/clouds-stavanger-off.jpg" alt="Mod off: above Stavanger"></td>
+    <td><img src="Screenshots/clouds-stavanger-on.jpg" alt="Mod on: above Stavanger"></td>
   </tr>
   <tr>
-    <td colspan="2"><b>Above Shannon</b>, on the stratocumulus deck the METAR reports: smooth, soft tops. MSFS shows a field of lumpy cumulus.<br><sub>METAR <code>EINN 261400Z 17018KT 9999 -RA FEW018 BKN020 BKN035 17/14 Q0990 NOSIG</code></sub></td>
+    <td colspan="2"><b>Above Stavanger</b>, on the deck the METAR reports, the sun 7&deg; high: firm, sunlit tops at varied heights. MSFS's tops are grey and see-through.<br><sub>METAR <code>ENZV 090820Z 08003KT 9999 -RA OVC040 07/04 Q1020 NOSIG</code></sub></td>
   </tr>
   <tr>
     <td><img src="Screenshots/clouds-bordeaux-off.jpg" alt="Mod off: Bordeaux"></td>
@@ -207,11 +212,11 @@ With the mod only: MSFS has neither a glory nor its strong silver lining.
     <td colspan="2"><b>Bordeaux</b>: broken cumulus with blue sky between, as reported. MSFS closes it to a dark overcast.<br><sub>METAR <code>LFBD 261400Z AUTO VRB03KT 9999 BKN028 20/15 Q1019 NOSIG</code></sub></td>
   </tr>
   <tr>
-    <td><img src="Screenshots/clouds-horta-off.jpg" alt="Mod off: Horta, Azores"></td>
-    <td><img src="Screenshots/clouds-horta-on.jpg" alt="Mod on: Horta, Azores"></td>
+    <td><img src="Screenshots/clouds-vigo-off.jpg" alt="Mod off: Vigo"></td>
+    <td><img src="Screenshots/clouds-vigo-on.jpg" alt="Mod on: Vigo"></td>
   </tr>
   <tr>
-    <td colspan="2"><b>Horta</b>, Azores: firm cumulus over the island with blue sky between, and a deeper blue sea.<br><sub>METAR <code>LPHR 261400Z 34011KT 300V040 9999 FEW025 BKN060 19/12 Q1018</code></sub></td>
+    <td colspan="2"><b>Vigo</b>: the broken layers the METAR reports, dark with blue sky between and a shower over the hills. MSFS's clouds are soft and brownish.<br><sub>METAR <code>LEVX 090830Z 19010KT 150V220 9999 FEW011 SCT025 BKN032 16/14 Q1004 NOSIG</code></sub></td>
   </tr>
 </table>
 
@@ -233,8 +238,8 @@ shipping values are now 10 m and 10 %), solid clouds 0.5.
 ### Thunderstorms
 
 Near Manaus in the late afternoon, with thunderstorms switched on (`C32`,
-experimental, off by default). The other settings were as above, except solid
-clouds 0.5 and a 60 km anchoring radius.
+experimental, off by default). The other settings were those of 26 October
+above, except solid clouds 0.5 and a 60 km anchoring radius.
 
 <table>
   <tr>
