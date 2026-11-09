@@ -310,6 +310,7 @@ check(model.value("T3").get() === 4 && model.effectiveValue("T3").get() === 7.5,
   // the sheet's script (tools/perf_report_sheet.gs), in a stand-in for Apps Script
   const sheetScript = () => {
     const rows = [];
+    const appended = [];  // as the script appends them, before Sheets reads them
     const sheet = {
       getLastRow: () => rows.length,
       getLastColumn: () => (rows.length > 0 ? rows[0].length : 0),
@@ -318,7 +319,11 @@ check(model.value("T3").get() === 4 && model.effectiveValue("T3").get() === 7.5,
         setValues: (v) => { rows[r - 1] = v[0].slice(); return { setFontWeight: () => {} }; },
       }),
       setFrozenRows: () => {},
-      appendRow: (row) => rows.push(row),
+      // like Sheets: a leading apostrophe keeps text as it is and isn't part of the value
+      appendRow: (row) => {
+        appended.push(row);
+        rows.push(row.map((v) => (typeof v === "string" && v.startsWith("'") ? v.slice(1) : v)));
+      },
     };
     const cache = new Map();
     const env = {
@@ -331,7 +336,7 @@ check(model.value("T3").get() === 4 && model.effectiveValue("T3").get() === 7.5,
     };
     vm.createContext(env);
     vm.runInContext(fs.readFileSync(path.join(__dirname, "..", "..", "..", "..", "tools", "perf_report_sheet.gs"), "utf8"), env);
-    return { env, rows };
+    return { env, rows, appended };
   };
   const gs = sheetScript();
   const gsPost = (body) => JSON.parse(gs.env.doPost({ postData: { contents: body } }).text);
@@ -347,6 +352,10 @@ check(model.value("T3").get() === 4 && model.effectiveValue("T3").get() === 7.5,
         && col("GPU time change with the mod (%)") === 38.6 && col("GPU frames timed without") === 470,
         `sheet: the row under its headers (${JSON.stringify(gs.rows[1])})`);
   check(col("Other fields") === "", `sheet: every key the app sends has its column (${col("Other fields")})`);
+  const raw = (label, n = 0) => gs.appended[n][head.indexOf(label)];
+  check(raw("Mod version") === "'0.7.1" && raw("MSFS version") === "'1.9.24.0" && raw("GPU") === "'NVIDIA GeForce RTX 5080"
+        && raw("Received (UTC)") === "2026-11-09 12:00:00" && raw("FPS with the mod") === 61.2 && raw("Comment") === "",
+        "sheet: text goes in as text (the version isn't read as a date), the time as a time, numbers as numbers");
   check(gsPost("nonsense").ok === false
         && gsPost('{"kind":"performance-report","version":"0.7.1","fpsOn":5000,"fpsOff":60,"impression":"too slow to use"}')
           .ok === false
@@ -354,7 +363,8 @@ check(model.value("T3").get() === 4 && model.effectiveValue("T3").get() === 7.5,
         && gsPost(JSON.stringify({ ...f, kind: "other" })).ok === false && gs.rows.length === 2,
         "sheet: what doesn't look like a report is turned away");
   gsPost(JSON.stringify({ ...f, comment: '=IMPORTXML("http://example.test")', contact: "x".repeat(5000), newKey: 1 }));
-  check(col("Comment", 2) === `'=IMPORTXML("http://example.test")` && col("Contact", 2).length === 1000
+  check(raw("Comment", 1) === `'=IMPORTXML("http://example.test")`
+        && col("Comment", 2) === `=IMPORTXML("http://example.test")` && col("Contact", 2).length === 1000
         && col("Other fields", 2) === '{"newKey":1}', "sheet: formulas stay text, long text is cut, new keys are kept");
   let accepted = 0;
   for (let i = 0; i < 25; i++) {

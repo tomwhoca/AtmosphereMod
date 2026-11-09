@@ -211,11 +211,14 @@ function cell(key, value) {
     const n = Number(value);
     return isFinite(n) ? n : "";
   }
+  if (key === "received") return String(value);  // (Sheets reads it as a date and time, for sorting)
   if (typeof value === "boolean") return value ? "yes" : "no";
   let text = Array.isArray(value) ? value.map(String).join(", ") : typeof value === "object" ? JSON.stringify(value)
     : String(value);
   text = text.slice(0, key === "simSettings" || key === "extra" ? 4 * MAX_TEXT : MAX_TEXT);
-  return /^[=+\-@\t\r]/.test(text) ? "'" + text : text;
+  // Sheets reads what's appended as if it were typed: text could become a formula, a number or a date (the mod's
+  // version 0.7.1 became a date in this German sheet). A leading apostrophe keeps it as it is, and doesn't show.
+  return text === "" ? "" : "'" + text;
 }
 
 function row(r) {
