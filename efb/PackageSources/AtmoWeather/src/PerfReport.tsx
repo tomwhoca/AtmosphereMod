@@ -1,8 +1,11 @@
 // Performance report: the add-on measures the mod's cost (it switches the mod
 // on, off and on again and times the frames: addon/src/perf_report.h) and
 // finds the PC and the sim's settings; this shows all of it, asks for the
-// user's impression, and sends it to the mod's performance form on Jotform
-// when the user taps Send. Nothing is sent before.
+// user's impression, and sends it when the user taps Send (nothing is sent
+// before): as JSON to a Google Apps Script web app that adds it to the mod's
+// performance sheet (tools/perf_report_sheet.gs). Not to the Jotform form
+// people fill in on the web: Jotform answers a post that doesn't come from
+// its own page in a browser with a captcha, which the sim can't show.
 //
 //   AtmosphereMod.Settings  app -> add-on  {measure: true} starts, {measure: false} stops
 //   AtmosphereMod.State     add-on -> app  {..., report: {phase, progress, result?, system?}}
@@ -12,10 +15,10 @@ import {
   ComponentProps, DisplayComponent, FSComponent, Subject, Subscribable, Subscription, VNode,
 } from "@microsoft/msfs-sdk";
 
-/** The form (the same one people fill in on the web). */
-export const FORM_ID = "263122374395054";
-export const FORM_URL = `https://form.jotform.com/${FORM_ID}`;
-export const SUBMIT_URL = `https://eu-submit.jotform.com/submit/${FORM_ID}`;
+/** The web app of tools/perf_report_sheet.gs (its deployment's /exec URL). */
+export const REPORT_URL = "";
+/** The same questions as a form on the web, for when sending from the sim fails. */
+export const FORM_URL = "https://form.jotform.com/263122374395054";
 
 /** What the add-on sends (perf_report.cpp state_json and system_json). */
 export interface AddonReport {
@@ -111,107 +114,82 @@ function simSettings(report: AddonReport, vr: boolean): {
 
 const round1 = (x: number): string => (Math.round(x * 10) / 10).toString();
 
-/** The form's fields, by the names Jotform gave them. */
-export function formFields(report: AddonReport, ctx: Context, answers: Answers): Record<string, string | string[]> {
+/** A report as the sheet's script takes it (tools/perf_report_sheet.gs: its COLUMNS name these keys). */
+export type ReportFields = Record<string, string | number | boolean>;
+
+/** The report for the sheet: the measurement, the PC, the sim's settings (the VR ones in VR), and the answers. */
+export function reportFields(report: AddonReport, ctx: Context, answers: Answers): ReportFields {
   const pc = report.system?.pc;
   const sim = report.system?.sim;
   const reshade = report.system?.reshade;
-  const result = report.result;
+  const r = report.result;
   const s = simSettings(report, answers.vr);
-  const f: Record<string, string | string[]> = {
-    formID: FORM_ID,
-    simple_spc: `${FORM_ID}-${FORM_ID}`,
-    q4_q4_textbox2: pc?.cpu ?? "",
-    q5_q5_textbox3: pc?.gpu ?? "",
-    q15_gpuMemory: pc ? String(Math.round(pc.vramGB)) : "",
-    q16_gpuDriver: pc?.driver ?? "",
-    q6_q6_number4: pc ? String(pc.ramGB) : "",
-    q19_atmospheremodVersion: ctx.version,
-    q20_reshade: reshade?.loader.toLowerCase() === "reshade64.dll" ? "OptiShade" : "ReShade with full add-on support",
-    q24_renderScaling: s.scaling !== "" ? String(Math.round(parseFloat(s.scaling) * 100)) : "",
-    q13_q13_textbox11: [
-      s.preset !== "" ? `preset ${s.preset}` : "",
-      s.aa !== "" ? `${s.aa}${/DLSS/i.test(s.aa) && s.dlss ? ` ${s.dlss}` : /FSR/i.test(s.aa) && s.fsr ? ` ${s.fsr}` : ""}` : "",
-      s.frameGen !== "" && !/^(NONE|OFF|0)$/i.test(s.frameGen) ? `frame generation ${s.frameGen}${s.frames ? ` x${s.frames}` : ""}` : "",
-      sim?.cfg["Video.VSync"] === "1" ? "V-Sync on" : "",
-    ].filter((x) => x !== "").join(", "),
-    q29_atmospheremodSettings: ctx.defaultPreset ? "Default preset" : "my own settings",
-    q30_weatherAnd: answers.weather,
-    q28_whereAnd: [station(ctx.metar), `${Math.round(ctx.altitudeFt)} ft`, `${Math.round(ctx.aglFt)} ft above the ground`]
-      .filter((x) => x !== "").join(", "),
-    q9_q9_number7: result ? round1(result.fpsOn) : "",
-    q10_q10_number8: result ? round1(result.fpsOff) : "",
-    q34_overallHow: answers.impression,
-    q35_anythingElse: answers.comment,
-    q36_githubOr: answers.contact,
-    q37_detailsFrom: detailsText(report, ctx, answers),
-    q38_sentFrom: `AtmosphereMod ${ctx.version} EFB app`,
+  const cfg = sim?.cfg ?? {};
+  const num1 = (x: number): number => Math.round(x * 10) / 10;
+  const f: ReportFields = {
+    kind: "performance-report",
+    schema: 1,
+    version: ctx.version,
+    impression: answers.impression,
+    stutters: answers.stutters,
+    limitedBy: answers.limitedBy,
+    weather: answers.weather,
+    vr: answers.vr,
+    modSettings: ctx.defaultPreset ? "Default preset" : ctx.changed.length > 0 ? ctx.changed.join(", ") : "defaults",
+    station: station(ctx.metar),
+    altitudeFt: Math.round(ctx.altitudeFt),
+    aglFt: Math.round(ctx.aglFt),
+    metar: ctx.metar,
+    comment: answers.comment,
+    contact: answers.contact,
   };
-  if (pc?.windows.startsWith("Windows 1")) {
-    f.q17_windowsVersion = pc.windows.startsWith("Windows 11") ? "Windows 11" : "Windows 10";
+  if (r) {
+    Object.assign(f, {
+      fpsOn: num1(r.fpsOn), fpsOff: num1(r.fpsOff), p99On: num1(r.p99On), p99Off: num1(r.p99Off),
+      fpsOn1: num1(r.fpsOn1), fpsOn2: num1(r.fpsOn2), driftPct: num1(r.drift * 100),
+      framesOn: r.framesOn, framesOff: r.framesOff,
+    });
   }
-  if (sim?.store === "Steam") {
-    f.q18_msfs2024 = "Steam";
-  } else if (sim?.store === "Microsoft Store") {
-    f.q18_msfs2024 = "Microsoft Store / Xbox app";
+  if (pc) {
+    Object.assign(f, {
+      gpu: pc.gpu, gpuVendor: pc.gpuVendor, vramGB: num1(pc.vramGB), driver: pc.driver,
+      cpu: pc.cpu, threads: pc.threads, ramGB: pc.ramGB, windows: pc.windows,
+    });
   }
-  const others: string[] = [];
-  const addons = reshade?.addons ?? [];
-  if ((reshade?.effectsOn ?? 0) > 0) {
-    others.push("other ReShade effects or presets");
+  if (sim) {
+    const mode = /DLSS/i.test(s.aa) ? s.dlss : /FSR/i.test(s.aa) ? s.fsr : "";
+    const quality = parseInt(s.clouds, 10);
+    Object.assign(f, {
+      store: sim.store,
+      output: sim.output,
+      antialiasing: [s.aa, mode].filter((x) => x !== "").join(" "),
+      frameGeneration: s.frameGen === "" ? "" : /^(NONE|OFF|0)$/i.test(s.frameGen) ? "off"
+        : `${s.frameGen}${s.frames ? ` x${s.frames}` : ""}`,
+      vsync: answers.vr ? "" : cfg["Video.VSync"] === "1" ? "on" : cfg["Video.VSync"] === "0" ? "off" : "",
+      frameLimiter: answers.vr ? "" : cfg["Video.FrameLimiter"] ?? "",
+      preset: s.preset,
+      cloudQuality: quality >= 0 && quality < CLOUD_QUALITY.length ? CLOUD_QUALITY[quality] : "",
+      rtShadows: s.rtShadows === "1" ? "on" : s.rtShadows === "0" ? "off" : "",
+      packages: sim.packages.join(", "),
+      simSettings: Object.entries(cfg).map(([k, v]) => `${k} ${v}`).join("; "),
+    });
+    if (s.scaling !== "" && isFinite(parseFloat(s.scaling))) {
+      f.renderScaling = Math.round(parseFloat(s.scaling) * 100);
+    }
   }
-  if (addons.some((a) => /renodx/i.test(a))) {
-    others.push("RenoDX");
-  }
-  if ((sim?.packages ?? []).some((p) => p.includes("tritri"))) {
-    others.push("TriTriSim GFX");
-  }
-  if ((sim?.packages ?? []).some((p) => p.includes("cloudsurf"))) {
-    others.push("CloudSurf");
-  }
-  const otherAddons = addons.filter((a) => !/renodx/i.test(a));
-  if (otherAddons.length > 0) {
-    others.push("other");
-    f["q21_otherGraphics[other]"] = `ReShade add-ons: ${otherAddons.join(", ")}`;
-  }
-  f["q21_otherGraphics[]"] = others.length > 0 ? others : ["none"];
-  const display: Record<string, string> = {
-    "1920x1080": "1920x1080", "2560x1440": "2560x1440", "3440x1440": "3440x1440 ultrawide", "3840x2160": "3840x2160 (4K)",
-  };
-  if (answers.vr) {
-    f.q22_displayResolution = "VR headset";
-  } else if (sim && display[sim.output] !== undefined) {
-    f.q22_displayResolution = display[sim.output];
-  } else if (sim) {
-    f.q22_displayResolution = "other";
-    f["q22_displayResolution[other]"] = sim.output;
-  }
-  const aa = s.aa.toUpperCase();
-  const aaChoice = aa === "DLSS" && s.dlss.toUpperCase() === "DLAA" ? "DLAA" : aa.startsWith("DLSS") ? "DLSS"
-    : aa === "DLAA" ? "DLAA" : aa.startsWith("FSR") ? "FSR" : aa.startsWith("XESS") ? "XeSS" : aa === "TAA" ? "TAA" : "";
-  if (aaChoice !== "") {
-    f.q23_antialiasing = aaChoice;
-  } else if (s.aa !== "") {
-    f.q23_antialiasing = "other";
-    f["q23_antialiasing[other]"] = s.aa;
-  }
-  if (s.frameGen !== "") {
-    f.q25_frameGeneration = /^(NONE|OFF|0)$/i.test(s.frameGen) ? "off" : "on";
-  }
-  const quality = parseInt(s.clouds, 10);
-  f.q26_cloudQuality = quality >= 0 && quality < CLOUD_QUALITY.length ? CLOUD_QUALITY[quality] : "don't know";
-  f.q27_raytracedShadows = s.rtShadows === "1" ? "on" : s.rtShadows === "0" ? "off" : "don't know";
-  if (answers.stutters !== "") {
-    f.q33_stuttersWith = answers.stutters;
-  }
-  if (answers.limitedBy !== "") {
-    f.q32_theSims = answers.limitedBy;
+  if (reshade) {
+    Object.assign(f, {
+      reshade: `${reshade.loader.toLowerCase() === "reshade64.dll" ? "OptiShade" : "ReShade"} ${reshade.version} `
+        + `(${reshade.loader})`,
+      reshadeEffects: reshade.effectsOn,
+      reshadeAddons: reshade.addons.length > 0 ? reshade.addons.join(", ") : "none",
+      registerSpace: reshade.registerSpace,
+    });
   }
   return f;
 }
 
-/** Everything the add-on found, in lines, for the form's hidden "Details from the mod" field (and the
- * app's "what will be sent"). */
+/** Everything the add-on found, in lines: the app's "what will be sent". */
 export function detailsText(report: AddonReport, ctx: Context, answers: Answers): string {
   const r = report.result;
   const pc = report.system?.pc;
@@ -245,33 +223,48 @@ export function detailsText(report: AddonReport, ctx: Context, answers: Answers)
   return lines.join("\n");
 }
 
-/** The fields as a form posts them (application/x-www-form-urlencoded). */
-export function encodeForm(fields: Record<string, string | string[]>): string {
-  const parts: string[] = [];
-  for (const [key, value] of Object.entries(fields)) {
-    for (const v of Array.isArray(value) ? value : [value]) {
-      parts.push(`${encodeURIComponent(key)}=${encodeURIComponent(v).replace(/%20/g, "+")}`);
-    }
-  }
-  return parts.join("&");
+/** What the sheet's script answered: the HTTP status (0: no answer, or the sim's browser refused) and the text. */
+export interface PostResult {
+  status: number;
+  text: string;
 }
 
-/** Posts the form; resolves to the HTTP status (0: no answer, or the sim's browser refused). */
-export function postForm(url: string, body: string): Promise<number> {
+/** Posts the report as JSON (text/plain, so a browser sends it without a CORS preflight). */
+export function postReport(url: string, body: string): Promise<PostResult> {
   return new Promise((resolve) => {
     try {
       const xhr = new XMLHttpRequest();
       xhr.open("POST", url, true);
-      xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
+      xhr.setRequestHeader("Content-Type", "text/plain;charset=utf-8");
       xhr.timeout = 20000;
-      xhr.onload = () => resolve(xhr.status);
-      xhr.onerror = () => resolve(0);
-      xhr.ontimeout = () => resolve(0);
+      xhr.onload = () => resolve({ status: xhr.status, text: xhr.responseText ?? "" });
+      xhr.onerror = () => resolve({ status: 0, text: "" });
+      xhr.ontimeout = () => resolve({ status: 0, text: "" });
       xhr.send(body);
     } catch {
-      resolve(0);
+      resolve({ status: 0, text: "" });
     }
   });
+}
+
+/** Whether the script kept the report: only its {"ok":true} counts (a 200 alone can be any page); else why not. */
+export function sendOutcome(result: PostResult): { ok: boolean; why: string } {
+  if (result.status === 0) {
+    return { ok: false, why: "The sim's browser couldn't reach the sheet (no answer)." };
+  }
+  let answer: { ok?: unknown; error?: unknown } | undefined;
+  try {
+    answer = JSON.parse(result.text) as { ok?: unknown; error?: unknown };
+  } catch {
+    answer = undefined;
+  }
+  if (answer?.ok === true) {
+    return { ok: true, why: "" };
+  }
+  if (typeof answer?.error === "string") {
+    return { ok: false, why: `The sheet didn't take it: ${answer.error}.` };
+  }
+  return { ok: false, why: `The sheet didn't answer as expected (HTTP ${result.status}).` };
 }
 
 export type Step = "intro" | "measuring" | "review" | "sending" | "sent" | "failed";
@@ -305,8 +298,9 @@ export class PerfReportModel {
   public constructor(
     private readonly sendToAddon: (data: unknown) => void,
     private readonly getContext: () => Context,
-    private readonly post: (url: string, body: string) => Promise<number> = postForm,
+    private readonly post: (url: string, body: string) => Promise<PostResult> = postReport,
     private readonly now: () => number = () => Date.now(),
+    private readonly url: string = REPORT_URL,
   ) {
     this.vr.sub(() => this.refresh());
     this.weather.sub(() => this.refresh());
@@ -405,13 +399,13 @@ export class PerfReportModel {
     }
     this.note.set("");
     this.step.set("sending");
-    const body = encodeForm(formFields(this.report, this.context, this.answers()));
-    const status = await this.post(SUBMIT_URL, body);
-    if (status >= 200 && status < 400) {
+    const body = JSON.stringify(reportFields(this.report, this.context, this.answers()));
+    const outcome = this.url === "" ? { ok: false, why: "This version has no address to send to." }
+      : sendOutcome(await this.post(this.url, body));
+    if (outcome.ok) {
       this.step.set("sent");
     } else {
-      this.note.set(status === 0 ? "The sim's browser couldn't reach the form (no answer)."
-        : `The form answered with an error (HTTP ${status}).`);
+      this.note.set(outcome.why);
       this.step.set("failed");
     }
   }
@@ -527,8 +521,8 @@ export class PerfReportView extends DisplayComponent<PerfReportViewProps> {
             <div class="atmo-news-text">What will be sent, besides your answers above:</div>
             <div class="atmo-report-details">{model.details}</div>
             <div class="atmo-news-text atmo-report-privacy">
-              It goes to the mod's performance form on Jotform, which also gets your IP address, as any website does.
-              No names or file paths are in it.
+              It goes to a Google Sheet I keep for these reports. Google gets your IP address with it, as any website
+              does, but it isn't saved in the sheet. No names or file paths are in it.
             </div>
             <div class={{ "atmo-buttons": true, "atmo-hidden": at("review") }}>
               <TTButton key="Send" type="secondary" callback={() => void model.send()} />

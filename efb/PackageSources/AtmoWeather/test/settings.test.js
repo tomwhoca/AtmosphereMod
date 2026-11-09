@@ -6,6 +6,7 @@ const esbuild = require("esbuild");
 const path = require("path");
 const os = require("os");
 const fs = require("fs");
+const vm = require("vm");
 
 const out = path.join(os.tmpdir(), "atmo-settings-test.js");
 esbuild.buildSync({
@@ -230,7 +231,7 @@ check(model.value("T3").get() === 4 && model.effectiveValue("T3").get() === 7.5,
   }
 
   {
-  // performance report: the add-on's report (as perf_report_test printed it on the developer's PC) to the form
+  // performance report: the add-on's report (as perf_report_test printed it on the developer's PC) to the sheet
   const system = {
     pc: { gpu: "NVIDIA GeForce RTX 5080", gpuVendor: "NVIDIA", vramGB: 15.6, driver: "621.14",
       cpu: "AMD Ryzen 9 7900X3D 12-Core Processor", threads: 24, ramGB: 64, windows: "Windows 11 (build 26200)" },
@@ -251,43 +252,90 @@ check(model.value("T3").get() === 4 && model.effectiveValue("T3").get() === 7.5,
     altitudeFt: 5012.4, aglFt: 4890.2, changed: ["C16 = 2 (0.5)"], defaultPreset: false };
   const answers = { vr: false, weather: "broken or overcast", impression: "noticeable but fine", stutters: "",
     limitedBy: "GPU", comment: "", contact: "" };
-  const f = perf.formFields(done, ctx, answers);
-  check(f.q5_q5_textbox3 === "NVIDIA GeForce RTX 5080" && f.q15_gpuMemory === "16" && f.q16_gpuDriver === "621.14",
-        "report: the GPU, its memory and driver");
-  check(f.q4_q4_textbox2.startsWith("AMD Ryzen 9") && f.q6_q6_number4 === "64" && f.q17_windowsVersion === "Windows 11",
-        "report: the CPU, RAM and Windows");
-  check(f.q18_msfs2024 === "Microsoft Store / Xbox app" && f.q19_atmospheremodVersion === "0.7.1"
-        && f.q20_reshade === "ReShade with full add-on support", "report: the sim's store, the mod's version, ReShade");
-  check(JSON.stringify(f["q21_otherGraphics[]"]) === JSON.stringify(["other ReShade effects or presets", "RenoDX",
-        "TriTriSim GFX", "other"]) && f["q21_otherGraphics[other]"] === "ReShade add-ons: other.addon64",
-        "report: other graphics mods, from the effects, add-ons and Community packages");
-  check(f.q22_displayResolution === "3840x2160 (4K)" && f.q23_antialiasing === "DLSS" && f.q24_renderScaling === "100"
-        && f.q25_frameGeneration === "on" && f.q26_cloudQuality === "Ultra" && f.q27_raytracedShadows === "on",
-        "report: the sim's settings");
-  check(f.q13_q13_textbox11 === "preset Custom, DLSS AUTO, frame generation DLSSG x2",
-        `report: notable settings (${f.q13_q13_textbox11})`);
-  check(f.q9_q9_number7 === "61.2" && f.q10_q10_number8 === "80.5" && f.q34_overallHow === "noticeable but fine"
-        && f.q32_theSims === "GPU" && f.q33_stuttersWith === undefined, "report: the measurement and the answers");
-  check(f.q28_whereAnd === "LIRF, 5012 ft, 4890 ft above the ground" && f.q29_atmospheremodSettings === "my own settings",
-        "report: where, and the mod's settings");
-  check(f.formID === perf.FORM_ID && f.simple_spc === `${perf.FORM_ID}-${perf.FORM_ID}` && f.website === undefined,
-        "report: the form's id and spam check, the trap field left out");
-  check(f.q37_detailsFrom.includes("61.2 fps with the mod") && f.q37_detailsFrom.includes("C16 = 2 (0.5)")
-        && f.q37_detailsFrom.includes("register space 51") && !/[A-Z]:\\|Users/.test(f.q37_detailsFrom),
-        "report: the details have the measurement and settings, and no paths");
-  const vr = perf.formFields(done, ctx, { ...answers, vr: true });
-  check(vr.q22_displayResolution === "VR headset" && vr.q23_antialiasing === "TAA" && vr.q25_frameGeneration === "off"
-        && vr.q26_cloudQuality === "Medium" && vr.q27_raytracedShadows === "off" && vr.q24_renderScaling === "80",
-        "report: in VR, the sim's VR settings");
-  const odd = perf.formFields({ ...done, system: { ...system, sim: { ...system.sim, output: "1132x598",
+  const f = perf.reportFields(done, ctx, answers);
+  check(f.kind === "performance-report" && f.version === "0.7.1" && f.fpsOn === 61.2 && f.fpsOff === 80.5
+        && f.p99On === 21 && f.driftPct === 0.8 && f.framesOn === 980 && f.framesOff === 644,
+        "report: the measurement, as numbers");
+  check(f.gpu === "NVIDIA GeForce RTX 5080" && f.vramGB === 15.6 && f.driver === "621.14" && f.cpu.startsWith("AMD Ryzen 9")
+        && f.threads === 24 && f.ramGB === 64 && f.windows === "Windows 11 (build 26200)", "report: the PC");
+  check(f.store === "Microsoft Store" && f.output === "3840x2160" && f.antialiasing === "DLSS AUTO"
+        && f.frameGeneration === "DLSSG x2" && f.renderScaling === 100 && f.vsync === "off" && f.preset === "Custom"
+        && f.cloudQuality === "Ultra" && f.rtShadows === "on", `report: the sim's settings (${JSON.stringify(f)})`);
+  check(f.reshade === "ReShade 6.8.0.0 (dxgi.dll)" && f.reshadeEffects === 2
+        && f.reshadeAddons === "renodx-msfs2024.addon64, other.addon64" && f.registerSpace === 51
+        && f.packages === "tritrisim-gfx", "report: ReShade, its add-ons, the Community packages");
+  check(f.impression === "noticeable but fine" && f.limitedBy === "GPU" && f.stutters === "" && f.vr === false
+        && f.weather === "broken or overcast" && f.modSettings === "C16 = 2 (0.5)" && f.station === "LIRF"
+        && f.altitudeFt === 5012 && f.aglFt === 4890, "report: the answers, the mod's settings, where");
+  check(f.simSettings.includes("Video.AntiAliasing DLSS") && !/[A-Z]:\\|Users/.test(JSON.stringify(f)),
+        "report: all the sim's settings, and no paths");
+  const vr = perf.reportFields(done, ctx, { ...answers, vr: true });
+  check(vr.vr === true && vr.antialiasing === "TAA" && vr.frameGeneration === "off" && vr.cloudQuality === "Medium"
+        && vr.rtShadows === "off" && vr.renderScaling === 80 && vr.preset === "VRMedium" && vr.vsync === "",
+        `report: in VR, the sim's VR settings (${JSON.stringify(vr)})`);
+  const odd = perf.reportFields({ ...done, system: { ...system, sim: { ...system.sim, output: "1132x598", packages: [],
     cfg: { "Video.AntiAliasing": "DLSS", "Video.DLSSMode": "DLAA" } }, reshade: { ...system.reshade, loader: "ReShade64.dll",
-    effectsOn: 0, addons: [] } } }, ctx, answers);
-  check(odd.q22_displayResolution === "other" && odd["q22_displayResolution[other]"] === "1132x598"
-        && odd.q23_antialiasing === "DLAA" && odd.q20_reshade === "OptiShade" && odd.q26_cloudQuality === "don't know"
-        && JSON.stringify(odd["q21_otherGraphics[]"]) === JSON.stringify(["TriTriSim GFX"]),
-        "report: an odd window size, DLAA, OptiShade, no cloud setting");
-  const enc = perf.encodeForm({ a: "x y&z", "b[]": ["1", "2"] });
-  check(enc === "a=x+y%26z&b%5B%5D=1&b%5B%5D=2", `report: the form's encoding (${enc})`);
+    effectsOn: 0, addons: [] } } }, { ...ctx, defaultPreset: true }, answers);
+  check(odd.output === "1132x598" && odd.antialiasing === "DLSS DLAA" && odd.reshade.startsWith("OptiShade")
+        && odd.cloudQuality === "" && odd.renderScaling === undefined && odd.reshadeAddons === "none"
+        && odd.modSettings === "Default preset", "report: an odd window size, DLAA, OptiShade, no cloud setting");
+  check(perf.sendOutcome({ status: 200, text: '{"ok":true}' }).ok
+        && !perf.sendOutcome({ status: 200, text: "<html><title>Please Complete</title>" }).ok
+        && perf.sendOutcome({ status: 200, text: '{"ok":false,"error":"no impression"}' }).why.includes("no impression")
+        && perf.sendOutcome({ status: 0, text: "" }).why.includes("no answer"),
+        "report: only the sheet's ok counts as sent (a page with HTTP 200 doesn't)");
+
+  // the sheet's script (tools/perf_report_sheet.gs), in a stand-in for Apps Script
+  const sheetScript = () => {
+    const rows = [];
+    const sheet = {
+      getLastRow: () => rows.length,
+      getLastColumn: () => (rows.length > 0 ? rows[0].length : 0),
+      getRange: (r, c, nr, nc) => ({
+        getValues: () => [Array.from({ length: nc }, (_, i) => (rows[r - 1] ?? [])[c - 1 + i] ?? "")],
+        setValues: (v) => { rows[r - 1] = v[0].slice(); return { setFontWeight: () => {} }; },
+      }),
+      setFrozenRows: () => {},
+      appendRow: (row) => rows.push(row),
+    };
+    const cache = new Map();
+    const env = {
+      ContentService: { MimeType: { JSON: "json" }, createTextOutput: (text) => ({ text, setMimeType() { return this; } }) },
+      SpreadsheetApp: { getActiveSpreadsheet: () => ({ getSheetByName: () => sheet, insertSheet: () => sheet }) },
+      LockService: { getScriptLock: () => ({ tryLock: () => true, releaseLock: () => {} }) },
+      CacheService: { getScriptCache: () => ({ get: (k) => cache.get(k) ?? null, put: (k, v) => cache.set(k, v) }) },
+      Utilities: { formatDate: () => "2026-11-09 12:00:00" },
+      Date: class extends Date { static now() { return 1794200000000; } },
+    };
+    vm.createContext(env);
+    vm.runInContext(fs.readFileSync(path.join(__dirname, "..", "..", "..", "..", "tools", "perf_report_sheet.gs"), "utf8"), env);
+    return { env, rows };
+  };
+  const gs = sheetScript();
+  const gsPost = (body) => JSON.parse(gs.env.doPost({ postData: { contents: body } }).text);
+  check(JSON.parse(gs.env.doGet().text).ok === true && gs.rows.length === 0, "sheet: GET answers ok and writes nothing");
+  check(gsPost(JSON.stringify(f)).ok === true && gs.rows.length === 2, "sheet: a report adds the header and one row");
+  const head = gs.rows[0];
+  const col = (label, n = 1) => gs.rows[n][head.indexOf(label)];
+  check(col("FPS with the mod") === 61.2 && col("FPS without") === 80.5 && col("Change with the mod (%)") === -24
+        && col("GPU") === "NVIDIA GeForce RTX 5080" && col("VR") === "no" && col("Mod settings") === "C16 = 2 (0.5)"
+        && col("Received (UTC)") === "2026-11-09 12:00:00" && col("Render scaling (%)") === 100,
+        `sheet: the row under its headers (${JSON.stringify(gs.rows[1])})`);
+  check(col("Other fields") === "", `sheet: every key the app sends has its column (${col("Other fields")})`);
+  check(gsPost("nonsense").ok === false
+        && gsPost('{"kind":"performance-report","version":"0.7.1","fpsOn":5000,"fpsOff":60,"impression":"too slow to use"}')
+          .ok === false
+        && gsPost(JSON.stringify({ ...f, impression: "great" })).ok === false
+        && gsPost(JSON.stringify({ ...f, kind: "other" })).ok === false && gs.rows.length === 2,
+        "sheet: what doesn't look like a report is turned away");
+  gsPost(JSON.stringify({ ...f, comment: '=IMPORTXML("http://example.test")', contact: "x".repeat(5000), newKey: 1 }));
+  check(col("Comment", 2) === `'=IMPORTXML("http://example.test")` && col("Contact", 2).length === 1000
+        && col("Other fields", 2) === '{"newKey":1}', "sheet: formulas stay text, long text is cut, new keys are kept");
+  let accepted = 0;
+  for (let i = 0; i < 25; i++) {
+    accepted += gsPost(JSON.stringify(f)).ok ? 1 : 0;
+  }
+  check(accepted === 18 && gs.rows.length === 21, `sheet: at most 20 reports a minute (${accepted} more taken)`);
   check(perf.weatherKind("KJFK 091051Z 18010KT 10SM FEW250 12/03 A3012") === "few or scattered clouds"
         && perf.weatherKind("EGLL 091050Z 24012KT 9999 -RA BKN012 OVC020 10/08 Q1008") === "broken or overcast"
         && perf.weatherKind("WMKK 090900Z 00000KT 8000 -TSRA FEW008 FEW017CB SCT028 27/25 Q1007") === "thunderstorms"
@@ -297,15 +345,17 @@ check(model.value("T3").get() === 4 && model.effectiveValue("T3").get() === 7.5,
   check(perf.station("METAR EDDK 091050Z 09004KT") === "EDDK" && perf.station("LIRF 090920Z") === "LIRF"
         && perf.station("") === "", "report: the station from the METAR");
 
-  // the model: start, the add-on's phases, the review, sending
+  // the model: start, the add-on's phases, the review, sending (to the sheet's script above)
   let t = 0;
   const sent = [];
   const posted = [];
-  let status = 200;
+  let reachable = true;
+  const sheet2 = sheetScript();
   const model = new perf.PerfReportModel((d) => sent.push(d), () => ctx, async (url, body) => {
     posted.push([url, body]);
-    return status;
-  }, () => t);
+    return reachable ? { status: 200, text: sheet2.env.doPost({ postData: { contents: body } }).text }
+      : { status: 0, text: "" };
+  }, () => t, "https://script.example.test/exec");
   model.show();
   model.start();
   check(model.step.get() === "measuring" && JSON.stringify(sent.pop()) === '{"measure":true}', "model: Start asks the add-on");
@@ -323,10 +373,10 @@ check(model.value("T3").get() === 4 && model.effectiveValue("T3").get() === 7.5,
   model.vr.set(true);
   check(model.details.get().includes("in VR"), "model: the details follow the answers");
   await model.send();
-  check(model.step.get() === "sent" && posted.length === 1 && posted[0][0] === perf.SUBMIT_URL
-        && posted[0][1].includes("q34_overallHow=too+slow+to+use") && posted[0][1].includes("q22_displayResolution=VR+headset"),
-        "model: Send posts the form");
-  status = 0;
+  check(model.step.get() === "sent" && posted.length === 1 && posted[0][0] === "https://script.example.test/exec"
+        && JSON.parse(posted[0][1]).impression === "too slow to use" && JSON.parse(posted[0][1]).vr === true
+        && sheet2.rows.length === 2, "model: Send posts the report, and the sheet takes it");
+  reachable = false;
   model.show();
   model.start();
   model.onReport({ phase: "on", progress: 0.2 });
@@ -351,6 +401,15 @@ check(model.value("T3").get() === 4 && model.effectiveValue("T3").get() === 7.5,
   model.onReport(undefined);
   check(model.step.get() === "intro" && model.note.get().includes("install the mod again"),
         "model: an add-on without the report is pointed out");
+  const noUrl = new perf.PerfReportModel(() => {}, () => ctx, async () => ({ status: 200, text: '{"ok":true}' }),
+                                         () => 0, "");
+  noUrl.show();
+  noUrl.start();
+  noUrl.onReport({ phase: "on", progress: 0.5 });
+  noUrl.onReport(done);
+  noUrl.impression.set("noticeable but fine");
+  await noUrl.send();
+  check(noUrl.step.get() === "failed" && noUrl.note.get().includes("no address"), "model: without an address it says so");
   }
 
   fs.rmSync(out, { force: true });
