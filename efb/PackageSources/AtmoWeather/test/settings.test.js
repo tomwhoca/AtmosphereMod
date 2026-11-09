@@ -65,7 +65,7 @@ esbuild.buildSync({
 global.window = { setTimeout, clearTimeout };
 const { TABS, SettingsModel, PRESET_DEFAULT, presetChar, presetName, sameName, missingText } = require(out);
 const { DEFAULTS } = require(outDefaults);
-const { WHATS_NEW, WHATS_NEW_KEY, WhatsNewModel } = require(outNews);
+const { WHATS_NEW, WHATS_NEW_KEY, WhatsNewModel, PREVIOUS } = require(outNews);
 const perf = require(outReport);
 
 let failures = 0;
@@ -225,6 +225,16 @@ check(model.value("T3").get() === 4 && model.effectiveValue("T3").get() === 7.5,
   check(!noStore.open.get(), "what's new: and closes there too");
   check(/^\d+\.\d+\.\d+$/.test(WHATS_NEW.release) && WHATS_NEW.items.every(([h, t]) => h && t && !/  /.test(t)),
         `what's new: release ${WHATS_NEW.release}, ${WHATS_NEW.items.length} items, each with a heading and a text`);
+  {
+    const v = (r) => r.split(".").map(Number).reduce((a, n) => a * 1000 + n, 0);
+    const order = [WHATS_NEW.release, ...PREVIOUS.map((p) => p.release)];
+    check(PREVIOUS.length > 0 && PREVIOUS[0].release === "0.7.0"
+          && order.every((r, i) => /^\d+\.\d+\.\d+$/.test(r) && (i === 0 || v(r) < v(order[i - 1])))
+          && PREVIOUS[PREVIOUS.length - 1].release === "0.1.0",
+          `what's new: the previous versions, newest first, ${PREVIOUS[0].release} down to 0.1.0`);
+    check(PREVIOUS.every((p) => p.items.length > 0 && p.items.every(([h, t]) => h && t && !/  /.test(t) && /[.)]$/.test(t))),
+          "what's new: each previous version with its items, each a heading and a sentence");
+  }
   const labels = TABS.flatMap((t) => t.settings.map((s) => s.label));
   for (const name of ["Haze strength", "Sun-facing cloud sides", "Haze from METAR", "Powder effect"]) {
     check(labels.some((l) => l.startsWith(name)), `what's new: "${name}" is a setting's name in the app`);
