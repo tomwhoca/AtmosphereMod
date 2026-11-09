@@ -796,13 +796,15 @@ which systems it runs well on and which it doesn't:
    generation, render scaling, cloud quality, ray-traced shadows), how ReShade
    is loaded and which other add-ons and effects run, the mod's settings that
    differ from the defaults, the METAR and your altitude. Add how the mod runs
-   for you, and tap **Send**. Nothing is sent before.
+   for you and, if you like, your username on GitHub or flightsim.to (if I
+   asked you for a report, that's how I find yours), and tap **Send**.
+   Nothing is sent before.
 
 The report goes to a Google Sheet I keep for these reports, through a small
 Google Apps Script ([tools/perf_report_sheet.gs](tools/perf_report_sheet.gs)).
 Google gets your IP address with it, as any website does, but the script
-can't see it and the sheet doesn't keep it. The report has no names or file
-paths.
+can't see it and the sheet doesn't keep it. Apart from the username you type,
+the report has no names or file paths.
 
 Every setting, including the ones the app doesn't show, is in `tunables.ini`,
 where each one is explained; edits there take effect with Ctrl+Shift+F10. The

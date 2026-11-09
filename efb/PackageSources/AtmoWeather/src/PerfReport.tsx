@@ -624,15 +624,17 @@ export class PerfReportView extends DisplayComponent<PerfReportViewProps> {
             <div class="atmo-report-text">
               <TextBox model={model.comment} placeholder="Anything else (optional)" showDeleteIcon={true} />
             </div>
+            <div class="atmo-news-text">Your username on GitHub or flightsim.to (optional). If I asked you for a
+              report, it's how I find yours, and I can ask you about it.</div>
             <div class="atmo-report-text">
-              <TextBox model={model.contact} placeholder="Your GitHub or flightsim.to name, for questions (optional)"
-                       showDeleteIcon={true} />
+              <TextBox model={model.contact} placeholder="Username" showDeleteIcon={true} />
             </div>
             <div class="atmo-news-text">What will be sent, besides your answers above:</div>
             <div class="atmo-report-details">{model.details}</div>
             <div class="atmo-news-text atmo-report-privacy">
               It goes to a Google Sheet I keep for these reports. Google gets your IP address with it, as any website
-              does, but it isn't saved in the sheet. No names or file paths are in it.
+              does, but it isn't saved in the sheet. Apart from the username you type, no names or file paths are
+              in it.
             </div>
             <div class={{ "atmo-buttons": true, "atmo-hidden": at("review") }}>
               <TTButton key="Send" type="secondary" callback={() => void model.send()} />
