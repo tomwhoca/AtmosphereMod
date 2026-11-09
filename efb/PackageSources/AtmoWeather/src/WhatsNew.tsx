@@ -8,24 +8,14 @@ import { ComponentProps, DataStore, DisplayComponent, FSComponent, Subject, VNod
 /** The release the popup is for, and what it says: change it with every release that has news for the
  * tablet (a release without news leaves it, so nothing shows again). */
 export const WHATS_NEW = {
-  release: "0.7.0",
-  title: "New in AtmosphereMod 0.7",
+  release: "0.7.1",
+  title: "New in AtmosphereMod 0.7.1",
   items: [
-    ["Varied cloud tops",
-      "Air doesn't rise the same everywhere, so clouds in one layer no longer all end at the same height: "
-      + "where the air rises more, they grow taller. On by default (C37 in tunables.ini)."],
-    ["Sun-facing cloud sides",
-      "A new slider in the Cloud lighting tab, off by default: light on the sides of clouds that face the "
-      + "sun, as real, thick cloud reflects it. If you turn it on, set Powder effect to 0 %."],
-    ["Haze strength",
-      "A new slider in the Haze tab, under Haze from METAR, for when the reported haze looks too strong or "
-      + "too weak to you. 100 % is as reported."],
-    ["Smoother haze changes",
-      "When a station's new report changes between an open-ended visibility (9999, 10SM, CAVOK) and a "
-      + "number, the haze now fades over 5 minutes instead of jumping."],
-    ["Using RenoDX?",
-      "The installer has a parameter that lets the two mods work together: see \"With RenoDX\" in the "
-      + "README."],
+    ["Performance report",
+      "A new button at the end of this page measures what the mod costs on your PC: it switches the mod on, "
+      + "off and on again and times the frames and the GPU's work on them. If you like, it then sends me the "
+      + "result with your PC's and the sim's settings, so I can see where the mod runs well and where it needs "
+      + "work. Nothing is sent before you tap Send."],
   ] as [string, string][],
 };
 
