@@ -16,7 +16,8 @@ import {
 } from "@microsoft/msfs-sdk";
 
 /** The web app of tools/perf_report_sheet.gs (its deployment's /exec URL). */
-export const REPORT_URL = "";
+export const REPORT_URL =
+  "https://script.google.com/macros/s/AKfycbx6rG_29Li6D5WJCxulXp8Ij1RXqy7qWbtUPwWPlwzhBoS5sM_UF55DsmQ9BrpwW1ju/exec";
 /** The same questions as a form on the web, for when sending from the sim fails. */
 export const FORM_URL = "https://form.jotform.com/263122374395054";
 
@@ -267,6 +268,57 @@ export function sendOutcome(result: PostResult): { ok: boolean; why: string } {
   return { ok: false, why: `The sheet didn't answer as expected (HTTP ${result.status}).` };
 }
 
+/** Asks the sheet's script, as JSONP, what it did with the report `id`: the sim's browser can't read the answer to
+ * the POST (tools/perf_report_sheet.gs explains why), but loads a script through the same redirect. Resolves like a
+ * readable answer: {status 200, text: the JSON}, or status 0 if no script came. */
+export function confirmReport(url: string, id: string): Promise<PostResult> {
+  return new Promise((resolve) => {
+    const name = `__atmoReport${id}`;
+    const global = window as unknown as Record<string, unknown>;
+    let script: HTMLScriptElement | undefined;
+    let timer = 0;
+    const done = (result: PostResult): void => {
+      window.clearTimeout(timer);
+      delete global[name];
+      script?.parentNode?.removeChild(script);
+      resolve(result);
+    };
+    try {
+      global[name] = (answer: unknown) => done({ status: 200, text: JSON.stringify(answer) });
+      script = document.createElement("script");
+      script.src = `${url}?confirm=${encodeURIComponent(id)}&callback=${name}`;
+      script.onerror = () => done({ status: 0, text: "" });
+      timer = window.setTimeout(() => done({ status: 0, text: "" }), 15000);
+      document.head.appendChild(script);
+    } catch {
+      done({ status: 0, text: "" });
+    }
+  });
+}
+
+/** A report's id: random letters and digits, for its confirmation. */
+export function newReportId(random: () => number = Math.random): string {
+  const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
+  let id = "";
+  for (let i = 0; i < 20; i++) {
+    id += chars[Math.floor(random() * chars.length) % chars.length];
+  }
+  return id;
+}
+
+/** How a report travels (stand-ins in the tests). */
+export interface Transport {
+  post: (url: string, body: string) => Promise<PostResult>;
+  confirm: (url: string, id: string) => Promise<PostResult>;
+  wait: (ms: number) => Promise<void>;
+}
+
+export const WEB_TRANSPORT: Transport = {
+  post: postReport,
+  confirm: confirmReport,
+  wait: (ms) => new Promise((resolve) => window.setTimeout(resolve, ms)),
+};
+
 export type Step = "intro" | "measuring" | "review" | "sending" | "sent" | "failed";
 
 const RUNNING = ["settleOn", "on", "settleOff", "off", "settleOn2", "on2"];
@@ -298,7 +350,7 @@ export class PerfReportModel {
   public constructor(
     private readonly sendToAddon: (data: unknown) => void,
     private readonly getContext: () => Context,
-    private readonly post: (url: string, body: string) => Promise<PostResult> = postReport,
+    private readonly transport: Transport = WEB_TRANSPORT,
     private readonly now: () => number = () => Date.now(),
     private readonly url: string = REPORT_URL,
   ) {
@@ -399,15 +451,43 @@ export class PerfReportModel {
     }
     this.note.set("");
     this.step.set("sending");
-    const body = JSON.stringify(reportFields(this.report, this.context, this.answers()));
     const outcome = this.url === "" ? { ok: false, why: "This version has no address to send to." }
-      : sendOutcome(await this.post(this.url, body));
+      : await this.deliver(this.url);
     if (outcome.ok) {
       this.step.set("sent");
     } else {
       this.note.set(outcome.why);
       this.step.set("failed");
     }
+  }
+
+  /** Posts the report; if its answer can't be read (the sim's browser), asks by its id what became of it, once more
+   * a few seconds later if the script hasn't seen it yet. */
+  private async deliver(url: string): Promise<{ ok: boolean; why: string }> {
+    const id = newReportId();
+    const body = JSON.stringify({ ...reportFields(this.report!, this.context!, this.answers()), id });
+    const posted = await this.transport.post(url, body);
+    if (readable(posted)) {
+      return sendOutcome(posted);
+    }
+    let confirmed = await this.transport.confirm(url, id);
+    if (!sendOutcome(confirmed).ok && /not received/.test(confirmed.text)) {
+      await this.transport.wait(CONFIRM_RETRY_MS);
+      confirmed = await this.transport.confirm(url, id);
+    }
+    return confirmed.status === 0 && posted.status === 0 ? sendOutcome(posted) : sendOutcome(confirmed);
+  }
+}
+
+/** A second confirmation, this long after a "not received" (the post may still be on its way). */
+const CONFIRM_RETRY_MS = 3000;
+
+/** Whether the post's answer is the script's own (JSON with ok), not a failed read or some other page. */
+function readable(result: PostResult): boolean {
+  try {
+    return typeof (JSON.parse(result.text) as { ok?: unknown }).ok === "boolean";
+  } catch {
+    return false;
   }
 }
 

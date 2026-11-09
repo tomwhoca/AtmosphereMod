@@ -300,7 +300,7 @@ check(model.value("T3").get() === 4 && model.effectiveValue("T3").get() === 7.5,
     };
     const cache = new Map();
     const env = {
-      ContentService: { MimeType: { JSON: "json" }, createTextOutput: (text) => ({ text, setMimeType() { return this; } }) },
+      ContentService: { MimeType: { JSON: "json", JAVASCRIPT: "js" }, createTextOutput: (text) => ({ text, setMimeType() { return this; } }) },
       SpreadsheetApp: { getActiveSpreadsheet: () => ({ getSheetByName: () => sheet, insertSheet: () => sheet }) },
       LockService: { getScriptLock: () => ({ tryLock: () => true, releaseLock: () => {} }) },
       CacheService: { getScriptCache: () => ({ get: (k) => cache.get(k) ?? null, put: (k, v) => cache.set(k, v) }) },
@@ -336,6 +336,23 @@ check(model.value("T3").get() === 4 && model.effectiveValue("T3").get() === 7.5,
     accepted += gsPost(JSON.stringify(f)).ok ? 1 : 0;
   }
   check(accepted === 18 && gs.rows.length === 21, `sheet: at most 20 reports a minute (${accepted} more taken)`);
+  const gs3 = sheetScript();
+  const gsGet = (parameter) => gs3.env.doGet({ parameter }).text;
+  const gsPost3 = (body) => JSON.parse(gs3.env.doPost({ postData: { contents: body } }).text);
+  check(gsPost3(JSON.stringify({ ...f, id: "abcdef0123456789xyz0" })).ok === true
+        && gsGet({ confirm: "abcdef0123456789xyz0", callback: "cb_1" }) === 'cb_1({"ok":true});'
+        && gsGet({ confirm: "zzzzzzzzzzzzzzzzzzzz", callback: "cb_1" }) === 'cb_1({"ok":false,"error":"not received"});',
+        "sheet: a report's id confirms it as JSONP; an unknown id isn't received");
+  check(gsPost3(JSON.stringify({ ...f, id: "abcdef0123456789xyz0" })).ok === true && gs3.rows.length === 2,
+        "sheet: the same report (id) twice is kept once");
+  check(gsPost3(JSON.stringify({ ...f, id: "rejected000000000000", impression: "great" })).ok === false
+        && gsGet({ confirm: "rejected000000000000" }) === '{"ok":false,"error":"no impression"}',
+        "sheet: a report turned away gives its reason to the confirmation too");
+  check(gsGet({ confirm: "x", callback: "alert(1)//" }) === '{"ok":false,"error":"no such report"}'
+        && JSON.parse(gsGet({})).ok === true && gs3.rows.length === 2,
+        "sheet: a callback that isn't a plain name gets plain JSON; GET writes nothing");
+  check(/^[a-z0-9]{20}$/.test(perf.newReportId()) && perf.newReportId(() => 0.999999) === "99999999999999999999",
+        "report: ids of 20 letters and digits");
   check(perf.weatherKind("KJFK 091051Z 18010KT 10SM FEW250 12/03 A3012") === "few or scattered clouds"
         && perf.weatherKind("EGLL 091050Z 24012KT 9999 -RA BKN012 OVC020 10/08 Q1008") === "broken or overcast"
         && perf.weatherKind("WMKK 090900Z 00000KT 8000 -TSRA FEW008 FEW017CB SCT028 27/25 Q1007") === "thunderstorms"
@@ -349,12 +366,31 @@ check(model.value("T3").get() === 4 && model.effectiveValue("T3").get() === 7.5,
   let t = 0;
   const sent = [];
   const posted = [];
+  // like the sim's browser: the post arrives, its answer can't be read, the JSONP confirmation can
   let reachable = true;
+  let readable = false;
+  let lost = false;
+  const confirms = [];
+  let waits = 0;
   const sheet2 = sheetScript();
-  const model = new perf.PerfReportModel((d) => sent.push(d), () => ctx, async (url, body) => {
-    posted.push([url, body]);
-    return reachable ? { status: 200, text: sheet2.env.doPost({ postData: { contents: body } }).text }
-      : { status: 0, text: "" };
+  const model = new perf.PerfReportModel((d) => sent.push(d), () => ctx, {
+    post: async (url, body) => {
+      posted.push([url, body]);
+      if (!reachable || lost) {
+        return { status: 0, text: "" };
+      }
+      const text = sheet2.env.doPost({ postData: { contents: body } }).text;
+      return readable ? { status: 200, text } : { status: 0, text: "" };
+    },
+    confirm: async (url, id) => {
+      confirms.push([url, id]);
+      if (!reachable) {
+        return { status: 0, text: "" };
+      }
+      const js = sheet2.env.doGet({ parameter: { confirm: id, callback: "cb" } }).text;
+      return { status: 200, text: js.slice(3, -2) };
+    },
+    wait: async () => { waits++; },
   }, () => t, "https://script.example.test/exec");
   model.show();
   model.start();
@@ -375,7 +411,18 @@ check(model.value("T3").get() === 4 && model.effectiveValue("T3").get() === 7.5,
   await model.send();
   check(model.step.get() === "sent" && posted.length === 1 && posted[0][0] === "https://script.example.test/exec"
         && JSON.parse(posted[0][1]).impression === "too slow to use" && JSON.parse(posted[0][1]).vr === true
-        && sheet2.rows.length === 2, "model: Send posts the report, and the sheet takes it");
+        && sheet2.rows.length === 2 && confirms.length === 1 && confirms[0][1] === JSON.parse(posted[0][1]).id,
+        "model: Send posts the report, the sheet takes it, and its id confirms it (the answer unreadable)");
+  readable = true;
+  await model.send();
+  check(model.step.get() === "sent" && sheet2.rows.length === 3 && confirms.length === 1,
+        "model: a readable answer needs no confirmation");
+  readable = false;
+  lost = true;
+  await model.send();
+  check(model.step.get() === "failed" && model.note.get().includes("not received") && confirms.length === 3
+        && waits === 1 && sheet2.rows.length === 3, "model: a post that never arrived is asked about twice, then failed");
+  lost = false;
   reachable = false;
   model.show();
   model.start();
@@ -401,8 +448,7 @@ check(model.value("T3").get() === 4 && model.effectiveValue("T3").get() === 7.5,
   model.onReport(undefined);
   check(model.step.get() === "intro" && model.note.get().includes("install the mod again"),
         "model: an add-on without the report is pointed out");
-  const noUrl = new perf.PerfReportModel(() => {}, () => ctx, async () => ({ status: 200, text: '{"ok":true}' }),
-                                         () => 0, "");
+  const noUrl = new perf.PerfReportModel(() => {}, () => ctx, undefined, () => 0, "");
   noUrl.show();
   noUrl.start();
   noUrl.onReport({ phase: "on", progress: 0.5 });

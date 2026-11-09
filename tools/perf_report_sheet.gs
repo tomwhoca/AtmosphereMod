@@ -20,9 +20,20 @@
 // minute and MAX_ROWS in all are kept. Apps Script doesn't give a web app the
 // sender's IP address, so the sheet can't hold one.
 //
-// GET answers {"ok":true,...} without writing anything (to check that the URL
-// works); POST takes the report as JSON (text/plain, so a browser sends it
-// without a CORS preflight) and answers {"ok":true} or {"ok":false,"error":...}.
+// POST takes the report as JSON (text/plain, so a browser sends it without a
+// CORS preflight) and answers {"ok":true} or {"ok":false,"error":...}.
+//
+// The sim's tablet browser (Coherent GT) can't read that answer: Apps Script
+// answers with a redirect to a one-time URL on script.googleusercontent.com,
+// and after a redirect to another site Coherent fetches the target twice (the
+// second time with Origin: null), so the second fetch fails. The POST itself
+// arrives. So a report carries a random "id", the answer for it is kept for
+// ID_SECONDS, and GET ?confirm=<id>&callback=<name> gives it as JSONP (a
+// script, which Coherent loads through the redirect once): {"ok":true}, the
+// reason it was turned away, or "not received".
+//
+// GET without parameters answers {"ok":true,...} (to check that the URL
+// works). Nothing but a POST writes to the sheet.
 
 /** @OnlyCurrentDoc  (the script asks for access to this spreadsheet only) */
 
@@ -30,6 +41,7 @@ const SHEET = "Reports";
 const RATE_PER_MINUTE = 20;
 const MAX_ROWS = 50000;
 const MAX_TEXT = 1000;
+const ID_SECONDS = 600;
 const IMPRESSIONS = ["no noticeable difference", "noticeable but fine", "too slow to use"];
 
 // [key in the report, column header]; "received", "changePct" and "extra" are this script's.
@@ -87,12 +99,30 @@ const COLUMNS = [
 const NUMBERS = ["fpsOn", "fpsOff", "p99On", "p99Off", "fpsOn1", "fpsOn2", "driftPct", "framesOn", "framesOff",
                  "vramGB", "threads", "ramGB", "renderScaling", "reshadeEffects", "registerSpace", "altitudeFt", "aglFt"];
 
-function answer(object) {
-  return ContentService.createTextOutput(JSON.stringify(object)).setMimeType(ContentService.MimeType.JSON);
+/** The answer as JSON, or as JSONP when the request names a callback (a plain identifier only). */
+function answer(object, callback) {
+  const json = JSON.stringify(object);
+  if (callback) {
+    return ContentService.createTextOutput(callback + "(" + json + ");")
+      .setMimeType(ContentService.MimeType.JAVASCRIPT);
+  }
+  return ContentService.createTextOutput(json).setMimeType(ContentService.MimeType.JSON);
 }
 
-function doGet() {
-  return answer({ ok: true, service: "AtmosphereMod performance reports" });
+const ID = /^[A-Za-z0-9]{8,40}$/;
+const CALLBACK = /^[A-Za-z_$][A-Za-z0-9_$]{0,63}$/;
+
+function doGet(e) {
+  const p = (e && e.parameter) || {};
+  const callback = CALLBACK.test(p.callback || "") ? p.callback : "";
+  if (p.confirm !== undefined) {
+    if (!ID.test(p.confirm)) {
+      return answer({ ok: false, error: "no such report" }, callback);
+    }
+    const kept = CacheService.getScriptCache().get("id-" + p.confirm);
+    return answer(kept ? JSON.parse(kept) : { ok: false, error: "not received" }, callback);
+  }
+  return answer({ ok: true, service: "AtmosphereMod performance reports" }, callback);
 }
 
 function doPost(e) {
@@ -102,28 +132,37 @@ function doPost(e) {
   } catch (err) {
     return answer({ ok: false, error: "not JSON" });
   }
+  const id = report !== null && typeof report === "object" && ID.test(String(report.id || "")) ? report.id : "";
+  const cache = CacheService.getScriptCache();
+  // the answer, kept for the id's confirmation (the sim can't read this one)
+  const reply = (object) => {
+    if (id) cache.put("id-" + id, JSON.stringify(object), ID_SECONDS);
+    return answer(object);
+  };
   const problem = check(report);
   if (problem) {
-    return answer({ ok: false, error: problem });
+    return reply({ ok: false, error: problem });
   }
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(10000)) {
-    return answer({ ok: false, error: "busy, try again" });
+    return reply({ ok: false, error: "busy, try again" });
   }
   try {
-    const cache = CacheService.getScriptCache();
+    if (id && cache.get("id-" + id) === JSON.stringify({ ok: true })) {
+      return answer({ ok: true });  // (the same report again: kept once)
+    }
     const minute = "reports-" + Math.floor(Date.now() / 60000);
     const count = Number(cache.get(minute) || 0);
     if (count >= RATE_PER_MINUTE) {
-      return answer({ ok: false, error: "too many reports this minute, try again later" });
+      return reply({ ok: false, error: "too many reports this minute, try again later" });
     }
     const sheet = reportsSheet();
     if (sheet.getLastRow() > MAX_ROWS) {
-      return answer({ ok: false, error: "the sheet is full" });
+      return reply({ ok: false, error: "the sheet is full" });
     }
     sheet.appendRow(row(report));
     cache.put(minute, String(count + 1), 120);
-    return answer({ ok: true });
+    return reply({ ok: true });
   } finally {
     lock.releaseLock();
   }
@@ -177,7 +216,7 @@ function row(r) {
   values.changePct = Math.round((r.fpsOn / r.fpsOff - 1) * 1000) / 10;
   const extra = {};
   Object.keys(r).forEach((k) => {
-    if (!known[k] && k !== "kind" && k !== "schema") extra[k] = r[k];
+    if (!known[k] && k !== "kind" && k !== "schema" && k !== "id") extra[k] = r[k];
   });
   values.extra = Object.keys(extra).length > 0 ? extra : "";
   return COLUMNS.map((c) => (c[0] === "changePct" ? values.changePct : cell(c[0], values[c[0]])));
