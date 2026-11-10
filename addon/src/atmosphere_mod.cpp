@@ -3021,16 +3021,21 @@ std::string settings_state(bool pending)
     missing += "}";
     std::array<float, kTunableCount> ini, effective;
     std::array<float, kCloudTunableCount + 1> cloud;  // (+ C36, the plane-cloud light, for its slider)
+    float ozone_setting;
     {
         const std::shared_lock lock(g_mutex);
         ini = g_tunables;
         effective = g_effective_tunables;
         std::copy(g_cloud_tunables.begin(), g_cloud_tunables.end(), cloud.begin());
+        ozone_setting = g_ozone_setting;
     }
     cloud[kCloudTunableCount] = g_cloud_plane_light.load(std::memory_order_relaxed);
-    // (by index: T16, the haze strength; T14 and T15 aren't the app's)
+    // (by index: T14, the ozone column, and T15, the haze field, which the app doesn't set but its performance
+    // report lists when they differ from the defaults; T16, the haze strength)
     std::array<float, kTunableCount + 3> shown = {};
     std::copy(ini.begin(), ini.end(), shown.begin());
+    shown[14] = ozone_setting;
+    shown[15] = weather::haze_field() ? 1.0f : 0.0f;
     shown[16] = weather::haze_strength();
     const auto list = [](const auto &values, bool rounded) {
         std::string s = "[";

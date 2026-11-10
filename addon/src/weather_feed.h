@@ -82,6 +82,7 @@ size_t cloud_anchor_table(std::array<uint8_t, kAnchorTableBytes> &out);
 // The haze field (tunables.ini T15, on unless 0): the haze from all the
 // stations around instead of the nearest one's. Any thread.
 void set_haze_field(bool on);
+bool haze_field();
 
 // How strong the haze from METARs is (T16): 1 as they report, 0..2.
 void set_haze_strength(float strength);

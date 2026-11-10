@@ -871,6 +871,11 @@ float haze_strength()
     return g_haze_strength;
 }
 
+bool haze_field()
+{
+    return g_haze_field;
+}
+
 float freezing_level_m()
 {
     const std::lock_guard lock(g_mutex);
