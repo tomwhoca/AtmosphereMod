@@ -788,8 +788,9 @@ which systems it runs well on and which it doesn't:
 3. The app shows the result: the frame rate and the GPU's time per frame, with
    and without the mod. Where the frame rate is capped (V-Sync, a 60 Hz
    screen, a frame limit, frame generation), it comes out the same both ways,
-   and the GPU time shows the cost. It also shows everything that would be
-   sent: the graphics
+   and the GPU time shows the cost. It also counts how many of the mod's
+   shaders ran: if none did, the mod isn't working on your PC, and the app
+   says so. Then it shows everything that would be sent: the graphics
    card, driver, CPU, memory and Windows version, the sim's version (MS Store
    or Steam, and its version number, such as 1.9.24.0), its own graphics
    settings (from its `UserCfg.opt`: anti-aliasing and upscaling, frame

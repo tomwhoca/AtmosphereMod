@@ -257,7 +257,7 @@ check(model.value("T3").get() === 4 && model.effectiveValue("T3").get() === 7.5,
   };
   const result = { fpsOn: 61.24, fpsOff: 80.5, msOn: 16.3, msOff: 12.4, p99On: 21.04, p99Off: 15.5, fpsOn1: 61.0,
     fpsOn2: 61.5, drift: 0.008, framesOn: 980, framesOff: 644, gpuOn: 9.87, gpuOff: 7.12, gpuOn1: 9.8, gpuOn2: 9.94,
-    gpuFramesOn: 950, gpuFramesOff: 470 };
+    gpuFramesOn: 950, gpuFramesOff: 470, modShaders: 41, modShaderRuns: 236.4 };
   const done = { phase: "done", progress: 1, result, system };
   const ctx = { version: "0.7.1", metar: "LIRF 090920Z 09005KT 9999 BKN040 15/12 Q1025 NOSIG", weather: "LIRF: haze",
     altitudeFt: 5012.4, aglFt: 4890.2, changed: ["C16 = 2 (0.5)"], defaultPreset: false };
@@ -269,6 +269,19 @@ check(model.value("T3").get() === 4 && model.effectiveValue("T3").get() === 7.5,
         "report: the measurement, as numbers");
   check(f.gpuMsOn === 9.87 && f.gpuMsOff === 7.12 && f.gpuMsOn1 === 9.8 && f.gpuMsOn2 === 9.94 && f.gpuFramesOn === 950
         && f.gpuFramesOff === 470, "report: the GPU time per frame");
+  check(f.modShaders === 41 && f.modShaderRuns === 236.4
+        && perf.detailsText(done, ctx, answers).includes("The mod's shaders: 41 different ones ran with the mod on, 236 "
+          + "times a frame"), "report: how many of the mod's shaders ran");
+  const older = perf.reportFields({ ...done, result: { ...result, modShaders: undefined, modShaderRuns: undefined } },
+    ctx, answers);
+  check(!("modShaders" in older) && !perf.detailsText({ ...done, result: { ...result, modShaders: undefined } }, ctx,
+    answers).includes("The mod's shaders"), "report: an add-on that doesn't count them: no count");
+  check(perf.reportWarning(result) === "" && perf.reportWarning({ ...result, modShaders: 0 }).startsWith("None of the "
+          + "mod's shaders ran") && perf.reportWarning({ ...result, modShaders: undefined }) === "",
+        "report: a warning when none of the mod's shaders ran (not when they did, nor when uncounted)");
+  check(perf.reportWarning({ ...result, drift: 0.2 }).startsWith("The view changed while measuring")
+        && perf.reportWarning({ ...result, modShaders: 0, drift: 0.2 }).includes(" The view changed"),
+        "report: the view changing is pointed out too, after the shaders");
   const noGpu = perf.reportFields({ ...done, result: { ...result, gpuOn: undefined, gpuOff: undefined } }, ctx, answers);
   check(noGpu.gpuMsOn === undefined && noGpu.fpsOn === 61.2, "report: without GPU times, the frame rate only");
   check(perf.summaryText(result).includes("9.9 ms per frame with the mod, 7.1 ms without (+2.7 ms, +39 %)")
@@ -349,7 +362,9 @@ check(model.value("T3").get() === 4 && model.effectiveValue("T3").get() === 7.5,
         && col("Received (UTC)") === "2026-11-09 12:00:00" && col("Render scaling (%)") === 100
         && col("MSFS store") === "Microsoft Store" && col("MSFS version") === "1.9.24.0"
         && col("GPU ms per frame, with") === 9.87 && col("GPU ms per frame, without") === 7.12
-        && col("GPU time change with the mod (%)") === 38.6 && col("GPU frames timed without") === 470,
+        && col("GPU time change with the mod (%)") === 38.6 && col("GPU frames timed without") === 470
+        && col("Mod shaders that ran") === 41 && col("Mod shader runs per frame") === 236.4
+        && head.indexOf("Mod shaders that ran") > head.indexOf("Other fields"),
         `sheet: the row under its headers (${JSON.stringify(gs.rows[1])})`);
   check(col("Other fields") === "", `sheet: every key the app sends has its column (${col("Other fields")})`);
   const raw = (label, n = 0) => gs.appended[n][head.indexOf(label)];

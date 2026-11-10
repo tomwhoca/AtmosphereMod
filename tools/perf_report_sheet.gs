@@ -104,10 +104,14 @@ const COLUMNS = [
   ["comment", "Comment"],
   ["contact", "Contact"],
   ["extra", "Other fields"],
+  // (new columns go here, after the ones the sheet's rows already have)
+  ["modShaders", "Mod shaders that ran"],
+  ["modShaderRuns", "Mod shader runs per frame"],
 ];
 const NUMBERS = ["fpsOn", "fpsOff", "p99On", "p99Off", "fpsOn1", "fpsOn2", "driftPct", "framesOn", "framesOff",
                  "gpuMsOn", "gpuMsOff", "gpuChangePct", "gpuMsOn1", "gpuMsOn2", "gpuFramesOn", "gpuFramesOff",
-                 "vramGB", "threads", "ramGB", "renderScaling", "reshadeEffects", "registerSpace", "altitudeFt", "aglFt"];
+                 "vramGB", "threads", "ramGB", "renderScaling", "reshadeEffects", "registerSpace", "altitudeFt", "aglFt",
+                 "modShaders", "modShaderRuns"];
 
 /** The answer as JSON, or as JSONP when the request names a callback (a plain identifier only). */
 function answer(object, callback) {

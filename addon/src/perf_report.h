@@ -80,6 +80,11 @@ struct Result
     double gpu_on() const;  // both "on" parts together
     double gpu_off() const { return off.gpu_ms(); }
     bool has_gpu() const { return (on1.gpu_frames + on2.gpu_frames) > 0 && off.gpu_frames > 0; }
+    // The mod's shaders that ran in the parts with the mod (mod_shaders): how many different ones, and how often.
+    // None means the mod changed nothing in this view, or isn't working on this PC. (Without the mod none run.)
+    uint32_t mod_shaders = 0;
+    uint64_t mod_shader_runs = 0;
+    double mod_shader_runs_per_frame() const;
 };
 
 // The GPU's working time in ms from its command lists' (start, end) times, in ms
@@ -104,6 +109,10 @@ public:
     // A frame's GPU time, once it's known (some frames later): to the part it was rendered in
     // (`measured_in`, the phase() it was in), while the measurement runs.
     void gpu_frame(Phase measured_in, double ms);
+    // The mod's shaders that have run in the parts with the mod so far (different ones, and their runs), counted by
+    // the add-on while counts_mod_shaders(); kept while the measurement runs.
+    void mod_shaders(uint32_t shaders, uint64_t runs);
+    bool counts_mod_shaders() const { return phase_ == Phase::on || phase_ == Phase::on2; }
 
     Phase phase() const { return phase_; }
     bool running() const { return phase_ != Phase::idle && phase_ != Phase::done && phase_ != Phase::stopped; }

@@ -27,6 +27,8 @@ export interface AddonReport {
     fpsOn1: number; fpsOn2: number; drift: number; framesOn: number; framesOff: number;
     /** The GPU's working time per frame, ms (none if the add-on couldn't time it). */
     gpuOn?: number; gpuOff?: number; gpuOn1?: number; gpuOn2?: number; gpuFramesOn?: number; gpuFramesOff?: number;
+    /** How many of the mod's shaders ran with the mod on, and their runs per frame (none: the mod did nothing). */
+    modShaders?: number; modShaderRuns?: number;
   };
   system?: {
     pc: { gpu: string; gpuVendor: string; vramGB: number; driver: string; cpu: string; threads: number; ramGB: number;
@@ -156,6 +158,9 @@ export function reportFields(report: AddonReport, ctx: Context, answers: Answers
         gpuFramesOn: r.gpuFramesOn ?? 0, gpuFramesOff: r.gpuFramesOff ?? 0,
       });
     }
+    if (r.modShaders !== undefined) {
+      Object.assign(f, { modShaders: r.modShaders, modShaderRuns: num1(r.modShaderRuns ?? 0) });
+    }
   }
   if (pc) {
     Object.assign(f, {
@@ -212,6 +217,10 @@ export function detailsText(report: AddonReport, ctx: Context, answers: Answers)
       lines.push(`GPU time per frame: ${r.gpuOn.toFixed(2)} ms with the mod (${(r.gpuOn1 ?? 0).toFixed(2)} and `
         + `${(r.gpuOn2 ?? 0).toFixed(2)}), ${r.gpuOff.toFixed(2)} ms without; ${r.gpuFramesOn ?? 0} + `
         + `${r.gpuFramesOff ?? 0} frames`);
+    }
+    if (r.modShaders !== undefined) {
+      lines.push(`The mod's shaders: ${r.modShaders} different ones ran with the mod on, `
+        + `${Math.round(r.modShaderRuns ?? 0)} times a frame`);
     }
   }
   if (pc) {
@@ -353,6 +362,21 @@ export function summaryText(r: NonNullable<AddonReport["result"]>): string {
   return s + ` 99 % of frames take under ${round1(r.p99On)} ms with the mod, ${round1(r.p99Off)} ms without.`;
 }
 
+/** What makes the result doubtful, or "": none of the mod's shaders ran (the mod isn't working, so with and without
+ * are the same), or the view changed while measuring. */
+export function reportWarning(r: NonNullable<AddonReport["result"]>): string {
+  const warnings: string[] = [];
+  if (r.modShaders === 0) {
+    warnings.push("None of the mod's shaders ran while it was on: the mod doesn't seem to be working on this PC, so "
+      + "the result shows no difference. Run the installer again (as after a sim update), then measure again.");
+  }
+  if (r.drift > 0.1) {
+    warnings.push(`The view changed while measuring: the two parts with the mod differ by `
+      + `${Math.round(r.drift * 100)} %. Measure again with the sim paused, if you can.`);
+  }
+  return warnings.join(" ");
+}
+
 const RUNNING = ["settleOn", "on", "settleOff", "off", "settleOn2", "on2"];
 /** No sign of a measurement this long after Start: the add-on is older than the app. */
 const START_WAIT_MS = 6000;
@@ -465,8 +489,7 @@ export class PerfReportModel {
     }
     const r = report.result;
     this.summary.set(summaryText(r));
-    this.warning.set(r.drift > 0.1 ? `The view changed while measuring: the two parts with the mod differ by `
-      + `${Math.round(r.drift * 100)} %. Measure again with the sim paused, if you can.` : "");
+    this.warning.set(reportWarning(r));
     this.details.set(detailsText(report, ctx, this.answers()));
   }
 

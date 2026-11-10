@@ -43,6 +43,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <cinttypes>
 #include <cstdio>
@@ -328,6 +329,7 @@ struct TrackedPipeline
     uint32_t cloud_param = UINT32_MAX;  // injected cloud constants (compute only)
     uint32_t tlas_param = UINT32_MAX;   // injected root SRV for MSFS's TLAS (compute only)
     pipeline replacement = {};
+    uint32_t shader_index = UINT32_MAX;  // the replacement's shader in g_mod_shaders_ran
     device *dev = nullptr;  // the game's pipeline and its replacement belong to it
 };
 
@@ -370,10 +372,27 @@ std::unordered_map<uint32_t, fs::path> g_lazy_replacements;         // crc -> fi
 std::unordered_map<uint64_t, TrackedPipeline> g_pipelines;          // pipeline -> info
 std::unordered_map<uint64_t, GraphicsShader> g_graphics;            // graphics pipeline -> pixel shader
 std::unordered_map<uint64_t, uint32_t> g_compute_shaders;           // compute pipeline -> shader crc (draw log)
+std::unordered_map<uint32_t, uint32_t> g_shader_indices;            // a replaced shader's crc -> its index
 std::unordered_map<uint64_t, std::vector<LayoutParam>> g_layouts;   // layout -> params
 std::unordered_map<uint64_t, uint32_t> g_injected;                  // layout -> first mod param
 std::unordered_map<uint64_t, uint32_t> g_cloud_injected;            // layout -> cloud constants param
 std::unordered_map<uint64_t, uint32_t> g_tlas_injected;             // layout -> TLAS root SRV param
+
+// The mod's shaders that ran while a performance report measured with the mod on (perf::Measurement
+// mod_shaders): whether the mod did anything in that view. Each replaced shader's bit (by its index in
+// g_shader_indices) and every bind of a replacement, counted on the threads that record while
+// g_counting_mod_shaders; the present thread clears them when a measurement starts and reads them each frame.
+constexpr uint32_t kModShaderBits = 16384;
+std::array<std::atomic<uint64_t>, kModShaderBits / 64> g_mod_shaders_ran{};
+std::atomic<uint64_t> g_mod_shader_runs{0};
+std::atomic<bool> g_counting_mod_shaders{false};
+
+// A replaced shader's index for g_mod_shaders_ran (the caller holds g_mutex exclusively).
+uint32_t shader_index_locked(uint32_t crc)
+{
+    return g_shader_indices.try_emplace(crc, uint32_t(g_shader_indices.size())).first->second;
+}
+
 // MSFS's latest top-level acceleration structure (Raytraced Shadows/Reflections):
 // its GPU address and the frame it was built in. Bound for ch_deferred_shadows
 // (the aircraft's shadow on clouds) only if built within kTlasFreshFrames, so a
@@ -1158,6 +1177,8 @@ void reload(device *dev)
         }
         retire(job.dev, info->second.replacement);
         info->second.replacement = replacement;
+        if (replacement.handle != 0)
+            info->second.shader_index = shader_index_locked(info->second.crc);
         replaced += replacement.handle != 0;
     }
     event(reshade::log::level::info, "reloaded " + std::to_string(fresh.size()) + " shader(s) and tunables; " +
@@ -2561,6 +2582,8 @@ void on_init_pipeline(device *dev, pipeline_layout layout, uint32_t count, const
     const std::string entry = info.entry;
     {
         const std::unique_lock lock(g_mutex);
+        if (replacement.handle != 0)
+            info.shader_index = shader_index_locked(info.crc);
         if (!g_pipelines.try_emplace(pipe.handle, std::move(info)).second)
         {
             retire(dev, replacement);  // another thread registered this pipeline first
@@ -2594,6 +2617,7 @@ void on_bind_pipeline(command_list *cmd_list, pipeline_stage stages, pipeline pi
 {
     start_frame_timing(cmd_list);
     pipeline replacement = {};
+    uint32_t shader_index = UINT32_MAX;
     bool graphics = true;  // every compute pipeline is tracked, so an unknown one is graphics
     bool tracked = false, shaded = false;
     {
@@ -2603,6 +2627,7 @@ void on_bind_pipeline(command_list *cmd_list, pipeline_stage stages, pipeline pi
             tracked = true;
             graphics = it->second.graphics;
             replacement = it->second.replacement;
+            shader_index = it->second.shader_index;
         }
         shaded = g_graphics.contains(pipe.handle);
     }
@@ -2619,7 +2644,16 @@ void on_bind_pipeline(command_list *cmd_list, pipeline_stage stages, pipeline pi
         }
     }
     if (replacement.handle != 0 && g_enabled.load(std::memory_order_relaxed))
+    {
         cmd_list->bind_pipeline(stages, replacement);
+        if (g_counting_mod_shaders.load(std::memory_order_relaxed))
+        {
+            g_mod_shader_runs.fetch_add(1, std::memory_order_relaxed);
+            if (shader_index < kModShaderBits)
+                g_mod_shaders_ran[shader_index / 64].fetch_or(uint64_t(1) << (shader_index % 64),
+                                                              std::memory_order_relaxed);
+        }
+    }
 }
 
 // Common to direct and indirect dispatches: log watched passes and give
@@ -3355,6 +3389,10 @@ void measure_performance(effect_runtime *runtime)
             device *const dev = runtime->get_device();
             g_report_system = perf::system_json(dev->get_api() == device_api::d3d12 ? dev->get_native() : 0,
                                                 g_reshade_module, width, height, effects, g_mod_space);
+            g_counting_mod_shaders = false;
+            for (auto &word : g_mod_shaders_ran)
+                word.store(0, std::memory_order_relaxed);
+            g_mod_shader_runs = 0;
             g_measurement.start(now, g_enabled);
             event(reshade::log::level::info, "performance report: measuring (the mod on, off, on again)");
         }
@@ -3364,8 +3402,17 @@ void measure_performance(effect_runtime *runtime)
             event(reshade::log::level::info, "performance report: stopped in the EFB app");
         }
     }
+    // (the mod's shaders that ran in the frame just presented go to the part it belongs to, before it ends)
+    if (g_counting_mod_shaders.load(std::memory_order_relaxed))
+    {
+        uint32_t shaders = 0;
+        for (const auto &word : g_mod_shaders_ran)
+            shaders += uint32_t(std::popcount(word.load(std::memory_order_relaxed)));
+        g_measurement.mod_shaders(shaders, g_mod_shader_runs.load(std::memory_order_relaxed));
+    }
     if (const std::optional<bool> want = g_measurement.frame(now))
         g_enabled = *want;
+    g_counting_mod_shaders = g_measurement.counts_mod_shaders();
     time_gpu_frames(g_frame.load());
     if (const std::optional<bool> restore = g_measurement.take_restore())
     {
@@ -3385,6 +3432,8 @@ void measure_performance(effect_runtime *runtime)
                 snprintf(buf + n, sizeof(buf) - n, "; no GPU times");
         }
         event(reshade::log::level::info, buf);
+        event(reshade::log::level::info, "performance report: " + std::to_string(r.mod_shaders) +
+              " of the mod's shaders ran with the mod on, " + std::to_string(r.mod_shader_runs) + " times");
         event(reshade::log::level::info, "performance report: " + gpu_timing_counts());
     }
 }

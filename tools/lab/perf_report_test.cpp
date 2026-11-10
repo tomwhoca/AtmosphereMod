@@ -188,6 +188,43 @@ int main()
               "without GPU times the result has none");
     }
     {
+        // The mod's shaders that ran with the mod on, as the add-on counts them: only in the parts with the mod
+        // (each part ~100 frames: the count and the part can differ by a frame at its edges)
+        perf::Measurement m(perf::Timing{0.05, 1.0});
+        auto t = perf::Clock::now();
+        m.start(t, false);
+        uint64_t runs = 0;
+        bool counted_off = false, counted_settling = false;
+        int guard = 0;
+        while (m.phase() != perf::Phase::done && guard++ < 10000)
+        {
+            if (m.counts_mod_shaders())
+            {
+                runs += 30;  // 30 binds a frame, of 12 different shaders
+                m.mod_shaders(12, runs);
+            }
+            counted_off = counted_off || (m.phase() == perf::Phase::off && m.counts_mod_shaders());
+            counted_settling = counted_settling || (m.phase() == perf::Phase::settle_off && m.counts_mod_shaders());
+            m.frame(t += std::chrono::milliseconds(10));
+        }
+        const perf::Result &r = m.result();
+        check(!counted_off && !counted_settling, "counted only in the parts with the mod (not off, not settling)");
+        check(r.mod_shaders == 12 && close_to(r.mod_shader_runs_per_frame(), 30.0, 1.0),
+              "12 of the mod's shaders, about 30 runs a frame with the mod");
+        m.mod_shaders(99, 99999);
+        check(r.mod_shaders == 12, "after the measurement, late counts don't count");
+        const std::string json = perf::state_json(m, t, "");
+        check(json.find("\"modShaders\":12") != std::string::npos && json.find("\"modShaderRuns\":") != std::string::npos,
+              "the result has the mod's shaders that ran");
+        perf::Measurement none(perf::Timing{0.05, 0.1});
+        none.start(t, true);
+        guard = 0;
+        while (none.phase() != perf::Phase::done && guard++ < 1000)
+            none.frame(t += std::chrono::milliseconds(10));
+        check(perf::state_json(none, t, "").find("\"modShaders\":0") != std::string::npos,
+              "none ran: the result says 0 (the mod changed nothing, or isn't working)");
+    }
+    {
         // MicrosoftGame.Config's <Identity> (as in the MS Store version's, 9 November 2026)
         check(perf::game_config_version(
                   "<?xml version=\"1.0\" encoding=\"utf-8\"?>\r\n<Game configVersion=\"1\">\r\n  <Identity "

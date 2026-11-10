@@ -322,6 +322,12 @@ double Result::gpu_on() const
     return n > 0 ? (on1.gpu_ms_sum + on2.gpu_ms_sum) / n : 0.0;
 }
 
+double Result::mod_shader_runs_per_frame() const
+{
+    const uint32_t n = on1.frames + on2.frames;
+    return n > 0 ? double(mod_shader_runs) / n : 0.0;
+}
+
 double busy_ms(std::vector<std::pair<double, double>> spans_ms)
 {
     if (spans_ms.empty())
@@ -355,6 +361,14 @@ void Measurement::gpu_frame(Phase measured_in, double ms)
         p->gpu_frames += 1;
         p->gpu_ms_sum += ms;
     }
+}
+
+void Measurement::mod_shaders(uint32_t shaders, uint64_t runs)
+{
+    if (!running())
+        return;
+    result_.mod_shaders = shaders;
+    result_.mod_shader_runs = runs;
 }
 
 void Measurement::start(Clock::time_point now, bool enabled)
@@ -593,7 +607,8 @@ std::string state_json(const Measurement &m, Clock::time_point now, const std::s
              ",\"p99On\":" + number(std::max(r.on1.ms_p99, r.on2.ms_p99)) + ",\"p99Off\":" + number(r.off.ms_p99) +
              ",\"fpsOn1\":" + number(r.on1.fps()) + ",\"fpsOn2\":" + number(r.on2.fps()) +
              ",\"drift\":" + number(r.drift(), 3) + ",\"framesOn\":" + std::to_string(r.on1.frames + r.on2.frames) +
-             ",\"framesOff\":" + std::to_string(r.off.frames);
+             ",\"framesOff\":" + std::to_string(r.off.frames) + ",\"modShaders\":" + std::to_string(r.mod_shaders) +
+             ",\"modShaderRuns\":" + number(r.mod_shader_runs_per_frame(), 1);
         if (r.has_gpu())
             s += ",\"gpuOn\":" + number(r.gpu_on(), 2) + ",\"gpuOff\":" + number(r.gpu_off(), 2) +
                  ",\"gpuOn1\":" + number(r.on1.gpu_ms(), 2) + ",\"gpuOn2\":" + number(r.on2.gpu_ms(), 2) +
