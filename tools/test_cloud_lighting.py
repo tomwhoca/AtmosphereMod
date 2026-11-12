@@ -108,6 +108,7 @@ NEAR_SETS = [near_set(), near_set(c16=2.0, c17=0.33), near_set(c16=0.5, c17=0.33
 # ... with the in-cloud fog's floor (FOG_FLOOR) too: the plain fog, and with solid clouds and structure
 FLOOR_SETS = (0, 9)
 FLOOR_M = 2000.0
+LAYER_FLOOR_M = 3000.0  # (the generator's, with layer weather)
 
 
 def type_set(c0=1.0, c8=2.0, c16=4.0, c17=0.33, c18=0.0, strength=1.0, thick=(0.6, 0.5, 0.4, 0.3)):
@@ -1070,6 +1071,25 @@ def check(crc: str, stock: str) -> list[str]:
             off = Evaluator(patched, {"b1 space50": cloud, "b0 space50": cb}, seeds, sampler=fine_sampler, buffer=buf)
             if not np.array_equal(off(opt["prod"]).astype(F), prod.astype(F)):
                 failures.append(f"{tag} {opt['prod']}: floor not in use ({what}) but not as without it")
+        # with layer weather the generator's own floor (LAYER_FLOOR) while it's fresh, else the METAR's
+        layered = np.zeros(P.LAYER_FLOOR // 4 + 4, F)
+        layered[:len(words)] = words
+        layered[P.LAYER_FLOOR // 4] = LAYER_FLOOR_M
+        layered[P.LAYER_FLOOR // 4 + 1] = np.uint32(P.LAYER_FLOOR_MAGIC).view(F)
+        for what, now, written, use in (("fresh", 1000, 975, LAYER_FLOOR_M),
+                                        ("stale", 1000, 1000 - P.LAYER_FLOOR_FRESH_FRAMES - 1, FLOOR_M),
+                                        ("fresh across the frame counter's wrap", 10, 65530, LAYER_FLOOR_M)):
+            layered[P.LAYER_FLOOR // 4 + 2] = np.uint32(written).view(F)
+            cb = np.zeros((4, 4))
+            cb[0, 0] = np.uint32(64 | (now << 16)).view(np.float32)
+            got_l = Evaluator(patched, {"b1 space50": cloud, "b0 space50": cb}, seeds, sampler=fine_sampler,
+                              buffer=layered)
+            fl2 = np.clip((h64 - use) / P.NEAR_FOG_FLOOR_FADE_M, 0, 1)
+            ref_l = ramp_v * base + edge * cloudy * w * fl2 * np.maximum(near - base, 0)
+            got_p = got_l(opt["prod"]).astype(np.float64)
+            e = float(np.nan_to_num(np.abs(got_p - ref_l) / np.maximum(np.abs(ref_l), floor), nan=np.inf).max())
+            if e > 1e-4:
+                failures.append(f"{tag} {opt['prod']}: layer floor ({what}): not the {use:g} m floor, rel. error {e:.1e}")
     # cloud types: the view ramp and the optical thickness by the grid's weights
     puff_products = [(e, P.Ir(patched).def_name(i)) for i, l in enumerate(patched.splitlines())
                      for e, pf in (("%mod.ty.e8", "%mod.ty.pf"), ("%mod.ty.e1", "%mod.ty.pf1"))

@@ -2147,7 +2147,9 @@ def apply_cloud_optical(ir: Ir) -> str:
     (NEAR_FOG_SIGMA): the extinction is r sigma' + e c w max(sigma_n -
     sigma', 0), r the view ramp. And only above the reported cloud base:
     w also times sat((h - floor) / NEAR_FOG_FLOOR_FADE_M), the floor from the
-    debug buffer (FOG_FLOOR; none without it). The weather volume's slices are
+    debug buffer: the generator's from its layers while fresh (LAYER_FLOOR:
+    presets, injected weather), else the nearest METAR's (FOG_FLOOR: live
+    weather), else none. The weather volume's slices are
     80-110 m thick near the ground, so a low deck can start well below its
     reported base (OVC004 at EDDF: ~30 m above the field), and the fog took a
     camera there for the inside of the cloud. The sample is at the end of
@@ -2253,7 +2255,24 @@ def apply_cloud_optical(ir: Ir) -> str:
         "  %mod.nfc.m = bitcast float %mod.nfc.m0 to i32",
         f"  %mod.nfc.ok0 = icmp eq i32 %mod.nfc.m, {FOG_FLOOR_MAGIC}",
         "  %mod.nfc.ok = and i1 %mod.nfc.ok0, %mod.nfc.bound",
-        f"  %mod.nfc.h = select i1 %mod.nfc.ok, float %mod.nfc.h0, float {f32(-1e30)}",
+        f"  %mod.nfc.hm = select i1 %mod.nfc.ok, float %mod.nfc.h0, float {f32(-1e30)}",
+        # ... unless the generator's layer family wrote its own lately (LAYER_FLOOR: presets, injected weather)
+        f"  %mod.nfc.lat = select i1 %mod.nfc.bound, i32 {LAYER_FLOOR}, i32 0",
+        f"  %mod.nfc.lv = call {rr} @dx.op.rawBufferLoad.f32(i32 139, %dx.types.Handle %mod.nfc.u, i32 %mod.nfc.lat, "
+        "i32 undef, i8 7, i32 4)",
+        f"  %mod.nfc.lh = extractvalue {rr} %mod.nfc.lv, 0",
+        f"  %mod.nfc.lm0 = extractvalue {rr} %mod.nfc.lv, 1",
+        f"  %mod.nfc.lf0 = extractvalue {rr} %mod.nfc.lv, 2",
+        "  %mod.nfc.lm = bitcast float %mod.nfc.lm0 to i32",
+        "  %mod.nfc.lf = bitcast float %mod.nfc.lf0 to i32",
+        "  %mod.nfc.now = lshr i32 %mod.nfc.flags, 16",
+        "  %mod.nfc.age0 = sub i32 %mod.nfc.now, %mod.nfc.lf",
+        "  %mod.nfc.age = and i32 %mod.nfc.age0, 65535",
+        f"  %mod.nfc.fresh = icmp ule i32 %mod.nfc.age, {LAYER_FLOOR_FRESH_FRAMES}",
+        f"  %mod.nfc.lok0 = icmp eq i32 %mod.nfc.lm, {LAYER_FLOOR_MAGIC}",
+        "  %mod.nfc.lok1 = and i1 %mod.nfc.lok0, %mod.nfc.fresh",
+        "  %mod.nfc.lok = and i1 %mod.nfc.lok1, %mod.nfc.bound",
+        "  %mod.nfc.h = select i1 %mod.nfc.lok, float %mod.nfc.lh, float %mod.nfc.hm",
     ]
     return (f"cloud optical thickness: {prod} = ramp * {sigma}, altitude {h}; in-cloud fog at distance {t}, "
             f"floor at {FOG_FLOOR:#x}")
@@ -5580,6 +5599,19 @@ assert HAZE_ROWS + HAZE_ROW_BYTES * ANCHOR_STATIONS <= CLOUD_GEN_REGION + CG_END
 FOG_FLOOR = HAZE_ROWS + HAZE_ROW_BYTES * ANCHOR_STATIONS
 FOG_FLOOR_MAGIC = 0x524F4C46  # 'FLOR'
 assert FOG_FLOOR + 16 <= CLOUD_GEN_REGION + CG_END
+# ... but the METARs describe the live weather only. With layer weather (presets, injected weather: Active Sky) the
+# generator's layer family writes its own from the layers it's given, the lowest covered layer's base (m MSL; above
+# the terrain at the camera's column where the layers are given so, User 6.w > 0; LAYER_FLOOR_NONE_M with none
+# covered), from the centre thread with DebugCapture bit 7, right after the add-on's table (which doesn't reach it):
+# float floor, uint LAYER_FLOOR_MAGIC, uint frame (DebugCapture >> 16), 0. The renderer takes it while it's at most
+# LAYER_FLOOR_FRESH_FRAMES old (the generator runs every ~25 frames), else the METAR floor. The live-weather family's
+# centre thread wipes its magic every run: the frame stamp's 16 bits wrap every 65,536 frames (~18 min), and a record
+# left from the world map's preset weather read as fresh again then (capture 639: 28,727 frames old at EDDW).
+LAYER_FLOOR = FOG_FLOOR + 16
+LAYER_FLOOR_MAGIC = 0x5259414C  # 'LAYR'
+LAYER_FLOOR_FRESH_FRAMES = 300
+LAYER_FLOOR_NONE_M = 1e30
+assert LAYER_FLOOR + 16 <= CLOUD_GEN_REGION + CG_END
 ANCHOR_RADIUS_DEFAULT_M = 20000.0
 # decks: the share of MSFS's dome taper removed (1 = a geometrically flat top) and
 # how far toward the smooth noise channel smooth decks go (1 = the smooth channel only)
@@ -6806,7 +6838,9 @@ def cloud_types_lines(values: dict | None, tx: str, ty: str, terrain: str, share
                       anvil: tuple | None = None, tower: tuple | None = None) -> list[str]:
     """ch_cloudDensity, after the column's stores (in the block they end in;
     ends in a new block): the cloud types (layout above). Without values (the
-    layer family), the centre thread only writes 0 over the magic. shares:
+    layer family), the centre thread only writes 0 over the magic, and the
+    in-cloud fog's floor from its layers (LAYER_FLOOR); with them (the live
+    family), it writes 0 over that floor's magic. shares:
     slice -> the storm cells' stratiform share there (apply_cb_towers), which
     goes to altostratus, the other weights making room; anvil: their (level,
     cover) for the renderer's cirrus, written at ANVIL_REGION; tower: the
@@ -6825,6 +6859,27 @@ def cloud_types_lines(values: dict | None, tx: str, ty: str, terrain: str, share
               f"  %mod.ty.u = call {t} @dx.op.annotateHandle(i32 216, {t} %mod.ty.uh, "
               "%dx.types.ResourceProperties { i32 4107, i32 0 })"]
     if values is None:
+        # ... and the in-cloud fog's floor from the layers (LAYER_FLOOR): the lowest covered base, MSL
+        rr = "%dx.types.CBufRet.f32"
+        floor = [f"  %mod.lf.b = call {rr} @dx.op.cbufferLoadLegacy.f32(i32 59, {t} %mod.cv.user, i32 6)",
+                 f"  %mod.lf.c = call {rr} @dx.op.cbufferLoadLegacy.f32(i32 59, {t} %mod.cv.user, i32 8)"]
+        for j in range(3):
+            floor += [f"  %mod.lf.b{j} = extractvalue {rr} %mod.lf.b, {j}",
+                      f"  %mod.lf.c{j} = extractvalue {rr} %mod.lf.c, {j}",
+                      f"  %mod.lf.k{j} = fcmp fast ogt float %mod.lf.c{j}, 0.000000e+00",
+                      f"  %mod.lf.s{j} = select i1 %mod.lf.k{j}, float %mod.lf.b{j}, float {f32(LAYER_FLOOR_NONE_M)}"]
+        floor += [
+            "  %mod.lf.m0 = call float @dx.op.binary.f32(i32 36, float %mod.lf.s0, float %mod.lf.s1)",
+            "  %mod.lf.m = call float @dx.op.binary.f32(i32 36, float %mod.lf.m0, float %mod.lf.s2)",
+            f"  %mod.lf.w = extractvalue {rr} %mod.lf.b, 3",
+            "  %mod.lf.agl = fcmp fast ogt float %mod.lf.w, 0.000000e+00",
+            f"  %mod.lf.t = select i1 %mod.lf.agl, float {terrain}, float 0.000000e+00",
+            "  %mod.lf.h = fadd fast float %mod.lf.m, %mod.lf.t",
+            "  %mod.lf.hi = bitcast float %mod.lf.h to i32",
+            "  %mod.lf.fr = lshr i32 %mod.cv.flags, 16",
+            f"  call void @dx.op.rawBufferStore.i32(i32 140, {t} %mod.ty.u, i32 {LAYER_FLOOR}, i32 undef, "
+            f"i32 %mod.lf.hi, i32 {LAYER_FLOOR_MAGIC}, i32 %mod.lf.fr, i32 0, i8 15, i32 4)",
+        ]
         return lines + [
             "  br i1 %mod.ty.c, label %mod.cgb.tyz, label %mod.cgb.tyend",
             "",
@@ -6832,6 +6887,7 @@ def cloud_types_lines(values: dict | None, tx: str, ty: str, terrain: str, share
             *handle,
             f"  call void @dx.op.rawBufferStore.i32(i32 140, {t} %mod.ty.u, i32 {TYPES_REGION}, i32 undef, i32 0, "
             "i32 undef, i32 undef, i32 undef, i8 1, i32 4)",
+            *floor,
             "  br label %mod.cgb.tyend",
             "",
             "mod.cgb.tyend:",
@@ -6863,6 +6919,9 @@ def cloud_types_lines(values: dict | None, tx: str, ty: str, terrain: str, share
         "  %mod.ty.fr = lshr i32 %mod.cv.flags, 16",
         f"  call void @dx.op.rawBufferStore.i32(i32 140, {t} %mod.ty.u, i32 {TYPES_REGION}, i32 undef, "
         f"i32 {TYPES_MAGIC}, i32 %mod.ty.fr, i32 %mod.cv.n, i32 %mod.ty.oi, i8 15, i32 4)",
+        # (live weather: no layer floor, LAYER_FLOOR's magic wiped every run)
+        f"  call void @dx.op.rawBufferStore.i32(i32 140, {t} %mod.ty.u, i32 {LAYER_FLOOR + 4}, i32 undef, i32 0, "
+        "i32 undef, i32 undef, i32 undef, i8 1, i32 4)",
         "  br label %mod.cgb.tyw",
         "",
         "mod.cgb.tyw:",

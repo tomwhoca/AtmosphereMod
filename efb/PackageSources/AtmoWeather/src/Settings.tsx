@@ -255,8 +255,8 @@ export const TABS: TabSpec[] = [
       plain("C33", "Visibility inside clouds",
             "How far you see inside a cloud, around your aircraft: the wings fade into it as in a real cloud. "
             + "The sim's clouds are so thin inside that you see for hundreds of metres. Only near you, so clouds "
-            + "seen from outside keep their look; ice clouds stay thin. Not below the cloud base the nearest METAR "
-            + "reports: the sim's low decks can start well below it.",
+            + "seen from outside keep their look; ice clouds stay thin. Not below the reported cloud base (the "
+            + "nearest METAR's, or a weather preset's lowest layer): the sim's low decks can start well below it.",
             0, 200, 10, 0, { format: (d) => (d <= 0 ? "the sim's" : `${Math.round(d)} m`) }),
       {
         ...percent("C34", "Structure inside clouds",

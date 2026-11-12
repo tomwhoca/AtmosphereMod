@@ -538,6 +538,7 @@ def check_types(stock_p, patched_p, values, h_name, table, tex, check):
     unchanged."""
     flags = P.DEBUG_BUFFER_16MB | P.DEBUG_BUFFER_TYPES | (5 << 16)
     big = bytearray(table) + bytearray((20 << 20) - len(table))
+    struct.pack_into("<I", big, P.LAYER_FLOOR + 4, P.LAYER_FLOOR_MAGIC)  # (a layer floor left from preset weather)
     worst = 0
     for tid in [(256, 256), (300, 220), (200, 328), (128, 400), (40, 40), (264, 248), (4, 508)]:
         ref = Machine(patched_p, constants(P.DEBUG_BUFFER_16MB, cloud=anchor_cloud()), tex, bytearray(big)).run(tid)
@@ -559,6 +560,11 @@ def check_types(stock_p, patched_p, values, h_name, table, tex, check):
             check(hdr == (P.TYPES_MAGIC, 5, N, 64.0 / N), f"cloud types header {hdr}")
         else:
             check(hdr == (0, 0, 0, 0.0), f"{tid}: wrote the cloud types header")
+        layer_magic = struct.unpack_from("<I", m.buf, P.LAYER_FLOOR + 4)[0]
+        if tid == (N // 2, N // 2):
+            check(layer_magic == 0, f"live weather: the layer floor's magic not wiped ({layer_magic:#x})")
+        else:
+            check(layer_magic == P.LAYER_FLOOR_MAGIC, f"{tid}: touched the layer floor")
         kinds = [max(zip((*w, 1 - sum(w)), ("Sc", "St", "Ac", "As", "Cu")))[1] for w, x in zip(want, c)
                  if x > P.TYPES_IN_LAYER_C]
         print(f"cloud types at {tid}: cell ({gx}, {gy}), {len(kinds)} slices in layers ({' '.join(kinds)}), "
@@ -1166,6 +1172,27 @@ def check_layers(dxc, index, check):
             m.run((N // 2, N // 2))
             magic = struct.unpack_from("<I", m.buf, P.TYPES_REGION)[0]
             check(magic == (0 if cleared else P.TYPES_MAGIC), f"{crc} flags {f:#x}: cloud types magic {magic:#x}")
+        # the in-cloud fog's floor from the layers (LAYER_FLOOR), from the centre thread with bit 7: the lowest
+        # covered base (MSL, or above the column's terrain with User 6.w > 0), the magic and the frame
+        centre = (N // 2, N // 2)
+        ci = (N // 2 - lo) * P.CG_VOL_N + (N // 2 - lo)
+        for what, bases, cover, want in (
+                ("MSL", (1200.0, 300.0, 2500.0, 0.0), (0.5, 0.0, 0.3, 0.0), 1200.0),
+                ("none covered", (1200.0, 300.0, 2500.0, 0.0), (0.0, 0.0, 0.0, 0.0), P.LAYER_FLOOR_NONE_M),
+                ("above the terrain", (1200.0, 300.0, 2500.0, 1.0), (0.5, 0.0, 0.3, 0.0), None)):
+            cb = constants(P.DEBUG_BUFFER_TYPES | 1 | P.DEBUG_BUFFER_16MB | (77 << 16))
+            cb[(0, 0)][6] = bases
+            cb[(0, 0)][8] = cover
+            m = Machine(patched_p, cb, TEX_LAYERS, bytearray(20 << 20))
+            m.run(centre)
+            h, magic, frame, _ = struct.unpack_from("<f3I", m.buf, P.LAYER_FLOOR)
+            if want is None:  # (the column's global terrain, as its capture stores it)
+                want = 1200.0 + struct.unpack_from("<f", m.buf, base + P.CG_COLUMNS + 16 * ci + 4)[0]
+            check(magic == P.LAYER_FLOOR_MAGIC and frame == 77 and h == float(np.float32(want)),
+                  f"{crc} layer floor ({what}): {h} (want {want}), magic {magic:#x}, frame {frame}")
+        m = Machine(patched_p, constants(1 | P.DEBUG_BUFFER_16MB), TEX_LAYERS, bytearray(20 << 20))
+        m.run(centre)
+        check(struct.unpack_from("<I", m.buf, P.LAYER_FLOOR + 4)[0] == 0, f"{crc} layer floor without bit 7")
 
 
 def main():

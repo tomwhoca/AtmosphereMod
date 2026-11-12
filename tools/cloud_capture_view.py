@@ -74,6 +74,12 @@ def load(capture: str) -> dict:
     haze = P.CG_ANCHOR + (P.HAZE_ROWS - P.ANCHOR_TABLE)
     d["haze"] = struct.unpack_from("<I", raw, P.CG_ANCHOR + 12)[0] == P.HAZE_MAGIC
     d["haze_rows"] = np.frombuffer(raw, np.float32, 8 * ns, haze).reshape(ns, 8) if d["haze"] else None
+    # the in-cloud fog's floors: the add-on's from the METARs (FOG_FLOOR), the layer family's (LAYER_FLOOR)
+    at = lambda a: P.CG_ANCHOR + (a - P.ANCHOR_TABLE)  # noqa: E731
+    fl, fm = struct.unpack_from("<fI", raw, at(P.FOG_FLOOR))
+    d["fog_floor"] = fl if fm == P.FOG_FLOOR_MAGIC else None
+    lf, lm, lfr = struct.unpack_from("<fII", raw, at(P.LAYER_FLOOR))
+    d["layer_floor"] = (lf, lfr) if lm == P.LAYER_FLOOR_MAGIC else None
     return d
 
 
@@ -125,6 +131,11 @@ def main():
             print(f"  layer {j}: {U[6, j]:7.0f} - {U[7, j]:7.0f} m, coverage {U[8, j]:.3f}, density {U[9, j]:.3f}, "
                   f"noise mix (x y z w) {np.round(U[3 + j], 3)}")
     cc, cu = d["cloud"], d["cloud_u"]
+    lf = d["layer_floor"]
+    print("in-cloud fog's floor: from the METARs "
+          + (f"{d['fog_floor']:.0f} m MSL" if d["fog_floor"] is not None else "none")
+          + "; from the layers " + (f"{lf[0]:.0f} m MSL (frame {lf[1]}; the renderer takes it while it's fresh)"
+                                    if lf is not None else "none"))
     if d["anchor"]:
         print(f"METAR anchoring as the generator received it: strength {cc[20]:.2f}, radius {cc[21]:.0f} km")
         for i, (x, y, z, w) in enumerate(d["anchor_stations"]):
