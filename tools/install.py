@@ -516,10 +516,25 @@ def set_key(text: str, key: str, value: str) -> str:
     return text[:section.start()] + body + text[section.end():]
 
 
-def register_space(renodx: bool | None, ini_text: str) -> int:
-    """--renodx or --no-renodx; without either, what the last install left in ReShade.ini, so that updating keeps it."""
+def renodx_present(sim: Path, ini_text: str = "") -> bool:
+    """Whether RenoDX (HDR / DLSS) is next to ReShade: renodx*.addon64 in the sim
+    or AddonPath folder, or a [RENODX...] section already in ReShade.ini (issue #22)."""
+    for folder in dict.fromkeys([sim, addon_folder(sim)]):
+        try:
+            if any(folder.glob("renodx*.addon64")) or any(folder.glob("renodx*.addon")):
+                return True
+        except OSError:
+            continue
+    return bool(re.search(r"^\[RENODX", ini_text, re.M | re.I))
+
+
+def register_space(renodx: bool | None, ini_text: str, sim: Path | None = None) -> int:
+    """--renodx or --no-renodx; without either, RenoDX next to the sim picks space 51,
+    else what the last install left in ReShade.ini (so updates keep it)."""
     if renodx is not None:
         return RENODX_SPACE if renodx else DEFAULT_SPACE
+    if sim is not None and renodx_present(sim, ini_text):
+        return RENODX_SPACE
     section = re.search(rf"^\[{SECTION}\][^\[]*", ini_text, re.M)
     key = re.search(r"^RegisterSpace=(\d+)\s*$", section.group(0), re.M) if section else None
     return int(key.group(1)) if key else DEFAULT_SPACE
@@ -638,9 +653,11 @@ def install(args) -> None:
     say(f"  shaders:    {pak}")
     say(f"  Community:  {community or 'not found: the EFB app (METAR features) is skipped'}")
     say(f"  data:       {data}")
-    space = register_space(args.renodx, read_ini(sim / "ReShade.ini"))
+    ini_text = read_ini(sim / "ReShade.ini")
+    space = register_space(args.renodx, ini_text, sim)
     if space != DEFAULT_SPACE:
-        say(f"  RenoDX:     compatible, register space {space} (--no-renodx goes back)")
+        how = "detected" if args.renodx is None and renodx_present(sim, ini_text) else "compatible"
+        say(f"  RenoDX:     {how}, register space {space} (--no-renodx goes back)")
     if rv and tuple(int(x) for x in rv.split(".")[:2]) < (6, 8):
         say(f"  ReShade {rv} is too old: install 6.8 or newer with full add-on support.")
         raise InstallError("ReShade too old")
@@ -809,8 +826,8 @@ def main() -> int:
     ap.add_argument("--workers", type=int, help="processes for patching the shaders (default: 1, one at a time, the "
                     "lightest load; more is faster, but several at once froze one PC)")
     ap.add_argument("--renodx", action=argparse.BooleanOptionalAction, default=None,
-                    help="work next to the RenoDX HDR mod (a different register space for the mod). Installing again "
-                         "keeps it; --no-renodx goes back")
+                    help="work next to the RenoDX HDR / DLSS mod (register space 51). Without this flag the "
+                         "installer picks 51 when it finds renodx*.addon64 next to the sim; --no-renodx goes back")
     ap.add_argument("--payload", type=Path, help=argparse.SUPPRESS)
     ap.add_argument("--yes", action="store_true", help="don't ask")
     ap.add_argument("--uninstall", action="store_true")

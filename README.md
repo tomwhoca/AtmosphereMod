@@ -728,15 +728,19 @@ works or not:
 ### With RenoDX
 
 The [RenoDX HDR mod for MSFS 2024](https://www.nexusmods.com/microsoftflightsimulator2024/mods/26)
-stops working next to AtmosphereMod: its shader replacements fail, with
-`Params not created` in `ReShade.log`. Both mods add inputs to the sim's shaders
-under the same label (register space 50). If you use RenoDX, install
-AtmosphereMod with a parameter that moves its inputs to another label: run
-`Install AtmosphereMod.cmd --renodx` from Command Prompt, in the folder you
-unzipped.
+(and its DLSS add-on, e.g. `renodx-dlss.addon64`) stops working next to
+AtmosphereMod: its shader replacements fail, with `Params not created` in
+`ReShade.log`. Both mods add inputs to the sim's shaders under the same label
+(register space 50).
+
+The installer moves AtmosphereMod to register space 51 when it finds a
+`renodx*.addon64` (or `renodx*.addon`) next to the sim, or a `[RENODX...]`
+section in `ReShade.ini`. You can also force it:
+
+    Install AtmosphereMod.cmd --renodx
 
 - If you don't use RenoDX, you don't need this.
-- Installing again keeps it, so updates need no parameter. To go back, run
+- Installing again keeps the space it chose. To go back to 50, run
   `Install AtmosphereMod.cmd --no-renodx`.
 - It sets `RegisterSpace` in `ReShade.ini`. Don't change that line by hand: the
   shaders have to be patched with the same value, or they stay stock.
