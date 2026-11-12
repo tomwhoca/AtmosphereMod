@@ -5,6 +5,7 @@
 // Run by tools/test_metar_parse.py; exits 1 on a failure.
 
 #include "cloud_anchor.h"
+#include "cloud_stations.h"
 #include "haze_mapping.h"
 
 #include <cmath>
@@ -96,6 +97,34 @@ int main()
         check(m.layers.size() == 2 && m.layers[0].base_ft == 4100.0 && m.layers[0].base_estimated &&
                   m.layers[1].base_ft == 4100.0 && !m.layers[1].base_estimated,
               "FEW///CB before FEW041: the CB estimated (spread 10 -> 4100 ft), FEW041 as reported");
+    }
+
+    // The in-cloud fog's floor (cloud_stations.h fog_floor_agl_m): where the report puts the bottom of its clouds
+    {
+        const auto floor_of = [](const std::string &raw, const std::string &layers) {
+            return anchor::fog_floor_agl_m(haze::parse_metar_json(message(raw, layers, "8", "7")));
+        };
+        const auto near = [](double a, double b) { return std::abs(a - b) < 1e-6; };
+        // EDDF 111320Z: the report behind issue (fly-through fog on the ground under OVC004 with 2,900 m of mist)
+        check(near(floor_of("METAR EDDF 111320Z AUTO 28004KT 240V320 2900 -RADZ BR OVC004 08/07 Q1002 NOSIG",
+                            layer(4, 6, -1)), 400.0 * 0.3048),
+              "EDDF OVC004: the floor 400 ft above the station");
+        check(near(floor_of("METAR LIPE 111520Z VRB02KT 1600 -RA BR BKN004 BKN010 11/11 Q1007",
+                            layer(10, 5, -1) + "," + layer(4, 5, -1)), 400.0 * 0.3048),
+              "LIPE BKN004 BKN010: the lowest layer, whatever the order");
+        const haze::Metar vv = haze::parse_metar_json(message("METAR EDDF 111520Z AUTO VRB02KT 0200 FG VV002 08/08 Q1001",
+                                                              "", "8", "8"));
+        check(vv.obscured && vv.vertical_vis_ft == 200.0 && !vv.clouds_reported && near(anchor::fog_floor_agl_m(vv), 200.0 * 0.3048),
+              "VV002: obscured, the floor at the vertical visibility (200 ft)");
+        check(near(floor_of("METAR EDDF 111520Z AUTO VRB02KT 0100 FG VV/// 08/08 Q1001", ""), 0.0),
+              "VV///: the floor at the ground");
+        check(near(floor_of("METAR EDDM 091050Z 09004KT 9999 NSC 07/05 Q1019", ""), 5000.0 * 0.3048),
+              "NSC: no cloud below 5,000 ft");
+        const haze::Metar cb = haze::parse_metar_json(
+            message("METAR EDDK 251150Z AUTO 26019KT 9999 FEW///CB 14/06 Q1000", layer(0, 3, 1), "14", "6"));
+        check(near(anchor::fog_floor_agl_m(cb), 3280.0 * 0.3048), "only an estimated base (FEW///CB): that one");
+        check(std::isnan(floor_of("METAR EDDK 251150Z AUTO 26019KT 9999 14/06 Q1000", "")),
+              "no sky condition: no floor");
     }
 
     std::printf("%s\n", g_failures ? "FAILED" : "all checks passed");

@@ -79,6 +79,9 @@ struct Metar
     // The sky is described: layers, CAVOK, or SKC/CLR/NSC/NCD (not with VV,
     // an obscured sky). NSC/NCD/CAVOK: nothing significant below 5,000 ft.
     bool clouds_reported = false, no_significant_cloud = false;
+    // VV: the sky obscured (fog, heavy snow), and how far up one sees (ft; 0 for VV///).
+    bool obscured = false;
+    double vertical_vis_ft = NAN;
 };
 
 struct Inputs
@@ -251,9 +254,12 @@ inline Metar parse_metar_json(const std::string &json)
     // the sky condition, from the raw report where the JSON has no layer for it
     const std::string raw = " " + m.raw + " ";
     auto token = [&raw](const char *t) { return raw.find(std::string(" ") + t + " ") != std::string::npos; };
-    const bool obscured = std::regex_search(raw, std::regex(" VV[0-9/]{3} "));
+    std::smatch vv;
+    m.obscured = std::regex_search(raw, vv, std::regex(" VV([0-9]{3}|///) "));
+    if (m.obscured)
+        m.vertical_vis_ft = vv[1] == "///" ? 0.0 : std::stod(vv[1].str()) * 100.0;
     m.no_significant_cloud = cavok || token("NSC") || token("NCD");
-    m.clouds_reported = !obscured && (!m.layers.empty() || m.no_significant_cloud || token("SKC") || token("CLR"));
+    m.clouds_reported = !m.obscured && (!m.layers.empty() || m.no_significant_cloud || token("SKC") || token("CLR"));
     m.valid = !m.icao.empty();
     return m;
 }

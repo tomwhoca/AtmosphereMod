@@ -74,9 +74,11 @@ std::string summary();
 // patched ch_cloudDensity reads from the debug buffer (tools/patch_dxil.py
 // ANCHOR_TABLE) as it is now: fades and crossfades advance with time. With the
 // haze field on, the stations' haze rows follow (HAZE_ROWS, header word 3 'HAZE')
-// for the patched atmosphere passes. Returns the stations in use. Any thread
+// for the patched atmosphere passes, then the in-cloud fog's floor at the
+// aircraft (FOG_FLOOR: below the nearest station's reported cloud base the
+// cloud renderer adds no in-cloud fog). Returns the stations in use. Any thread
 // (the add-on: once per present, after apply).
-constexpr size_t kAnchorTableBytes = 16 + 16 * 8 * 33 + 32 * 8;
+constexpr size_t kAnchorTableBytes = 16 + 16 * 8 * 33 + 32 * 8 + 16;
 size_t cloud_anchor_table(std::array<uint8_t, kAnchorTableBytes> &out);
 
 // The haze field (tunables.ini T15, on unless 0): the haze from all the

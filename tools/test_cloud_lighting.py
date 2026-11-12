@@ -105,6 +105,9 @@ NEAR_SETS = [near_set(), near_set(c16=2.0, c17=0.33), near_set(c16=0.5, c17=0.33
              near_set(c0=0.0, c16=2.0, c17=0.33),
              near_set(c34=0.5), near_set(c16=2.0, c17=0.33, c33=20.0, c34=1.0), near_set(c34=3.0),
              near_set(c34=-1.0), near_set(c33=0.0, c34=1.0), near_set(c0=0.0, c34=1.0)]
+# ... with the in-cloud fog's floor (FOG_FLOOR) too: the plain fog, and with solid clouds and structure
+FLOOR_SETS = (0, 9)
+FLOOR_M = 2000.0
 
 
 def type_set(c0=1.0, c8=2.0, c16=4.0, c17=0.33, c18=0.0, strength=1.0, thick=(0.6, 0.5, 0.4, 0.3)):
@@ -957,7 +960,7 @@ def check(crc: str, stock: str) -> list[str]:
     # the in-cloud fog around the camera (C33): sample distances from the camera to past its fade
     near_t = np.concatenate([[0.0, 1.5, 2.25, 3.0, 50.0, 100.0, 200.0, 300.0, 400.0],
                              rng.uniform(0, 400, N - 9)]).astype(F)
-    for c in NEAR_SETS:
+    for ci, c in enumerate(NEAR_SETS):
         cloud = np.zeros((P.CLOUD_PARAMS_SIZE // 16, 4))
         cloud.flat[:len(c)] = c
         seeds = {ms["s"]: s, **rain, opt["sigma"]: sigma, opt["height"]: height, **dseeds, LV: np.ones(N, F),
@@ -1039,6 +1042,34 @@ def check(crc: str, stock: str) -> list[str]:
         if not np.array_equal(prod[t64 <= P.NEAR_FOG_INNER_M].astype(F),
                               (ramp_v * base)[t64 <= P.NEAR_FOG_INNER_M].astype(F)) and c[16] <= 0:
             failures.append(f"{tag} {opt['prod']}: fog within {P.NEAR_FOG_INNER_M} m of the camera")
+        if ci not in FLOOR_SETS:
+            continue
+        # the floor: with the buffer bound (bit 6) and the add-on's magic, the fog (and its light factor) fades in
+        # over NEAR_FOG_FLOOR_FADE_M above it; without the magic, or the bit, as without a floor
+        words = np.zeros(P.FOG_FLOOR // 4 + 4, F)
+        words[P.FOG_FLOOR // 4] = FLOOR_M
+        words[P.FOG_FLOOR // 4 + 1] = np.uint32(P.FOG_FLOOR_MAGIC).view(F)
+        bound = np.zeros((4, 4))
+        bound[0, 0] = np.uint32(64).view(np.float32)
+        fl = np.clip((h64 - FLOOR_M) / P.NEAR_FOG_FLOOR_FADE_M, 0, 1)
+        got_f = Evaluator(patched, {"b1 space50": cloud, "b0 space50": bound}, seeds, sampler=fine_sampler, buffer=words)
+        prod_f = got_f(opt["prod"]).astype(np.float64)
+        ref_f = ramp_v * base + edge * cloudy * w * fl * np.maximum(near - base, 0)
+        e = float(np.nan_to_num(np.abs(prod_f - ref_f) / np.maximum(np.abs(ref_f), floor), nan=np.inf).max())
+        if e > 1e-4:
+            failures.append(f"{tag} {opt['prod']}: in-cloud fog with a floor, rel. error max {e:.1e}")
+        below = h64 <= FLOOR_M
+        if np.any(got_f("%mod.nf.xe")[below] != 0):  # (the fog's own term: exactly none, whatever C16)
+            failures.append(f"{tag} {opt['prod']}: in-cloud fog below the floor")
+        err = float(np.abs(got_f("%mod.in.fe").astype(np.float64) - (1 + w * fl * (f - 1))).max())
+        if err > 1e-4:
+            failures.append(f"{tag} %mod.in.fe: structure light factor with a floor, abs. error max {err:.1e}")
+        unmarked = words.copy()
+        unmarked[P.FOG_FLOOR // 4 + 1] = 0.0
+        for what, cb, buf in (("no magic", bound, unmarked), ("no bit 6", np.zeros((4, 4)), words)):
+            off = Evaluator(patched, {"b1 space50": cloud, "b0 space50": cb}, seeds, sampler=fine_sampler, buffer=buf)
+            if not np.array_equal(off(opt["prod"]).astype(F), prod.astype(F)):
+                failures.append(f"{tag} {opt['prod']}: floor not in use ({what}) but not as without it")
     # cloud types: the view ramp and the optical thickness by the grid's weights
     puff_products = [(e, P.Ir(patched).def_name(i)) for i, l in enumerate(patched.splitlines())
                      for e, pf in (("%mod.ty.e8", "%mod.ty.pf"), ("%mod.ty.e1", "%mod.ty.pf1"))

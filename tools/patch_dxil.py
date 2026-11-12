@@ -2069,6 +2069,8 @@ NEAR_FOG_FULL_M, NEAR_FOG_OUT_M = 100.0, 300.0
 # dense fog's surface right at the cloud's into bands and blocks.
 NEAR_FOG_DEPTH_M = (25.0, 75.0)
 NEAR_FOG_SIGMA = (1e-4, 5e-4)
+# ... and only above the reported cloud base (FOG_FLOOR, below): from it over this far up (m, linear)
+NEAR_FOG_FLOOR_FADE_M = 30.0
 # Structure inside clouds (C34, apply_cloud_inside): the view march's erosion
 # noise looked up again at these periods (m; each divides 8 km, so the noise
 # frame's 8 km jumps stay whole tiles). The two octaves' difference times
@@ -2143,7 +2145,12 @@ def apply_cloud_optical(ir: Ir) -> str:
     the cloud: times smoothstep over the sample's depth into it
     (NEAR_FOG_DEPTH_M), and only where the sim's extinction is a cloud's
     (NEAR_FOG_SIGMA): the extinction is r sigma' + e c w max(sigma_n -
-    sigma', 0), r the view ramp. The sample is at the end of
+    sigma', 0), r the view ramp. And only above the reported cloud base:
+    w also times sat((h - floor) / NEAR_FOG_FLOOR_FADE_M), the floor from the
+    debug buffer (FOG_FLOOR; none without it). The weather volume's slices are
+    80-110 m thick near the ground, so a low deck can start well below its
+    reported base (OVC004 at EDDF: ~30 m above the field), and the fog took a
+    camera there for the inside of the cloud. The sample is at the end of
     its step near the camera (MSFS jitters it only beyond 40 m), so a pixel
     on the wing integrates exactly the cloud in front of it."""
     v = find_view_extinction(ir)
@@ -2194,7 +2201,12 @@ def apply_cloud_optical(ir: Ir) -> str:
         "  %mod.nf.xx = fmul fast float %mod.nf.x, %mod.nf.x",
         "  %mod.nf.ss = fmul fast float %mod.nf.xx, %mod.nf.x3",
         "  %mod.nf.wo = fsub fast float 1.000000e+00, %mod.nf.ss",
-        "  %mod.nf.lq = fsub fast float 1.000000e+00, %mod.op.iw",
+        "  %mod.nf.lq0 = fsub fast float 1.000000e+00, %mod.op.iw",
+        # ... above the reported cloud base only (FOG_FLOOR; -1e30 without one)
+        f"  %mod.nf.fl0 = fsub fast float {h}, %mod.nfc.h",
+        f"  %mod.nf.fl1 = fmul fast float %mod.nf.fl0, {f32(1.0 / NEAR_FOG_FLOOR_FADE_M)}",
+        "  %mod.nf.fl = call float @dx.op.unary.f32(i32 7, float %mod.nf.fl1)",
+        "  %mod.nf.lq = fmul fast float %mod.nf.lq0, %mod.nf.fl",
         "  %mod.nf.w0 = fmul fast float %mod.nf.wi, %mod.nf.wo",
         "  %mod.nf.w = fmul fast float %mod.nf.w0, %mod.nf.lq",
         "  %mod.nf.d0 = fsub fast float %mod.nf.v, %mod.op.s",
@@ -2219,7 +2231,32 @@ def apply_cloud_optical(ir: Ir) -> str:
     need(new != ir.lines[i], f"{prod}: couldn't substitute the extinction")
     base = new.replace(f"{prod} = ", "%mod.nf.pb = ", 1)
     ir.lines[i:i + 1] = lines + [base, f"  {prod} = fadd fast float %mod.nf.pb, %mod.nf.xe"]
-    return f"cloud optical thickness: {prod} = ramp * {sigma}, altitude {h}; in-cloud fog at distance {t}"
+    # the in-cloud fog's floor, read once at the entry (finish puts the prologue, with %mod.ah, before it): from
+    # the debug buffer while it's bound (DebugCapture bit 6) and the add-on has written one, else -1e30 (none)
+    rr = "%dx.types.ResRet.f32"
+    entry = next(k for k, l in enumerate(ir.lines) if l.startswith("define void @"))
+    ir.lines[entry + 1:entry + 1] = [
+        "  %mod.nfc.r = call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %mod.ah, i32 0)",
+        "  %mod.nfc.f = extractvalue %dx.types.CBufRet.f32 %mod.nfc.r, 0",
+        "  %mod.nfc.flags = bitcast float %mod.nfc.f to i32",
+        "  %mod.nfc.b = and i32 %mod.nfc.flags, 64",
+        "  %mod.nfc.bound = icmp ne i32 %mod.nfc.b, 0",
+        f"  %mod.nfc.at = select i1 %mod.nfc.bound, i32 {FOG_FLOOR}, i32 0",
+        "  %mod.nfc.uh = call %dx.types.Handle @dx.op.createHandleFromBinding(i32 217, %dx.types.ResBind "
+        f"{{ i32 0, i32 0, i32 {MOD_SPACE}, i8 1 }}, i32 0, i1 false)",
+        "  %mod.nfc.u = call %dx.types.Handle @dx.op.annotateHandle(i32 216, %dx.types.Handle %mod.nfc.uh, "
+        "%dx.types.ResourceProperties { i32 4107, i32 0 })",
+        f"  %mod.nfc.v = call {rr} @dx.op.rawBufferLoad.f32(i32 139, %dx.types.Handle %mod.nfc.u, i32 %mod.nfc.at, "
+        "i32 undef, i8 3, i32 4)",
+        f"  %mod.nfc.h0 = extractvalue {rr} %mod.nfc.v, 0",
+        f"  %mod.nfc.m0 = extractvalue {rr} %mod.nfc.v, 1",
+        "  %mod.nfc.m = bitcast float %mod.nfc.m0 to i32",
+        f"  %mod.nfc.ok0 = icmp eq i32 %mod.nfc.m, {FOG_FLOOR_MAGIC}",
+        "  %mod.nfc.ok = and i1 %mod.nfc.ok0, %mod.nfc.bound",
+        f"  %mod.nfc.h = select i1 %mod.nfc.ok, float %mod.nfc.h0, float {f32(-1e30)}",
+    ]
+    return (f"cloud optical thickness: {prod} = ramp * {sigma}, altitude {h}; in-cloud fog at distance {t}, "
+            f"floor at {FOG_FLOOR:#x}")
 
 
 def dominating_lines(ir: Ir, at: int) -> set:
@@ -5533,6 +5570,16 @@ HAZE_MAGIC = 0x455A4148  # 'HAZE': header word 3 while the add-on writes the row
 HAZE_IDW_KM = 10.0  # (cloud_stations.h kHazeIdwKm: 15 diluted a station's own report ~18 % at the station)
 DEBUG_HAZE_FIELD = 512
 assert HAZE_ROWS + HAZE_ROW_BYTES * ANCHOR_STATIONS <= CLOUD_GEN_REGION + CG_END
+# The in-cloud fog's floor (cloud_stations.h kFogFloorOffset), after the haze rows: float (m MSL), uint
+# FOG_FLOOR_MAGIC while the add-on has one: the nearest METAR station's lowest reported cloud base (or vertical
+# visibility; 5,000 ft with none reported) above its elevation. ch_volumetric_clouds_render's in-cloud fog (C33)
+# fades in over NEAR_FOG_FLOOR_FADE_M above it. The weather volume's slices are 80-110 m thick near the ground, so
+# a low deck can start a slice below its reported base, and its edge ramp fades it in below that: OVC004 at EDDF
+# (111 m) starts some 30 m above the field (slice 3, from 141 m MSL), and the fog took a camera there for the
+# inside of the cloud (2,900 m of mist under the deck became ~20 m; capture 637 at EDDW: OVC003 from 62 m MSL).
+FOG_FLOOR = HAZE_ROWS + HAZE_ROW_BYTES * ANCHOR_STATIONS
+FOG_FLOOR_MAGIC = 0x524F4C46  # 'FLOR'
+assert FOG_FLOOR + 16 <= CLOUD_GEN_REGION + CG_END
 ANCHOR_RADIUS_DEFAULT_M = 20000.0
 # decks: the share of MSFS's dome taper removed (1 = a geometrically flat top) and
 # how far toward the smooth noise channel smooth decks go (1 = the smooth channel only)

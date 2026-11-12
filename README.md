@@ -443,6 +443,14 @@ What it can do:
     cloud top or passing a cloud's edge doesn't break the fog into bands and
     blocks (MSFS draws its clouds at a reduced resolution, and in steps of
     20 m near the aircraft).
+  - It starts at the cloud base the nearest METAR reports (within 50 km): its
+    lowest layer, the vertical visibility of an obscured sky, or 5,000 ft
+    when it reports none below that. MSFS stores its clouds in height steps
+    that are 80–110 m thick near the ground, so a low deck can start well below
+    the reported base: under an overcast at 400 ft, some 30 m above the
+    runway. Below the reported base it stays as MSFS draws it, so the
+    visibility under the deck is the METAR's. Above it, in the deck, the fog
+    applies.
   - `C33` is the visibility inside a dense cloud, in metres (10 by default;
     thinner parts of a cloud allow more); 0 turns it off.
   - **Turn off other in-cloud effects:** add-ons that simulate flying

@@ -843,8 +843,25 @@ size_t cloud_anchor_table(std::array<uint8_t, kAnchorTableBytes> &out)
     const double now = now_s();
     g_stations.tick(g_have_ground ? g_last_lat : NAN, g_have_ground ? g_last_lon : NAN, now,
                     g_have_ground ? g_inputs.local_hour : NAN, g_newest_report);
+    // (the in-cloud fog's floor at the aircraft, logged when it changes by 10 m or more or comes from another station)
+    std::string floor_icao;
+    const double floor_m = g_have_ground ? g_stations.fog_floor_at(g_last_lat, g_last_lon, now, &floor_icao) : NAN;
+    static std::string logged_icao;
+    static double logged_m = NAN;
+    if (floor_icao != logged_icao || std::isfinite(floor_m) != std::isfinite(logged_m) ||
+        (std::isfinite(floor_m) && std::abs(floor_m - logged_m) >= 10.0))
+    {
+        logged_icao = floor_icao;
+        logged_m = floor_m;
+        if (std::isfinite(floor_m))
+            log("in-cloud fog: none below %.0f m MSL (%s's reported cloud base or vertical visibility)", floor_m,
+                floor_icao.c_str());
+        else
+            log("in-cloud fog: no floor (no station within %.0f km that reports its clouds)", anchor::kFogFloorKm);
+    }
     // (the haze rows only once the add-on's own values are the weather's too)
-    g_stations.table(now, out.data(), g_haze_field && g_have_blend && g_have_target ? &g_haze_blend : nullptr);
+    g_stations.table(now, out.data(), g_haze_field && g_have_blend && g_have_target ? &g_haze_blend : nullptr,
+                     floor_m);
     return g_stations.in_use();
 }
 

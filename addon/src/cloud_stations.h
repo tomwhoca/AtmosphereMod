@@ -37,8 +37,17 @@ constexpr uint32_t kTableMagic = 0x52484341;  // ANCHOR_MAGIC ('ACHR')
 // kHazeMagic while they're written.
 constexpr size_t kHazeOffset = 16 + 16 * kStations * (1 + kSlices);
 constexpr size_t kHazeRowBytes = 32;
-constexpr size_t kTableBytes = kHazeOffset + kHazeRowBytes * kStations;
 constexpr uint32_t kHazeMagic = 0x455A4148;  // 'HAZE' (patch_dxil.py HAZE_MAGIC)
+// The in-cloud fog's floor (patch_dxil.py FOG_FLOOR), after the haze rows:
+// float (m MSL), uint kFogFloorMagic, written while there is one (fog_floor_at
+// at the aircraft). The cloud renderer's in-cloud fog (C33) starts there. The
+// weather volume's slices are 80-110 m thick near the ground, so a low deck can
+// start well below its reported base (OVC004 at EDDF: ~30 m above the field);
+// below the base it stays as the sim draws it, the mist the METAR reports.
+constexpr size_t kFogFloorOffset = kHazeOffset + kHazeRowBytes * kStations;
+constexpr uint32_t kFogFloorMagic = 0x524F4C46;  // 'FLOR' (patch_dxil.py FOG_FLOOR_MAGIC)
+constexpr double kFogFloorKm = 50.0;              // only from a station this near the aircraft
+constexpr size_t kTableBytes = kFogFloorOffset + 16;
 // patch_dxil.py HAZE_IDW_KM: b = weight / (d^2 + this^2). At 15 km a station's
 // own visibility (LIMS 7 km, its neighbours 60-70 km away) was ~18 % diluted
 // at the station itself (8 km, capture 235); at 10 km ~10 %.
@@ -98,6 +107,34 @@ inline double distance_km(double lat1, double lon1, double lat2, double lon2)
     const double a = std::sin((lat2 - lat1) * d * 0.5), b = std::sin((lon2 - lon1) * d * 0.5);
     const double h = a * a + std::cos(lat1 * d) * std::cos(lat2 * d) * b * b;
     return 2.0 * 6371.0 * std::asin(std::min(1.0, std::sqrt(h)));
+}
+
+// Where a station's report puts the bottom of its clouds (m above the
+// station; NAN: the report doesn't say): its lowest layer's base, FEW to OVC
+// (bases an automatic station couldn't measure, FEW///CB, only without a
+// measured one), the vertical visibility of an obscured sky, or 5,000 ft with
+// no cloud reported below that (CAVOK, NSC, NCD, SKC, CLR).
+inline double fog_floor_agl_m(const haze::Metar &m)
+{
+    if (!m.valid)
+        return NAN;
+    if (m.obscured)
+        return std::isfinite(m.vertical_vis_ft) ? m.vertical_vis_ft * kFt : NAN;
+    if (!m.clouds_reported)
+        return NAN;
+    double measured = NAN, estimated = NAN;
+    for (const haze::CloudLayer &l : m.layers)
+    {
+        if (l.cover < 3 || l.cover > 6)
+            continue;
+        double &lowest = l.base_estimated ? estimated : measured;
+        lowest = std::isfinite(lowest) ? std::min(lowest, l.base_ft) : l.base_ft;
+    }
+    if (std::isfinite(measured))
+        return measured * kFt;
+    if (std::isfinite(estimated))
+        return estimated * kFt;
+    return kNscFt * kFt;  // (no layer: CAVOK, NSC, NCD, SKC, CLR)
 }
 
 class StationSet
@@ -243,8 +280,8 @@ public:
 
     // The table at `now` (kTableBytes; layout: patch_dxil.py ANCHOR_TABLE),
     // with the haze rows when given a blend (else none: the haze is the add-on's
-    // values everywhere).
-    void table(double now, uint8_t *out, const HazeBlend *blend = nullptr) const
+    // values everywhere) and the in-cloud fog's floor when finite (fog_floor_at).
+    void table(double now, uint8_t *out, const HazeBlend *blend = nullptr, double fog_floor_m = NAN) const
     {
         std::memset(out, 0, kTableBytes);
         const uint32_t header[4] = { kTableMagic, static_cast<uint32_t>(in_use()), static_cast<uint32_t>(kStations),
@@ -271,6 +308,34 @@ public:
                                          static_cast<float>(counts_share(s, now)), 0.0f };
             std::memcpy(out + kHazeOffset + kHazeRowBytes * i, haze_rows, sizeof(haze_rows));
         }
+        if (std::isfinite(fog_floor_m))
+        {
+            const float floor_m = static_cast<float>(fog_floor_m);
+            std::memcpy(out + kFogFloorOffset, &floor_m, 4);
+            std::memcpy(out + kFogFloorOffset + 4, &kFogFloorMagic, 4);
+        }
+    }
+
+    // The in-cloud fog's floor at a point (m MSL; NAN: none): from the nearest
+    // station in use within kFogFloorKm whose report places its clouds
+    // (fog_floor_agl_m), above its elevation. *icao: that station.
+    double fog_floor_at(double lat, double lon, double now, std::string *icao = nullptr) const
+    {
+        double best_km = kFogFloorKm, floor_m = NAN;
+        for (const Station &s : slots_)
+        {
+            if (!s.used || !(weight(s, now) > 0.0))
+                continue;
+            const double agl = fog_floor_agl_m(s.metar);
+            const double km = distance_km(lat, lon, s.pos_lat(), s.pos_lon());
+            if (!std::isfinite(agl) || !(km <= best_km))
+                continue;
+            best_km = km;
+            floor_m = (std::isfinite(s.elevation_m) ? s.elevation_m : s.ground_m) + agl;
+            if (icao != nullptr)
+                *icao = s.icao;
+        }
+        return floor_m;
     }
 
     // The stations' haze at a point, weighted as the atmosphere passes weigh

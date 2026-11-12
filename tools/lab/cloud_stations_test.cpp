@@ -866,6 +866,45 @@ int soak_scenario()
     printf(g_fails ? "%d check(s) failed\n" : "all checks passed\n", g_fails);
     return g_fails ? 1 : 0;
 }
+
+// The in-cloud fog's floor: the nearest station within kFogFloorKm that reports
+// its clouds, at its elevation plus its lowest base; in the table after the haze rows.
+int fog_floor_scenario()
+{
+    printf("fog floor\n");
+    anchor::StationSet set([](const std::string &line) { printf("  log: %s\n", line.c_str()); });
+    Table t;
+    const double lat = 50.033, lon = 8.570;  // at EDDF
+    const auto table_floor = [&t](float &m, uint32_t &magic) {
+        std::memcpy(&m, t.bytes.data() + anchor::kFogFloorOffset, 4);
+        std::memcpy(&magic, t.bytes.data() + anchor::kFogFloorOffset + 4, 4);
+    };
+    float m = 0.0f;
+    uint32_t magic = 0;
+    set.table(0.0, t.bytes.data(), nullptr, set.fog_floor_at(lat, lon, 0.0));
+    table_floor(m, magic);
+    check(std::isnan(set.fog_floor_at(lat, lon, 0.0)) && magic == 0, "no station: no floor, none in the table");
+
+    set.on_metar(metar("EDDF", { { 400.0, 6, -1 } }), lat, lon, true, 111.0, 12.0, lat, lon, 0.0);
+    set.on_position("EDDF", 50.033, 8.570, 111.0, 0.5);
+    set.on_metar(metar("EDFE", { { 1500.0, 5, -1 } }), 49.96, 8.64, false, 0.0, 12.0, lat, lon, 1.0);
+    set.on_position("EDFE", 49.961, 8.644, 119.0, 1.5);
+    set.tick(lat, lon, 2.0);
+    std::string icao;
+    const double f = set.fog_floor_at(lat, lon, 2.0, &icao);
+    check(icao == "EDDF" && near(f, 111.0 + 400.0 * 0.3048, 1e-6), "at EDDF its OVC004: " + icao + " " + std::to_string(f));
+    const double f2 = set.fog_floor_at(49.961, 8.644, 2.0, &icao);
+    check(icao == "EDFE" && near(f2, 119.0 + 1500.0 * 0.3048, 1e-6), "at EDFE (9 km on) its BKN015: " + icao);
+    check(std::isnan(set.fog_floor_at(51.0, 8.6, 2.0)), "more than 50 km from both: no floor");
+    set.table(2.0, t.bytes.data(), nullptr, f);
+    table_floor(m, magic);
+    check(magic == anchor::kFogFloorMagic && m == static_cast<float>(f), "the table has it, with its magic");
+    check(anchor::kFogFloorOffset == anchor::kHazeOffset + anchor::kHazeRowBytes * anchor::kStations &&
+              anchor::kTableBytes == anchor::kFogFloorOffset + 16,
+          "after the haze rows (patch_dxil.py FOG_FLOOR)");
+    printf(g_fails ? "%d check(s) failed\n" : "all checks passed\n", g_fails);
+    return g_fails ? 1 : 0;
+}
 } // namespace
 
 int main(int argc, char **argv)
@@ -876,5 +915,6 @@ int main(int argc, char **argv)
     const int churn = churn_scenario();
     const int soak = soak_scenario();
     const int flip = haze_flip_scenario();
-    return haze_scenario() | clouds | churn | soak | flip;
+    const int floor = fog_floor_scenario();
+    return haze_scenario() | clouds | churn | soak | flip | floor;
 }
