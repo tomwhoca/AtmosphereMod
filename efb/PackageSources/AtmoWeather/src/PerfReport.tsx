@@ -363,16 +363,18 @@ export function summaryText(r: NonNullable<AddonReport["result"]>): string {
 }
 
 /** What makes the result doubtful, or "": none of the mod's shaders ran (the mod isn't working, so with and without
- * are the same), or the view changed while measuring. */
+ * are the same), or the view changed while measuring, in the frame rate or, where that's capped, in the GPU's time. */
 export function reportWarning(r: NonNullable<AddonReport["result"]>): string {
   const warnings: string[] = [];
   if (r.modShaders === 0) {
     warnings.push("None of the mod's shaders ran while it was on: the mod doesn't seem to be working on this PC, so "
       + "the result shows no difference. Run the installer again (as after a sim update), then measure again.");
   }
-  if (r.drift > 0.1) {
+  const a = r.gpuOn1 ?? 0, b = r.gpuOn2 ?? 0;
+  const drift = Math.max(r.drift, a > 0 && b > 0 ? Math.abs(a - b) / ((a + b) / 2) : 0);
+  if (drift > 0.1) {
     warnings.push(`The view changed while measuring: the two parts with the mod differ by `
-      + `${Math.round(r.drift * 100)} %. Measure again with the sim paused, if you can.`);
+      + `${Math.round(drift * 100)} %. Measure again with the sim paused, if you can.`);
   }
   return warnings.join(" ");
 }
@@ -400,6 +402,8 @@ export class PerfReportModel {
   public readonly contact = Subject.create("");
   private report?: AddonReport;
   private context?: Context;
+  /** One per measurement: sending it again (Try again after a lost answer) doesn't make a second row. */
+  private reportId = "";
   private startedAt = 0;
   private sawRunning = false;
 
@@ -456,6 +460,7 @@ export class PerfReportModel {
     }
     if (this.sawRunning && report?.phase === "done" && report.result !== undefined) {
       this.report = report;
+      this.reportId = newReportId();
       this.context = this.getContext();
       this.weather.set(weatherKind(this.context.metar));
       this.impression.set("");
@@ -516,7 +521,10 @@ export class PerfReportModel {
   /** Posts the report; if its answer can't be read (the sim's browser), asks by its id what became of it, once more
    * a few seconds later if the script hasn't seen it yet. */
   private async deliver(url: string): Promise<{ ok: boolean; why: string }> {
-    const id = newReportId();
+    if (this.reportId === "") {
+      this.reportId = newReportId();
+    }
+    const id = this.reportId;
     const body = JSON.stringify({ ...reportFields(this.report!, this.context!, this.answers()), id });
     const posted = await this.transport.post(url, body);
     if (readable(posted)) {

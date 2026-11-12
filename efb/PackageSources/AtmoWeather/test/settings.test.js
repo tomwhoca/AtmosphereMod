@@ -228,7 +228,7 @@ check(model.value("T3").get() === 4 && model.effectiveValue("T3").get() === 7.5,
   {
     const v = (r) => r.split(".").map(Number).reduce((a, n) => a * 1000 + n, 0);
     const order = [WHATS_NEW.release, ...PREVIOUS.map((p) => p.release)];
-    check(PREVIOUS.length > 0 && PREVIOUS[0].release === "0.7.0"
+    check(PREVIOUS.length > 0 && PREVIOUS[0].release === "0.7.1"
           && order.every((r, i) => /^\d+\.\d+\.\d+$/.test(r) && (i === 0 || v(r) < v(order[i - 1])))
           && PREVIOUS[PREVIOUS.length - 1].release === "0.1.0",
           `what's new: the previous versions, newest first, ${PREVIOUS[0].release} down to 0.1.0`);
@@ -279,6 +279,9 @@ check(model.value("T3").get() === 4 && model.effectiveValue("T3").get() === 7.5,
   check(perf.reportWarning(result) === "" && perf.reportWarning({ ...result, modShaders: 0 }).startsWith("None of the "
           + "mod's shaders ran") && perf.reportWarning({ ...result, modShaders: undefined }) === "",
         "report: a warning when none of the mod's shaders ran (not when they did, nor when uncounted)");
+  check(perf.reportWarning({ ...result, gpuOn1: 9.0, gpuOn2: 11.0 }).includes("differ by 20 %")
+        && perf.reportWarning({ ...result, gpuOn1: 9.0, gpuOn2: undefined }) === "",
+        "report: a capped frame rate's view change shows in the GPU time (report 50: 7.1 and 9.1 ms)");
   check(perf.reportWarning({ ...result, drift: 0.2 }).startsWith("The view changed while measuring")
         && perf.reportWarning({ ...result, modShaders: 0, drift: 0.2 }).includes(" The view changed"),
         "report: the view changing is pointed out too, after the shaders");
@@ -469,14 +472,24 @@ check(model.value("T3").get() === 4 && model.effectiveValue("T3").get() === 7.5,
         "model: Send posts the report, the sheet takes it, and its id confirms it (the answer unreadable)");
   readable = true;
   await model.send();
-  check(model.step.get() === "sent" && sheet2.rows.length === 3 && confirms.length === 1,
-        "model: a readable answer needs no confirmation");
+  const idOf = (k) => JSON.parse(posted[k][1]).id;
+  check(model.step.get() === "sent" && sheet2.rows.length === 2 && confirms.length === 1 && idOf(1) === idOf(0),
+        "model: the same measurement sent again keeps its id, and the sheet one row (a readable answer: no confirmation)");
   readable = false;
+  model.show();
+  model.start();
+  model.onReport({ phase: "on", progress: 0.2 });
+  model.onReport(done);
+  model.impression.set("too slow to use");
   lost = true;
   await model.send();
   check(model.step.get() === "failed" && model.note.get().includes("not received") && confirms.length === 3
-        && waits === 1 && sheet2.rows.length === 3, "model: a post that never arrived is asked about twice, then failed");
+        && waits === 1 && sheet2.rows.length === 2 && idOf(2) !== idOf(0),
+        "model: a new measurement, a new id; a post that never arrived is asked about twice, then failed");
   lost = false;
+  await model.send();
+  check(model.step.get() === "sent" && sheet2.rows.length === 3 && idOf(3) === idOf(2),
+        "model: Try again sends the same id, so a post that did arrive isn't kept twice");
   reachable = false;
   model.show();
   model.start();

@@ -8,20 +8,31 @@ import { ComponentProps, DataStore, DisplayComponent, FSComponent, Subject, VNod
 /** The release the popup is for, and what it says: change it with every release that has news for the
  * tablet (a release without news leaves it, so nothing shows again). */
 export const WHATS_NEW = {
-  release: "0.7.1",
-  title: "New in AtmosphereMod 0.7.1",
+  release: "0.7.2",
+  title: "New in AtmosphereMod 0.7.2",
   items: [
+    ["Low cloud bases",
+      "Under a low overcast with mist, the in-cloud fog could fill the air right down to the runway and turn a "
+      + "few kilometres of visibility into a few metres. It now starts at the reported cloud base: the nearest "
+      + "METAR's with live weather, the lowest layer's with a weather preset or Active Sky."],
     ["Performance report",
-      "A new button at the end of this page measures what the mod costs on your PC: it switches the mod on, "
-      + "off and on again and times the frames and the GPU's work on them. If you like, it then sends me the "
-      + "result with your PC's and the sim's settings, so I can see where the mod runs well and where it needs "
-      + "work. Nothing is sent before you tap Send."],
+      "It now counts the mod's shaders that ran, and says so if none did (then the mod isn't working on your PC). "
+      + "It asks for your GitHub or flightsim.to username, so I can find your report if I asked you for one, "
+      + "points out a changing view in the GPU's time too, and sending again doesn't file the report twice."],
   ] as [string, string][],
 };
 
 /** Earlier releases' changes, newest first, folded away under "Changes in previous versions", for those who
  * skipped a release or two. When WHATS_NEW gets a new release, its items so far go on top here. */
 export const PREVIOUS: { release: string; items: [string, string][] }[] = [
+  {
+    release: "0.7.1",
+    items: [
+      ["Performance report", "A button at the end of the app's page measures what the mod costs on your PC, with "
+        + "and without it, and, if you like, sends me the result."],
+      ["What's new", "Also lists the changes in earlier versions, folded away."],
+    ],
+  },
   {
     release: "0.7.0",
     items: [
