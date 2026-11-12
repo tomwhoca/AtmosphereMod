@@ -443,9 +443,11 @@ What it can do:
     cloud top or passing a cloud's edge doesn't break the fog into bands and
     blocks (MSFS draws its clouds at a reduced resolution, and in steps of
     20 m near the aircraft).
-  - It starts at the cloud base the nearest METAR reports (within 50 km): its
-    lowest layer, the vertical visibility of an obscured sky, or 5,000 ft
-    when it reports none below that. MSFS stores its clouds in height steps
+  - It starts at the reported cloud base. With live weather that's the
+    nearest METAR's (within 50 km): its lowest layer, the vertical visibility
+    of an obscured sky, or 5,000 ft when it reports none below that. With a
+    weather preset or a weather engine such as Active Sky, it's the base of
+    the lowest layer the sim was given. MSFS stores its clouds in height steps
     that are 80–110 m thick near the ground, so a low deck can start well below
     the reported base: under an overcast at 400 ft, some 30 m above the
     runway. Below the reported base it stays as MSFS draws it, so the
@@ -682,15 +684,22 @@ can't break the sim.
 
 ### With OptiShade
 
-AtmosphereMod can also be downloaded on OptiShade's Components page. It
-fetches the release from this repository's
-[releases](https://github.com/tomwhoca/AtmosphereMod/releases), so it's the
-same installer: run `Install AtmosphereMod.cmd` as usual, also for each update.
+OptiShade 1.0's Components page installs AtmosphereMod for you: it fetches
+the release from this repository's
+[releases](https://github.com/tomwhoca/AtmosphereMod/releases) and runs the
+same installer. With an older OptiShade, run `Install AtmosphereMod.cmd` as
+usual, also for each update.
 
 [OptiShade](https://github.com/GamingWithGravy/OptiShade) brings its own
 ReShade: a `ReShade64.dll` that OptiShade's own `dxgi.dll` or `winmm.dll`
-loads. The installer accepts that ReShade too. **Users have reported it
-working:**
+loads. The installer accepts that ReShade too.
+
+**Tested here** (November 2026, RTX 5080, MS Store version): OptiShade 0.21.6
+(its ReShade 6.8.0.73) and OptiShade 1.0 (ReShade 6.8.0.1240). The add-on
+loads, and the EFB app and its performance report work.
+Performance reports from users with OptiShade 1.0 show the mod running too.
+
+**Users have reported it working:**
 - OptiShade 0.21.4 Stable (its ReShade 6.8.0.73), on an RTX 5070 Ti with the
   MS Store version: the add-on loaded, the EFB app showed the METARs,
   Ctrl+Shift+F9 switched the mod, and OptiShade's own effects kept working;
@@ -699,12 +708,7 @@ working:**
 - OptiShade 0.21.2 with AtmosphereMod 0.5.1, with the user's OptiShade
   presets.
 
-It hasn't been tested here: when it was added (October 2026), OptiShade had no
-release available to download. Compatibility with OptiShade 1.0 will be tested
-and confirmed once it's out.
-
-If you already have OptiShade installed, you're welcome to try it, and please
-report how it went on the
+If you use OptiShade, please report how it went on the
 [issues page](https://github.com/tomwhoca/AtmosphereMod/issues), whether it
 works or not:
 - Run `Install AtmosphereMod.cmd` as usual. It tells you when it has found
