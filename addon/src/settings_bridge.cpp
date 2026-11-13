@@ -69,6 +69,20 @@ void on_message(const std::string &json)
     static const std::regex measure_re("\"measure\"\\s*:\\s*(true|false)");
     if (std::regex_search(json, m, measure_re))
         in.measure = m[1] == "true";
+    static const std::regex learn_re(R"re("learnHotkey"\s*:\s*"([A-Za-z]*)")re");
+    if (std::regex_search(json, m, learn_re))
+        in.learn_hotkey = m[1].str();
+    static const std::regex hotkeys_re(R"re("setHotkey"\s*:\s*\{([^}]*)\})re");
+    static const std::regex hotkey_re(R"re("([A-Za-z]+)"\s*:\s*"([A-Za-z0-9+ ]*)")re");
+    if (std::regex_search(json, m, hotkeys_re))
+    {
+        const std::string body = m[1];
+        for (auto it = std::sregex_iterator(body.begin(), body.end(), hotkey_re); it != std::sregex_iterator(); ++it)
+            in.set_hotkeys.emplace_back((*it)[1].str(), (*it)[2].str());
+    }
+    static const std::regex fog_re(R"re("cloudFogOff"\s*:\s*(true|false))re");
+    if (std::regex_search(json, m, fog_re))
+        in.cloud_fog_off = m[1] == "true";
 
     const std::lock_guard lock(g_mutex);
     g_requests.set.insert(g_requests.set.end(), in.set.begin(), in.set.end());
@@ -88,6 +102,11 @@ void on_message(const std::string &json)
     g_requests.import_preset = g_requests.import_preset || in.import_preset;
     if (in.measure)
         g_requests.measure = in.measure;
+    if (in.learn_hotkey)
+        g_requests.learn_hotkey = in.learn_hotkey;
+    g_requests.set_hotkeys.insert(g_requests.set_hotkeys.end(), in.set_hotkeys.begin(), in.set_hotkeys.end());
+    if (in.cloud_fog_off)
+        g_requests.cloud_fog_off = in.cloud_fog_off;
     g_asked = g_asked || asked;
 }
 

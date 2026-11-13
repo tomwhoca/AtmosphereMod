@@ -42,6 +42,7 @@ import {
 
 import { AddonReport, PERF_REPORT_CSS, PerfReportModel, PerfReportView } from "./PerfReport";
 import { EVENT_SETTINGS, EVENT_STATE, PRESET_DEFAULT, SETTINGS_CSS, SettingsModel, SettingsView } from "./Settings";
+import { HOTKEYS_CSS } from "./Hotkeys";
 import { WHATS_NEW_CSS, WhatsNewModel, WhatsNewView } from "./WhatsNew";
 
 declare const BASE_URL: string;
@@ -192,7 +193,7 @@ setInterval(() => {
 
 const style = document.createElement("style");
 // (the link's status and the version, at the end of the page)
-style.textContent = SETTINGS_CSS + WHATS_NEW_CSS + PERF_REPORT_CSS + `
+style.textContent = SETTINGS_CSS + HOTKEYS_CSS + WHATS_NEW_CSS + PERF_REPORT_CSS + `
 .atmo-link { padding-top: 24px; opacity: 0.6; font-size: 21px; }
 `;
 document.head.appendChild(style);

@@ -278,7 +278,8 @@ with a few settings changed from the defaults.
 
 ## What it does
 
-Ctrl+Shift+F9 switches between the mod and stock at any time, for comparison.
+Ctrl+Shift+F9 switches between the mod and stock at any time, for comparison
+(another key if you choose one: [Using it](#using-it)).
 The settings named below are in `tunables.ini` ([Settings](#settings)).
 
 ### Haze
@@ -454,7 +455,9 @@ What it can do:
     visibility under the deck is the METAR's. Above it, in the deck, the fog
     applies.
   - `C33` is the visibility inside a dense cloud, in metres (10 by default;
-    thinner parts of a cloud allow more); 0 turns it off.
+    thinner parts of a cloud allow more); 0 turns it off. A hotkey can switch
+    it off for now, when it shows just below a cloud, and on again: choose
+    one in the app's Hotkeys tab ([Using it](#using-it)).
   - **Turn off other in-cloud effects:** add-ons that simulate flying
     through clouds, such as TriTriSim GFX's wing fade effect or CloudSurf
     (flightsim.to), will most likely conflict with the mod's denser clouds.
@@ -745,13 +748,34 @@ unzipped.
 
 ## Using it
 
-All hotkeys use **Ctrl+Shift**:
+The hotkeys, unless you change them in the app's **Hotkeys** tab:
 
 | Key | Action |
 |---|---|
-| F9 | switch between the mod and stock |
-| F10 | reload the settings (`tunables.ini`) and shaders, without restarting |
-| F11 | write a diagnostic capture (useful for bug reports) |
+| Ctrl+Shift+F9 | switch between the mod and stock |
+| Ctrl+Shift+F10 | reload the settings (`tunables.ini`) and shaders, without restarting |
+| Ctrl+Shift+F11 | write a diagnostic capture (useful for bug reports) |
+| Ctrl+Shift+F12 | log the GPU time of each draw (for performance questions) |
+| none | switch the fog inside clouds off for now, and on again |
+
+**Hotkeys tab.** Tap **Change** next to an action, then press the new keys in
+the sim within 15 seconds: F1 to F12 with any of Ctrl, Shift and Alt, or a
+letter or digit with Ctrl or Alt. **Clear** leaves the action without a key,
+and **Default** puts back the one above. The keys are kept in
+`%LOCALAPPDATA%\AtmosphereMod\hotkeys.ini`, which installing again keeps; they
+aren't part of presets.
+
+The in-cloud fog key is for when the fog shows just below a cloud: it switches
+[Fly-through clouds](#cloud-forming-very-experimental) off without changing
+your setting. The fog is on again with the same key, with **Switch it on** at
+the top of the app, or at the next start.
+
+If another ReShade add-on uses the same keys, pressing them does both. Glass
+Cockpit DLSS Fix (one of OptiShade's components) uses Ctrl+Shift+F9 and
+Ctrl+Shift+F11 by default, for its overlay and a green tint on the screens.
+While it's loaded, the Hotkeys tab tells you where its keys are the mod's.
+Give one of the two other keys: in this tab, or in that add-on's own tab in
+the ReShade overlay.
 
 ### Settings
 
@@ -761,7 +785,8 @@ Changes apply at once and are saved to `tunables.ini`. While the haze comes
 from the METAR, the manual haze sliders are greyed out and show what the METAR
 set, and a Haze strength slider scales it (100 % is as reported). Hover over a
 setting's name for an explanation of what it does. The app's
-"Reload tunables.ini" button does what Ctrl+Shift+F10 does. After an update,
+"Reload tunables.ini" button does what Ctrl+Shift+F10 does. The sixth tab,
+Hotkeys, is in [Using it](#using-it). After an update,
 the app opens with a short list of what's new; "Got it" closes it until the
 next one.
 
@@ -795,8 +820,8 @@ which systems it runs well on and which it doesn't:
    still: pause the sim or slew. Keep other windows off the sim meanwhile.
 2. Tap **Start**. For about 36 seconds the mod switches itself on, off and on
    again while the add-on times the frames: the frame rate, and how long the
-   GPU works on each frame. Ctrl+Shift+F9, or the app's own switch, stops it;
-   afterwards the mod is as it was.
+   GPU works on each frame. The mod's on/off key (Ctrl+Shift+F9), or the
+   app's own switch, stops it; afterwards the mod is as it was.
 3. The app shows the result: the frame rate and the GPU's time per frame, with
    and without the mod. Where the frame rate is capped (V-Sync, a 60 Hz
    screen, a frame limit, frame generation), it comes out the same both ways,

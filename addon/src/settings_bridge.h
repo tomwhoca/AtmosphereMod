@@ -8,11 +8,16 @@
 //                                          {"loadPreset":"name"} (+ "discard":true, "fill":"defaults"|"current"),
 //                                          {"deletePreset":"name"}, {"importPreset":true} (a file dialog:
 //                                          file_dialog.h), {"measure":true|false} (the performance
-//                                          report's measurement: perf_report.h)
+//                                          report's measurement: perf_report.h), {"learnHotkey":"cloudFog"}
+//                                          (the next keys pressed become its hotkey; "" stops),
+//                                          {"setHotkey":{"toggle":"Ctrl+Shift+F9","cloudFog":""}} (hotkeys.h),
+//                                          {"cloudFogOff":true|false} (the in-cloud fog, as its hotkey)
 //   AtmosphereMod.State     add-on -> app  {"enabled":true,"T":[...],"C":[...],"TE":[...],"weather":"...",
 //                                          "version":"0.5.1","presets":["Default",...],"preset":"name",
 //                                          "presetSaved":true,"presetsMissing":{"name":["C34",...]},
-//                                          "presetNote":"...","report":{...}}
+//                                          "presetNote":"...","report":{...},"hotkeys":{"toggle":"...",...},
+//                                          "learning":"cloudFog","hotkeyNote":"set:cloudFog",
+//                                          "cloudFogOff":false,"otherHotkeys":[{"addon","what","keys"},...]}
 //
 // T and C are tunables.ini's values, TE the atmosphere tunables the shaders
 // get (with the METAR's haze blended in by T13), enabled the Ctrl+Shift+F9
@@ -33,6 +38,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace settings
@@ -69,6 +75,9 @@ struct Requests
     Fill fill = Fill::none;  // load_preset: the settings it lacks
     bool import_preset = false;  // a file to choose and add as a preset
     std::optional<bool> measure;  // the performance report: start (true) or stop (false) a measurement
+    std::optional<std::string> learn_hotkey;  // an action's name (hotkeys.h): learn its keys; "": stop learning
+    std::vector<std::pair<std::string, std::string>> set_hotkeys;  // (action, keys as text; "" for none), in order
+    std::optional<bool> cloud_fog_off;  // the in-cloud fog off for now (true) or on again
 };
 
 // A message from the app (the weather feed's thread). Unreadable parts are

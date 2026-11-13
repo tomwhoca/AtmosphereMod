@@ -52,6 +52,14 @@ target_compile_options(settings_bridge_test PRIVATE /W4 /permissive- /utf-8)
 target_include_directories(settings_bridge_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../addon/src)
 set_target_properties(settings_bridge_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/../../build/lab)
 
+# The add-on's hotkeys (tools/test_hotkeys.py).
+add_executable(hotkeys_test hotkeys_test.cpp ../../addon/src/hotkeys.cpp)
+target_compile_features(hotkeys_test PRIVATE cxx_std_20)
+target_compile_definitions(hotkeys_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
+target_compile_options(hotkeys_test PRIVATE /W4 /permissive- /utf-8)
+target_include_directories(hotkeys_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../addon/src)
+set_target_properties(hotkeys_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/../../build/lab)
+
 # The METAR parser and anchoring, layers without a base (tools/test_metar_parse.py).
 add_executable(metar_parse_test metar_parse_test.cpp)
 target_compile_features(metar_parse_test PRIVATE cxx_std_20)

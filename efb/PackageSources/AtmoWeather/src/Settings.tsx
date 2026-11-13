@@ -20,6 +20,7 @@ import {
 } from "@microsoft/msfs-sdk";
 
 import { DEFAULTS } from "./defaults";
+import { DEFAULT_HOTKEYS, HotkeysPage, OtherHotkey } from "./Hotkeys";
 
 export const EVENT_SETTINGS = "AtmosphereMod.Settings";
 export const EVENT_STATE = "AtmosphereMod.State";
@@ -256,7 +257,8 @@ export const TABS: TabSpec[] = [
             "How far you see inside a cloud, around your aircraft: the wings fade into it as in a real cloud. "
             + "The sim's clouds are so thin inside that you see for hundreds of metres. Only near you, so clouds "
             + "seen from outside keep their look; ice clouds stay thin. Not below the reported cloud base (the "
-            + "nearest METAR's, or a weather preset's lowest layer): the sim's low decks can start well below it.",
+            + "nearest METAR's, or a weather preset's lowest layer): the sim's low decks can start well below it. "
+            + "A hotkey can switch it off for now (the Hotkeys tab).",
             0, 200, 10, 0, { format: (d) => (d <= 0 ? "the sim's" : `${Math.round(d)} m`) }),
       {
         ...percent("C34", "Structure inside clouds",
@@ -336,6 +338,13 @@ interface State {
   presetNote?: string;
   /** The performance report (PerfReport.tsx), once one was asked for (from 0.7.1 on). */
   report?: unknown;
+  /** The hotkeys by action, the one whose keys the add-on waits for, its note on the last change, the
+   * in-cloud fog switched off by its hotkey, and other add-ons' keys (Hotkeys.tsx; from 0.7.3 on). */
+  hotkeys?: Record<string, string>;
+  learning?: string;
+  hotkeyNote?: string;
+  cloudFogOff?: boolean;
+  otherHotkeys?: OtherHotkey[];
 }
 
 /** Each setting the app shows, by key: its name, and its place (the tabs' order). */
@@ -411,6 +420,17 @@ export class SettingsModel {
   public readonly presetNote = Subject.create("");
   /** Each state's performance report (undefined while none was asked for), for PerfReport.tsx. */
   public onReport?: (report: unknown) => void;
+  /** The hotkeys (Hotkeys.tsx): by action, as text ("" for none); the shipping ones until the add-on says. */
+  public readonly hotkeys = Subject.create<Readonly<Record<string, string>>>(DEFAULT_HOTKEYS);
+  public readonly hasHotkeys = Subject.create(false);
+  /** The action whose keys the add-on waits for ("" for none). */
+  public readonly learning = Subject.create("");
+  /** The add-on's note on the last hotkey change (Hotkeys.tsx hotkeyNoteText). */
+  public readonly hotkeyNote = Subject.create("");
+  /** The in-cloud fog switched off for now (its hotkey). */
+  public readonly cloudFogOff = Subject.create(false);
+  /** Other add-ons' hotkeys (Glass Cockpit DLSS Fix's, while it's loaded). */
+  public readonly otherHotkeys = Subject.create<readonly OtherHotkey[]>([]);
   private readonly raw = new Map<string, Subject<number>>();
   private readonly effective = new Map<string, Subject<number>>();
   private readonly editedAt = new Map<string, number>();
@@ -485,6 +505,17 @@ export class SettingsModel {
       this.presetMissing.set(missing);
     }
     this.presetNote.set(state.presetNote ?? "");
+    if (state.hotkeys !== undefined && JSON.stringify(state.hotkeys) !== JSON.stringify(this.hotkeys.get())) {
+      this.hotkeys.set(state.hotkeys);
+    }
+    this.hasHotkeys.set(state.hotkeys !== undefined);
+    this.learning.set(state.learning ?? "");
+    this.hotkeyNote.set(state.hotkeyNote ?? "");
+    this.cloudFogOff.set(state.cloudFogOff ?? false);
+    const others = state.otherHotkeys ?? [];
+    if (JSON.stringify(others) !== JSON.stringify(this.otherHotkeys.get())) {
+      this.otherHotkeys.set(others);
+    }
     this.onReport?.(state.report);
     this.connected.set(true);
   }
@@ -550,6 +581,23 @@ export class SettingsModel {
   /** As Ctrl+Shift+F10: the add-on saves pending changes, then reloads tunables.ini and its shaders. */
   public reload(): void {
     this.send({ reload: true });
+  }
+
+  /** The add-on takes the next keys pressed in the sim as the action's hotkey ("": it stops waiting). */
+  public learnHotkey(name: string): void {
+    this.learning.set(name);
+    this.send({ learnHotkey: name });
+  }
+
+  /** The action's hotkey as text ("Ctrl+Shift+F9"; "" for none). */
+  public setHotkey(name: string, keys: string): void {
+    this.send({ setHotkey: { [name]: keys } });
+  }
+
+  /** The in-cloud fog off for now, or on again (as its hotkey). */
+  public setCloudFogOff(off: boolean): void {
+    this.cloudFogOff.set(off);
+    this.send({ cloudFogOff: off });
   }
 
   public reset(keys: string[]): void {
@@ -963,11 +1011,13 @@ export class SettingsView extends DisplayComponent<SettingsViewProps> {
     const { model } = this.props;
     const live = model.connected;
     const notLive = live.map((c) => !c);
+    const toggleHint = model.hotkeys.map((h) => (h.toggle ? `(${h.toggle})` : ""));
+    const fogText = model.hotkeys.map((h) => `The fog inside clouds is off for now${h.cloudFog ? ` (${h.cloudFog})` : ""}`);
     return (
       <div class="atmo-settings">
         <div class="atmo-row atmo-master">
-          <Label text={<span>AtmosphereMod <span class="atmo-hint">(Ctrl+Shift+F9)</span></span>}
-                 tip="The whole mod on or off, also with Ctrl+Shift+F9. Off: the sim's own shaders, to compare." />
+          <Label text={<span>AtmosphereMod <span class="atmo-hint">{toggleHint}</span></span>}
+                 tip="The whole mod on or off, also with its hotkey (the Hotkeys tab). Off: the sim's own shaders, to compare." />
           <div class="atmo-control atmo-switch">
             <Switch checked={this.masterOn} disabled={notLive}
                     callback={(on) => { if (!this.quiet.active) model.setEnabled(on); }} />
@@ -979,6 +1029,10 @@ export class SettingsView extends DisplayComponent<SettingsViewProps> {
               : w !== "" ? `Weather: ${w}` : "Weather: waiting for the first METAR"),
             live, model.weather,
           )}
+        </div>
+        <div class={{ "atmo-row": true, "atmo-fog-off": true, "atmo-hidden": model.cloudFogOff.map((o) => !o) }}>
+          <div class="atmo-fog-text">{fogText}</div>
+          <TTButton key="Switch it on" type="secondary" disabled={notLive} callback={() => model.setCloudFogOff(false)} />
         </div>
         {this.props.metar !== undefined ? (
           <div class={{ "atmo-metar": true, "atmo-hidden": this.props.metar.map((m) => m === "") }}>
@@ -992,6 +1046,8 @@ export class SettingsView extends DisplayComponent<SettingsViewProps> {
           ))}
           <TabSelector tabName="Presets" active={this.tab.map((n) => n === TABS.length)} hidden={Subject.create(false)}
                        callback={() => this.tab.set(TABS.length)} />
+          <TabSelector tabName="Hotkeys" active={this.tab.map((n) => n === TABS.length + 1)} hidden={Subject.create(false)}
+                       callback={() => this.tab.set(TABS.length + 1)} />
         </div>
         {TABS.map((t, i) => (
           <div class={{ "atmo-page": true, "atmo-hidden": this.tab.map((n) => n !== i) }}>
@@ -1011,6 +1067,9 @@ export class SettingsView extends DisplayComponent<SettingsViewProps> {
         ))}
         <div class={{ "atmo-page": true, "atmo-hidden": this.tab.map((n) => n !== TABS.length) }}>
           <PresetsPage model={model} />
+        </div>
+        <div class={{ "atmo-page": true, "atmo-hidden": this.tab.map((n) => n !== TABS.length + 1) }}>
+          <HotkeysPage model={model} />
         </div>
         {this.props.children}
       </div>
@@ -1052,6 +1111,8 @@ export const SETTINGS_CSS = `
 .atmo-master { border-bottom: 1px solid rgba(255, 255, 255, 0.15); margin-bottom: 10px; font-size: 31px; }
 .atmo-hint { opacity: 0.6; font-size: 22px; }
 .atmo-weather { opacity: 0.8; font-size: 24px; margin-bottom: 20px; }
+.atmo-fog-off { flex-wrap: wrap; margin: -8px 0 16px; font-size: 24px; color: #f0b429; }
+.atmo-fog-text { flex: 1 1 auto; margin-right: 12px; }
 .atmo-metar { opacity: 0.8; font-size: 21px; font-family: monospace; white-space: pre-wrap; margin: -12px 0 20px; }
 .atmo-tabs { display: flex; flex-wrap: wrap; margin-bottom: 12px; }
 .atmo-hidden { display: none; }

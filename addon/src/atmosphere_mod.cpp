@@ -20,10 +20,12 @@
 //    graphics root signature gets the first two parameters (the radar replica
 //    captures from its pixel shader).
 //
-// Hotkeys, all with Ctrl+Shift:
-//  F9  toggle replacements (A/B against stock)
-//  F10 reload replacement shaders and tunables.ini from disk
-//  F11 capture the constants our replacements see
+// Hotkeys, by default (the EFB app's Hotkeys tab changes them: hotkeys.h):
+//  Ctrl+Shift+F9  toggle replacements (A/B against stock)
+//  Ctrl+Shift+F10 reload replacement shaders and tunables.ini from disk
+//  Ctrl+Shift+F11 capture the constants our replacements see
+//  Ctrl+Shift+F12 the draws' GPU times
+//  (none)         the in-cloud fog off for now, and on again
 //
 // Output goes to <DataPath>/logs. DataPath comes from [ATMOSPHEREMOD] DataPath
 // in ReShade.ini, defaulting to an AtmosphereMod folder next to this add-on.
@@ -36,6 +38,7 @@
 
 #include "cloud_stations.h"
 #include "file_dialog.h"
+#include "hotkeys.h"
 #include "ozone_climatology.h"
 #include "perf_report.h"
 #include "settings_bridge.h"
@@ -434,6 +437,14 @@ std::atomic<float> g_cloud_plane_light{0.0f};  // C36 (0..1, the app's Sun-facin
 std::atomic<int> g_cloud_tops{2};
 std::atomic<bool> g_fog_tint{false};  // C35 > 0: DebugCapture bit 13 on graphics draws
 std::atomic<bool> g_forward_fog_off{false};  // C35 < 0: no fog on the forward pass (bits 10-12 left 0)
+// The hotkeys (hotkeys.h): <DataPath>/hotkeys.ini, changed from the EFB app's Hotkeys tab. Present thread.
+hotkeys::Keys g_hotkeys = hotkeys::defaults();
+hotkeys::Learner g_hotkey_learner;
+hotkeys::GlassFix g_glass_fix;
+std::vector<hotkeys::Other> g_other_hotkeys;  // Glass Cockpit DLSS Fix's, while it's loaded
+// The in-cloud fog off for now (its hotkey, or the app): C33 reaches the shaders as 0 (off). Not saved: on at
+// every start.
+std::atomic<bool> g_cloud_fog_off{false};
 constexpr float kFallbackFreezingLevel = 3000.0f;  // m, R4 = 0 before the first METAR
 // Ozone for the fitted sky colours (T8): T14 (tunables.ini only; the shaders
 // get the scale) > 0 fixes the column in DU, 0 takes the climatology at the
@@ -711,6 +722,12 @@ fs::path tunables_path()
 fs::path presets_dir()
 {
     return g_data_dir / "presets";
+}
+
+// The hotkeys (hotkeys.h): <DataPath>/hotkeys.ini, which the installer leaves alone.
+fs::path hotkeys_path()
+{
+    return g_data_dir / "hotkeys.ini";
 }
 
 // The tunables the add-on reads: T0..T16 (T14..T16 its own), R0..R13, C0..C37 (C36, C37 its own).
@@ -3105,6 +3122,10 @@ void update_effective_tunables()
     // billows, tunables.ini only) wins.
     if (!(cloud[30] > 0.0f) && g_cloud_tops.load(std::memory_order_relaxed) == 2)
         cloud[30] = -1.0f;
+    // The in-cloud fog off for now (its hotkey): C33 <= 0 is the sim's visibility inside clouds (and C34's
+    // structure goes with it); tunables.ini keeps the setting.
+    if (g_cloud_fog_off.load(std::memory_order_relaxed))
+        cloud[33] = 0.0f;
 
     const std::unique_lock lock(g_mutex);
     g_effective_tunables = effective;
@@ -3134,6 +3155,82 @@ std::string json_text(const std::string &text)
     for (const char c : text)
         out += c == '"' || c == '\\' ? std::string("\\") + c : std::string(1, c);
     return out;
+}
+
+// ---------------------------------------------------------------- hotkeys (hotkeys.h)
+
+double seconds_now()
+{
+    return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+// "toggle Ctrl+Shift+F9, reload ..., cloudFog none", for the log.
+std::string hotkeys_summary()
+{
+    std::string keys;
+    for (int a = 0; a < hotkeys::kActions; ++a)
+        keys += std::string(a > 0 ? ", " : "") + hotkeys::kNames[a] + ' ' +
+                (g_hotkeys[a].none() ? "none" : hotkeys::text(g_hotkeys[a]));
+    return keys;
+}
+
+void save_hotkeys(const std::string &why)
+{
+    const fs::path path = hotkeys_path();
+    const std::string keys = hotkeys_summary();
+    if (hotkeys::save(path, g_hotkeys))
+        event(reshade::log::level::info, "hotkeys (" + why + "): " + keys + ", saved to " + path.string());
+    else
+        event(reshade::log::level::warning, "hotkeys (" + why + "): " + keys + "; couldn't save them to " +
+              path.string());
+}
+
+void set_cloud_fog_off(bool off, const std::string &by)
+{
+    if (g_cloud_fog_off.exchange(off) != off)
+        event(reshade::log::level::info, std::string("in-cloud fog ") + (off ? "off for now" : "on again") + " (" +
+              by + ")");
+}
+
+// Glass Cockpit DLSS Fix's hotkeys while it's loaded (hotkeys.h), from what its log gained since the last
+// look, every 10 s at most.
+void refresh_other_hotkeys()
+{
+    using namespace std::chrono_literals;
+    static std::chrono::steady_clock::time_point last;
+    static uintmax_t offset = 0;
+    const auto now = std::chrono::steady_clock::now();
+    if (last != std::chrono::steady_clock::time_point{} && now - last < 10s)
+        return;
+    last = now;
+    const HMODULE module = GetModuleHandleA(hotkeys::kGlassFixModule);
+    if (module == nullptr)
+    {
+        g_other_hotkeys.clear();
+        return;
+    }
+    wchar_t path[MAX_PATH] = L"";
+    if (GetModuleFileNameW(module, path, MAX_PATH) == 0)
+        return;
+    const fs::path log = fs::path(path).parent_path() / hotkeys::kGlassFixLog;
+    std::error_code ec;
+    const uintmax_t size = fs::file_size(log, ec);
+    if (!ec && size < offset)  // (a new log: the sim started again)
+    {
+        g_glass_fix = {};
+        offset = 0;
+    }
+    if (!ec && size > offset)
+    {
+        std::ifstream in(log, std::ios::binary);
+        in.seekg(static_cast<std::streamoff>(offset));
+        std::string text(static_cast<size_t>(size - offset), '\0');
+        in.read(text.data(), static_cast<std::streamsize>(text.size()));
+        text.resize(static_cast<size_t>(in.gcount()));
+        offset += text.size();
+        g_glass_fix.scan(text);
+    }
+    g_other_hotkeys = g_glass_fix.others();
 }
 
 // The state the EFB app's settings show (settings_bridge.h): tunables.ini's T
@@ -3201,7 +3298,12 @@ std::string settings_state(bool pending)
            (g_preset_current.saved && !pending ? "true" : "false") + ",\"presetsMissing\":" + missing +
            ",\"presetNote\":\"" + json_text(g_preset_note) + "\"" +
            (g_report_asked ? ",\"report\":" + perf::state_json(g_measurement, perf::Clock::now(), g_report_system)
-                           : std::string()) + "}";
+                           : std::string()) +
+           ",\"hotkeys\":" + hotkeys::json(g_hotkeys) + ",\"learning\":\"" +
+           (g_hotkey_learner.action() >= 0 ? hotkeys::kNames[g_hotkey_learner.action()] : "") +
+           "\",\"hotkeyNote\":\"" + json_text(g_hotkey_learner.note()) + "\",\"cloudFogOff\":" +
+           (g_cloud_fog_off.load(std::memory_order_relaxed) ? "true" : "false") +
+           ",\"otherHotkeys\":" + hotkeys::json(g_other_hotkeys) + "}";
 }
 
 // The app's preset requests (settings_bridge.h presets): saved, loaded or deleted, in the event log;
@@ -3279,13 +3381,61 @@ bool sync_import(bool asked, void *window)
 // handles its presets (an import's dialog owned by `window`, the game's), and
 // publishes the state it shows, twice a second. Returns whether to reload
 // (Ctrl+Shift+F10 pressed, the app's Reload button, or a preset loaded).
-bool sync_settings(bool reload_key, void *window)
+// The app's hotkey requests (settings_bridge.h): learning one, setting or clearing them (refused, with a
+// note, for keys another of the mod's actions has, or that can't be a hotkey), the in-cloud fog's switch.
+// Returns whether any came.
+bool apply_hotkey_requests(const settings::Requests &requests)
+{
+    if (requests.learn_hotkey)
+    {
+        if (const int a = hotkeys::action(*requests.learn_hotkey); a >= 0)
+            g_hotkey_learner.start(a, seconds_now());
+        else
+            g_hotkey_learner.cancel();
+    }
+    bool changed = false;
+    for (const auto &[name, text] : requests.set_hotkeys)
+    {
+        const int a = hotkeys::action(name);
+        const std::optional<hotkeys::Key> key = hotkeys::parse(text);
+        if (a < 0 || !key)
+            continue;
+        if (g_hotkey_learner.action() >= 0)
+            g_hotkey_learner.cancel();
+        if (!key->none() && !hotkeys::usable(*key))
+        {
+            g_hotkey_learner.set_note("unusable:" + hotkeys::text(*key));
+            continue;
+        }
+        int taken = -1;
+        for (int b = 0; b < hotkeys::kActions; ++b)
+            if (b != a && !key->none() && g_hotkeys[b] == *key)
+                taken = b;
+        if (taken >= 0)
+        {
+            g_hotkey_learner.set_note(std::string("taken:") + hotkeys::kNames[taken]);
+            continue;
+        }
+        changed = changed || !(g_hotkeys[a] == *key);
+        g_hotkeys[a] = *key;
+        g_hotkey_learner.set_note((key->none() ? "cleared:" : "set:") + name);
+    }
+    if (changed)
+        save_hotkeys("EFB app");
+    if (requests.cloud_fog_off)
+        set_cloud_fog_off(*requests.cloud_fog_off, "EFB app");
+    return requests.learn_hotkey || !requests.set_hotkeys.empty() || requests.cloud_fog_off;
+}
+
+// `now`: publish the state at once (a hotkey changed something it shows).
+bool sync_settings(bool reload_key, void *window, bool now_changed = false)
 {
     using namespace std::chrono_literals;
     static std::vector<settings::Change> unsaved;
     static auto last_change = std::chrono::steady_clock::now(), last_publish = last_change;
     const auto now = std::chrono::steady_clock::now();
     const settings::Requests requests = settings::take();
+    const bool hotkey_requests = apply_hotkey_requests(requests);
     if (requests.reload)
         event(reshade::log::level::info, "reload asked for by the EFB app");
     const bool flush = reload_key || requests.reload;
@@ -3334,10 +3484,11 @@ bool sync_settings(bool reload_key, void *window)
     }
     const bool loaded = preset && apply_preset_requests(requests);
     const bool imported = sync_import(requests.import_preset, window);
-    if (!requests.set.empty() || requests.enabled || requests.measure || preset || imported ||
-        now - last_publish >= 500ms)
+    if (!requests.set.empty() || requests.enabled || requests.measure || preset || imported || hotkey_requests ||
+        now_changed || now - last_publish >= 500ms)
     {
         last_publish = now;
+        refresh_other_hotkeys();
         settings::publish(settings_state(!unsaved.empty()));
     }
     return flush || loaded;
@@ -3550,6 +3701,39 @@ void measure_performance(effect_runtime *runtime)
     }
 }
 
+// The mod's hotkeys this frame: which actions' keys were pressed, exactly with their modifiers. While the app
+// learns a key, none fire, and the keys pressed go to the learner (hotkeys.h).
+std::array<bool, hotkeys::kActions> poll_hotkeys(effect_runtime *runtime)
+{
+    std::array<bool, hotkeys::kActions> fired = {};
+    const bool ctrl = runtime->is_key_down(VK_CONTROL), shift = runtime->is_key_down(VK_SHIFT),
+               alt = runtime->is_key_down(VK_MENU);
+    if (const int action = g_hotkey_learner.action(); action >= 0)
+    {
+        hotkeys::Press press;
+        press.ctrl = ctrl;
+        press.shift = shift;
+        press.alt = alt;
+        press.escape = runtime->is_key_pressed(VK_ESCAPE);
+        press.backspace = runtime->is_key_pressed(VK_BACK);
+        for (const uint8_t vk : hotkeys::learnable())
+            if (runtime->is_key_pressed(vk))
+            {
+                press.vk = vk;
+                break;
+            }
+        if (g_hotkey_learner.step(g_hotkeys, press, seconds_now()))
+            save_hotkeys(std::string("learned for ") + hotkeys::kNames[action]);
+        return fired;
+    }
+    for (int a = 0; a < hotkeys::kActions; ++a)
+    {
+        const hotkeys::Key &k = g_hotkeys[a];
+        fired[a] = !k.none() && k.ctrl == ctrl && k.shift == shift && k.alt == alt && runtime->is_key_pressed(k.vk);
+    }
+    return fired;
+}
+
 void on_present(effect_runtime *runtime)
 {
     const uint64_t frame = ++g_frame;
@@ -3564,24 +3748,32 @@ void on_present(effect_runtime *runtime)
         debug_tried = runtime->get_device();
         create_debug_resources(debug_tried);
     }
-    const bool modifiers = runtime->is_key_down(VK_CONTROL) && runtime->is_key_down(VK_SHIFT);
-    if (modifiers && runtime->is_key_pressed(VK_F9))
+    const int learning = g_hotkey_learner.action();
+    const std::string note = g_hotkey_learner.note();
+    const std::array<bool, hotkeys::kActions> keys = poll_hotkeys(runtime);
+    const auto key_name = [](int action) { return hotkeys::text(g_hotkeys[action]); };
+    if (keys[hotkeys::kToggle])
     {
         if (g_measurement.running())
         {
             g_measurement.stop();
-            event(reshade::log::level::info, "performance report: stopped (Ctrl+Shift+F9)");
+            event(reshade::log::level::info, "performance report: stopped (" + key_name(hotkeys::kToggle) + ")");
         }
         g_enabled = !g_enabled;
         event(reshade::log::level::info, g_enabled ? "replacements ON" : "replacements OFF (stock shaders)");
     }
-    // (the EFB app's unsaved changes go to tunables.ini before the reload reads it)
-    if (sync_settings(modifiers && runtime->is_key_pressed(VK_F10), runtime->get_hwnd()))
+    if (keys[hotkeys::kCloudFog])
+        set_cloud_fog_off(!g_cloud_fog_off.load(std::memory_order_relaxed), key_name(hotkeys::kCloudFog));
+    // (the EFB app's unsaved changes go to tunables.ini before the reload reads it; the state goes out at once
+    // when a hotkey changed what it shows)
+    const bool shown = keys[hotkeys::kToggle] || keys[hotkeys::kCloudFog] ||
+                       learning != g_hotkey_learner.action() || note != g_hotkey_learner.note();
+    if (sync_settings(keys[hotkeys::kReload], runtime->get_hwnd(), shown))
         reload(runtime->get_device());
     measure_performance(runtime);
-    if ((modifiers && runtime->is_key_pressed(VK_F11)) || g_auto_capture_due.exchange(false))
+    if (keys[hotkeys::kCapture] || g_auto_capture_due.exchange(false))
         request_capture(frame);
-    if (modifiers && runtime->is_key_pressed(VK_F12))
+    if (keys[hotkeys::kGpuTimes])
         request_gpu_times(frame);
     advance_capture(runtime, frame);
     if (frame % kDispatchRateFrames == 0)
@@ -3639,6 +3831,9 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE re
     g_effective_tunables = g_tunables;
     g_radar_tunables = load_tunables('R');
     g_cloud_tunables = load_tunables<kCloudTunableCount>('C');
+    g_hotkeys = hotkeys::load(hotkeys_path());
+    if (std::error_code ec; fs::exists(hotkeys_path(), ec))
+        event(reshade::log::level::info, "hotkeys: " + hotkeys_summary() + " (" + hotkeys_path().string() + ")");
     bool weather_feed = true;
     reshade::get_config_value(nullptr, "ATMOSPHEREMOD", "WeatherFeed", weather_feed);
     if (weather_feed)

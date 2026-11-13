@@ -281,6 +281,33 @@ void presets_checks()
     check(settings::take().measure == std::optional<bool>(false), "requests: stopping a measurement, the last one counts");
     settings::on_message(R"({"get":true})");
     check(!settings::take().measure, "requests: no measurement unless asked");
+    // hotkeys (hotkeys.h)
+    settings::on_message(R"({"learnHotkey":"cloudFog"})");
+    r = settings::take();
+    check(r.learn_hotkey == std::optional<std::string>("cloudFog") && !settings::take().learn_hotkey,
+          "requests: learning a hotkey, taken once");
+    settings::on_message(R"({"learnHotkey":"toggle"})");
+    settings::on_message(R"({"learnHotkey":""})");
+    check(settings::take().learn_hotkey == std::optional<std::string>(""), "requests: stop learning, the last one counts");
+    settings::on_message(R"({"setHotkey":{"toggle":"Ctrl+Alt+F9","cloudFog":""}})");
+    settings::on_message(R"({"setHotkey":{"reload":"Ctrl+Shift+F10"}})");
+    r = settings::take();
+    check(r.set_hotkeys.size() == 3 && r.set_hotkeys[0] == std::pair<std::string, std::string>("toggle", "Ctrl+Alt+F9") &&
+              r.set_hotkeys[1] == std::pair<std::string, std::string>("cloudFog", "") &&
+              r.set_hotkeys[2] == std::pair<std::string, std::string>("reload", "Ctrl+Shift+F10") &&
+              settings::take().set_hotkeys.empty(),
+          "requests: hotkeys set and cleared, in order, taken once");
+    settings::on_message(R"({"setHotkey":{"toggle":"Ctrl\"+F9"}})");
+    check(settings::take().set_hotkeys.empty(), "requests: a hotkey with a quote in it is ignored");
+    settings::on_message(R"({"cloudFogOff":true})");
+    r = settings::take();
+    check(r.cloud_fog_off == std::optional<bool>(true) && !settings::take().cloud_fog_off,
+          "requests: the in-cloud fog off, taken once");
+    settings::on_message(R"({"cloudFogOff":false})");
+    check(settings::take().cloud_fog_off == std::optional<bool>(false), "requests: the in-cloud fog on again");
+    settings::on_message(R"({"set":{"C33":40}})");
+    r = settings::take();
+    check(!r.learn_hotkey && r.set_hotkeys.empty() && !r.cloud_fog_off, "requests: no hotkey requests unless asked");
     std::filesystem::remove_all(dir);
 }
 } // namespace

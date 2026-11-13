@@ -772,7 +772,7 @@ def uninstall(args) -> None:
         linked = remove_package(community / EFB)
         say(f"removed {community / EFB}" + (f" (a link: the folder it pointed to, {linked}, wasn't touched;"
                                             " delete it there if you no longer need it)" if linked else ""))
-    if data.exists() and ask(f"Also delete {data} (patched shaders, logs, your tunables.ini and presets)?", args.yes):
+    if data.exists() and ask(f"Also delete {data} (patched shaders, logs, your tunables.ini, presets and hotkeys)?", args.yes):
         shutil.rmtree(data)
         say(f"removed {data}")
     say("Uninstalled.")

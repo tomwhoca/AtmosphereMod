@@ -62,11 +62,27 @@ esbuild.buildSync({
   },
   logLevel: "error",
 });
+const outHotkeys = path.join(os.tmpdir(), "atmo-hotkeys-test.js");
+esbuild.buildSync({
+  entryPoints: [path.join(__dirname, "..", "src", "Hotkeys.tsx")],
+  bundle: true,
+  platform: "node",
+  format: "cjs",
+  outfile: outHotkeys,
+  jsxFactory: "FSComponent.buildComponent",
+  jsxFragment: "FSComponent.Fragment",
+  alias: {
+    "@microsoft/msfs-sdk": path.join(__dirname, "stubs", "msfs-sdk.js"),
+    "@efb/efb-api": path.join(__dirname, "stubs", "efb-api.js"),
+  },
+  logLevel: "error",
+});
 global.window = { setTimeout, clearTimeout };
 const { TABS, SettingsModel, PRESET_DEFAULT, presetChar, presetName, sameName, missingText } = require(out);
 const { DEFAULTS } = require(outDefaults);
 const { WHATS_NEW, WHATS_NEW_KEY, WhatsNewModel, PREVIOUS } = require(outNews);
 const perf = require(outReport);
+const hk = require(outHotkeys);
 
 let failures = 0;
 function check(ok, what) {
@@ -525,7 +541,57 @@ check(model.value("T3").get() === 4 && model.effectiveValue("T3").get() === 7.5,
   check(noUrl.step.get() === "failed" && noUrl.note.get().includes("no address"), "model: without an address it says so");
   }
 
+  // hotkeys (Hotkeys.tsx): the actions, the add-on's notes, other add-ons' keys, the model's messages
+  {
+    const names = hk.HOTKEY_ACTIONS.map((a) => a.name);
+    check(JSON.stringify([...names].sort()) === JSON.stringify(["capture", "cloudFog", "gpuTimes", "reload", "toggle"]),
+          "hotkeys: the add-on's five actions (hotkeys.h kNames)");
+    check(hk.DEFAULT_HOTKEYS.toggle === "Ctrl+Shift+F9" && hk.DEFAULT_HOTKEYS.reload === "Ctrl+Shift+F10" &&
+          hk.DEFAULT_HOTKEYS.capture === "Ctrl+Shift+F11" && hk.DEFAULT_HOTKEYS.gpuTimes === "Ctrl+Shift+F12" &&
+          hk.DEFAULT_HOTKEYS.cloudFog === "", "hotkeys: the shipping keys, the in-cloud fog's none (hotkeys.cpp defaults)");
+    const keys = { ...hk.DEFAULT_HOTKEYS, cloudFog: "Ctrl+Shift+F8" };
+    check(hk.hotkeyNoteText("set:cloudFog", keys) === "In-cloud fog on/off: Ctrl+Shift+F8.", "note: set");
+    check(hk.hotkeyNoteText("cleared:capture", keys) === "Capture: no key now.", "note: cleared");
+    check(hk.hotkeyNoteText("taken:reload", keys).includes("already belong to Reload tunables.ini"), "note: taken");
+    check(hk.hotkeyNoteText("unusable:Shift+G", keys).startsWith("Shift+G can't be a hotkey"), "note: unusable");
+    check(hk.hotkeyNoteText("timeout", keys).includes("15 seconds"), "note: timeout");
+    check(hk.hotkeyNoteText("cancelled", keys) === "" && hk.hotkeyNoteText("", keys) === "", "note: nothing to say");
+    const glass = [{ addon: "Glass Cockpit DLSS Fix", what: "its overlay on/off", keys: "Ctrl+Shift+F9" },
+                   { addon: "Glass Cockpit DLSS Fix", what: "its green tint", keys: "Ctrl+Shift+F11" }];
+    const clashes = hk.hotkeyClashes(hk.DEFAULT_HOTKEYS, glass);
+    check(clashes.length === 2 && clashes[0].includes("Ctrl+Shift+F9 for its overlay on/off") &&
+          clashes[0].includes("Give Mod on/off") && clashes[1].includes("its green tint") && clashes[1].includes("Give Capture"),
+          "clashes: the glass fix's defaults against the mod's");
+    check(hk.hotkeyClashes({ ...hk.DEFAULT_HOTKEYS, toggle: "Ctrl+Alt+F9", capture: "" }, glass).length === 0,
+          "clashes: none once the mod's keys moved (or are none)");
+    check(hk.hotkeyClashes({ toggle: "ctrl + shift + f9" }, glass).length === 1, "clashes: case and spaces don't matter");
+    check(hk.hotkeyClashes({ cloudFog: "" }, [{ addon: "X", what: "y", keys: "" }]).length === 0, "clashes: none and none don't clash");
+
+    const hsent = [];
+    const m = new SettingsModel((data) => hsent.push(data));
+    check(m.hotkeys.get().toggle === "Ctrl+Shift+F9" && !m.hasHotkeys.get(), "model: the shipping keys until the add-on says");
+    m.onState(JSON.stringify({ T, C, TE, hotkeys: keys, learning: "", hotkeyNote: "set:cloudFog", cloudFogOff: true,
+                               otherHotkeys: glass }));
+    check(m.hasHotkeys.get() && m.hotkeys.get().cloudFog === "Ctrl+Shift+F8" && m.hotkeyNote.get() === "set:cloudFog" &&
+          m.cloudFogOff.get() && m.otherHotkeys.get().length === 2, "model: the add-on's hotkeys, note, fog and other keys");
+    m.learnHotkey("toggle");
+    check(m.learning.get() === "toggle" && JSON.stringify(hsent.pop()) === '{"learnHotkey":"toggle"}',
+          "model: learning a key (shown at once)");
+    m.learnHotkey("");
+    check(m.learning.get() === "" && JSON.stringify(hsent.pop()) === '{"learnHotkey":""}', "model: cancelled");
+    m.setHotkey("cloudFog", "");
+    check(JSON.stringify(hsent.pop()) === '{"setHotkey":{"cloudFog":""}}', "model: a key cleared");
+    m.setHotkey("toggle", "Ctrl+Shift+F9");
+    check(JSON.stringify(hsent.pop()) === '{"setHotkey":{"toggle":"Ctrl+Shift+F9"}}', "model: a key set (Default)");
+    m.setCloudFogOff(false);
+    check(!m.cloudFogOff.get() && JSON.stringify(hsent.pop()) === '{"cloudFogOff":false}', "model: the fog on again");
+    m.onState(JSON.stringify({ T, C, TE }));
+    check(!m.hasHotkeys.get() && m.hotkeys.get().cloudFog === "Ctrl+Shift+F8" && !m.cloudFogOff.get() &&
+          m.otherHotkeys.get().length === 0, "model: an older add-on: no hotkeys to change, the last keys kept");
+  }
+
   fs.rmSync(out, { force: true });
+  fs.rmSync(outHotkeys, { force: true });
   fs.rmSync(outDefaults, { force: true });
   fs.rmSync(outNews, { force: true });
   fs.rmSync(outReport, { force: true });
