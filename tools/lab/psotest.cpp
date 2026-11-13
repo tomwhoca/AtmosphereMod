@@ -9,8 +9,8 @@
 // table. Compute: the same constants and one t/b/s/u table each. Unless
 // --no-mod, plus what the add-on injects into both: 16 root constants at
 // b0 space50 and the debug buffer's root UAV at u0 space50; compute also gets
-// the cloud tunables, 32 root constants at b1 space50. Exit code 0 when the
-// pipeline is created.
+// the cloud tunables' root CBV at b1 space50 and MSFS's TLAS as a root SRV at
+// t0 space50. Exit code 0 when the pipeline is created.
 
 #include <d3d12.h>
 #include <wrl/client.h>
@@ -79,8 +79,8 @@ int test_compute(ID3D12Device *dev, const std::vector<char> &cs, const char *nam
         p.Descriptor = { 0, g_space, D3D12_ROOT_DESCRIPTOR_FLAG_NONE };
         params.push_back(p);
         p = {};
-        p.ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-        p.Constants = { 1, g_space, 32 };  // cloud tunables C0..C31
+        p.ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;  // cloud tunables C0..C35, a slot of the add-on's ring
+        p.Descriptor = { 1, g_space, D3D12_ROOT_DESCRIPTOR_FLAG_NONE };
         params.push_back(p);
         p = {};
         p.ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;  // MSFS's TLAS for the aircraft's shadow with RT shadows

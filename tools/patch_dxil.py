@@ -20,7 +20,7 @@ terrain, ch_sky's cubemap):
      (CloudParams C0-C34);
   3. add our ModParams cbuffer (b0 space50, the injected root constants) to the
      resource metadata and load the tunables at the entry point; for the
-     clouds also CloudParams (b1 space50, compute only);
+     clouds also CloudParams (b1 space50, the injected root CBV, compute only);
   4. assemble with dxil_assemble.py (dxcompiler.dll in this process; validated
      and signed by dxil.dll).
 Every match is asserted, so a sim update that changes the code fails loudly
@@ -71,8 +71,11 @@ AEROSOL_SPECTRAL_LOG2 = (-0.30610, 0.0, 0.32193)
 MOD_SPACE = 50  # the register space of the mod's bindings; the installer's --renodx: another, through patch_all
 MOD_PARAMS_SIZE = 64
 # C0..C35 at b1 space50, compute only (C32 also reaches the shaders as a ModParams bit; C35 too, to the
-# forward pass: FOG_TINT_BIT)
+# forward pass: FOG_TINT_BIT). A root CBV: a slot of the add-on's ring (kCloudSettingsSlotBytes), so it can grow
+# to a slot's 256 bytes (64 values) with the add-on's kCloudTunableCount, without touching the root signature.
 CLOUD_PARAMS_SIZE = 144
+CLOUD_SETTINGS_SLOT_BYTES = 256
+assert CLOUD_PARAMS_SIZE % 16 == 0 and CLOUD_PARAMS_SIZE <= CLOUD_SETTINGS_SLOT_BYTES
 
 LOG2E = "0x3FF7154760000000"
 NEG_LOG2E = "0xBFF7154760000000"
@@ -241,7 +244,7 @@ def prologue_lines() -> list[str]:
 
 
 def cloud_prologue_lines() -> list[str]:
-    """Load the cloud tunables (CloudParams, b1 space50, compute only) and derive
+    """Load the cloud tunables (CloudParams, b1 space50: the add-on's root CBV, compute only) and derive
     the forward lobe's constants (weight = C0 * C2 in 0..0.5, g = C1 in 0..0.99),
     the multiple-scattering ones (C3-C5, apply_cloud_ms) and the shape, glory
     and aircraft-shadow ones (C6-C15, apply_cloud_shape)."""

@@ -13,8 +13,9 @@
 //    its tunables, not its shader.
 //  - appends our own parameters to the game's global compute root signature:
 //    16 root constants at b0 space50 (ModParams: tunables + capture flag), a
-//    root UAV at u0 space50 (debug buffer) and 16 root constants at b1 space50
-//    (cloud tunables C0..C15). Replacement shaders write the game constants
+//    root UAV at u0 space50 (debug buffer), a root CBV at b1 space50 (cloud
+//    tunables C0..C35, from an upload ring) and a root SRV at t0 space50 (MSFS's
+//    TLAS): 28 of the 64 dwords. Replacement shaders write the game constants
 //    they see into the debug buffer, which is read back on capture. The global
 //    graphics root signature gets the first two parameters (the radar replica
 //    captures from its pixel shader).
@@ -108,15 +109,25 @@ struct ModParams
     float tunables[12] = {};  // T0..T11
 };
 static_assert(sizeof(ModParams) == 64);
-// Cloud tunables C0..C35 (tunables.ini). Compute only: 36 root constants at
-// b1 space50, C0..C35 by index, read by the patched
-// ch_volumetric_clouds_render (tools/patch_dxil.py, cloud_prologue_lines).
+// Cloud tunables C0..C35 (tunables.ini). Compute only: a root CBV at b1
+// space50 (CloudParams, C0..C35 by index, the spare values 0), read by the
+// patched cloud renderer, cloud generator, ch_deferred_shadows and the
+// transmittance LUT (tools/patch_dxil.py, cloud_prologue_lines). It points at
+// a slot of an upload buffer the present thread writes when they change
+// (write_cloud_settings), each change to the next slot: a command list keeps
+// the slot it was recorded with, and the GPU, a few frames behind at most, is
+// done with it long before the ring comes round again. (They were 36 root
+// constants until 0.7.2: the root signature's 64 dwords were then all but full.)
 // C32 (thunderstorms) reaches the shaders as ModParams' DebugCapture bit 8
 // (push_mod_args); C35 (developers: > 0 tints what the forward pass fogs, as
 // the graphics DebugCapture bit 13; < 0 turns that fog off) likewise.
 constexpr uint32_t kCloudTunableCount = 36;
-constexpr uint32_t kCloudRootConstants = 36;
-static_assert(kCloudTunableCount <= kCloudRootConstants);
+constexpr uint32_t kCloudSettingsSlotBytes = 256;  // D3D12's constant buffer alignment; room for 64 values
+constexpr uint32_t kCloudSettingsSlots = 256;
+// (patch_dxil.py's CLOUD_PARAMS_SIZE, what the shaders read, is at most a slot; one spare slot at the end keeps
+// even a longer read inside the buffer)
+constexpr uint64_t kCloudSettingsBytes = uint64_t(kCloudSettingsSlots + 1) * kCloudSettingsSlotBytes;
+static_assert(kCloudTunableCount * 4 <= kCloudSettingsSlotBytes);
 constexpr uint32_t kDebugMagic = 0x4F4D5441;  // 'ATMO'
 constexpr uint32_t kDebugBufferSize = 20 * 1024 * 1024;  // bits 6 and 7 below: the weather volume, cloud types
 // Regions: uint4(stamp, register count, 0, 0) then float4 registers.
@@ -457,6 +468,15 @@ resource_view g_debug_view = {};
 resource g_readback = {};
 resource g_anchor_upload = {};  // kAnchorUploadSlots station tables, upload heap
 device *g_debug_device = nullptr;  // the debug resources belong to it (the game's device)
+// The cloud tunables' ring (upload heap, mapped while it exists) and the GPU address of the slot written last:
+// 0 until the first write, and then compute replacements stay unbound (their shaders would read an unset CBV).
+resource g_cloud_settings = {};
+device *g_cloud_settings_device = nullptr;
+uint8_t *g_cloud_settings_mapped = nullptr;
+uint64_t g_cloud_settings_base = 0;
+std::atomic<uint64_t> g_cloud_settings_va{0};
+uint64_t g_cloud_settings_writes = 0;  // (present thread)
+std::array<float, kCloudTunableCount> g_cloud_settings_written = {};
 std::array<uint8_t, weather::kAnchorTableBytes> g_anchor_uploaded = {};
 uint64_t g_anchor_uploaded_at = 0;
 uint32_t g_anchor_uploads = 0;
@@ -1281,10 +1301,11 @@ std::vector<LayoutParam> to_layout_params(uint32_t count, const pipeline_layout_
     return copy;
 }
 
-std::string describe_params(const std::vector<LayoutParam> &params)
+// (from the first'th on)
+std::string describe_params(const std::vector<LayoutParam> &params, size_t first = 0)
 {
     std::string out;
-    for (size_t i = 0; i < params.size(); ++i)
+    for (size_t i = first; i < params.size(); ++i)
         out += " [" + std::to_string(i) + "] " + describe_param(params[i]) + ';';
     return out;
 }
@@ -1335,18 +1356,20 @@ bool on_create_pipeline_layout(device *, uint32_t &param_count, pipeline_layout_
     debug.type = descriptor_type::buffer_unordered_access_view;
     extended.emplace_back(debug);
 
-    // Compute also gets the cloud tunables: 6 + 16 + 2 + 36 = 60 dwords.
+    // Compute also gets the cloud tunables as a root CBV, b1 space50 (one
+    // buffer: like the debug UAV, a root descriptor): 6 + 16 + 2 + 2 = 26 dwords.
     if (compute)
     {
-        constant_range cloud = {};
+        descriptor_range cloud = {};
         cloud.dx_register_index = 1;
         cloud.dx_register_space = g_mod_space;
-        cloud.count = kCloudRootConstants;
+        cloud.count = 1;
         cloud.visibility = shader_stage::all;
+        cloud.type = descriptor_type::constant_buffer;
         extended.emplace_back(cloud);
 
         // ... and MSFS's ray-tracing scene (its TLAS) as a root SRV, t0 space50,
-        // for the aircraft's shadow with Raytraced Shadows: 62 of the 64 dwords
+        // for the aircraft's shadow with Raytraced Shadows: 28 of the 64 dwords
         descriptor_range tlas = {};
         tlas.dx_register_space = g_mod_space;
         tlas.count = 1;
@@ -1360,11 +1383,20 @@ bool on_create_pipeline_layout(device *, uint32_t &param_count, pipeline_layout_
     return true;
 }
 
-// Our root constants: ModParams at b0 space50, the cloud tunables at b1.
-bool is_mod_param(const pipeline_layout_param &param, uint32_t reg = 0)
+// Our root constants: ModParams at b0 space50.
+bool is_mod_param(const pipeline_layout_param &param)
 {
     return param.type == pipeline_layout_param_type::push_constants &&
-           param.push_constants.dx_register_space == g_mod_space && param.push_constants.dx_register_index == reg;
+           param.push_constants.dx_register_space == g_mod_space && param.push_constants.dx_register_index == 0;
+}
+
+// The cloud tunables' root CBV, b1 space50. (Only as a root descriptor: a table there would take a descriptor
+// heap's slot, not the buffer's address.)
+bool is_cloud_param(const pipeline_layout_param &param)
+{
+    return param.type == pipeline_layout_param_type::push_descriptors &&
+           param.push_descriptors.type == descriptor_type::constant_buffer && param.push_descriptors.count == 1 &&
+           param.push_descriptors.dx_register_space == g_mod_space && param.push_descriptors.dx_register_index == 1;
 }
 
 // ---------------------------------------------------------------- capture
@@ -2197,6 +2229,71 @@ void log_dispatch_rates(uint64_t frame)
 
 // ---------------------------------------------------------------- events
 
+// The cloud tunables' ring, mapped for as long as it exists. Without it the
+// mod's compute shaders stay stock (on_bind_pipeline).
+void create_cloud_settings(device *dev)
+{
+    if (g_cloud_settings.handle != 0)
+        return;
+    if (!dev->create_resource(resource_desc(kCloudSettingsBytes, memory_heap::upload, resource_usage::constant_buffer),
+                              nullptr, resource_usage::cpu_access, &g_cloud_settings))
+    {
+        event(reshade::log::level::error, "failed to create the cloud tunables' buffer; the mod's compute shaders stay off");
+        return;
+    }
+    void *mapped = nullptr;
+    if (!dev->map_buffer_region(g_cloud_settings, 0, kCloudSettingsBytes, map_access::write_only, &mapped) ||
+        mapped == nullptr)
+    {
+        dev->destroy_resource(std::exchange(g_cloud_settings, resource{}));
+        event(reshade::log::level::error, "failed to map the cloud tunables' buffer; the mod's compute shaders stay off");
+        return;
+    }
+    std::memset(mapped, 0, kCloudSettingsBytes);
+    g_cloud_settings_device = dev;
+    g_cloud_settings_mapped = static_cast<uint8_t *>(mapped);
+    g_cloud_settings_base = reinterpret_cast<ID3D12Resource *>(g_cloud_settings.handle)->GetGPUVirtualAddress();
+    g_cloud_settings_writes = 0;
+    check_device(dev, "creating the cloud tunables' buffer");
+    event(reshade::log::level::info, "cloud tunables' buffer created: " + std::to_string(kCloudSettingsSlots) +
+          " slots of " + std::to_string(kCloudSettingsSlotBytes) + " bytes");
+}
+
+void destroy_cloud_settings(device *dev)
+{
+    g_cloud_settings_va.store(0, std::memory_order_release);
+    g_cloud_settings_mapped = nullptr;
+    g_cloud_settings_device = nullptr;
+    if (g_cloud_settings.handle != 0)
+    {
+        dev->unmap_buffer_region(g_cloud_settings);
+        dev->destroy_resource(std::exchange(g_cloud_settings, resource{}));
+    }
+}
+
+// Once per frame, after update_effective_tunables: the cloud tunables into the
+// ring's next slot if they changed. Command lists recorded from then on get
+// that slot (before_dispatch); earlier ones keep theirs.
+void write_cloud_settings()
+{
+    if (g_cloud_settings_mapped == nullptr)
+        return;
+    std::array<float, kCloudTunableCount> cloud;
+    {
+        const std::shared_lock lock(g_mutex);
+        cloud = g_effective_cloud_tunables;
+    }
+    if (g_cloud_settings_writes != 0 && std::memcmp(cloud.data(), g_cloud_settings_written.data(), sizeof(cloud)) == 0)
+        return;
+    const uint64_t offset = (g_cloud_settings_writes % kCloudSettingsSlots) * kCloudSettingsSlotBytes;
+    std::array<uint8_t, kCloudSettingsSlotBytes> slot = {};  // (the spare values 0)
+    std::memcpy(slot.data(), cloud.data(), sizeof(cloud));
+    std::memcpy(g_cloud_settings_mapped + offset, slot.data(), slot.size());  // (write-combined memory: written once)
+    g_cloud_settings_written = cloud;
+    ++g_cloud_settings_writes;
+    g_cloud_settings_va.store(g_cloud_settings_base + offset, std::memory_order_release);
+}
+
 // Created on the first present rather than at device creation, so nothing of
 // ours touches the device while the game is still initialising it. Each step
 // is logged separately; a failure only disables captures.
@@ -2204,6 +2301,7 @@ void create_debug_resources(device *dev)
 {
     if (dev->get_api() != device_api::d3d12)
         return;
+    create_cloud_settings(dev);  // (on its own: a failure here turns off the compute replacements, not captures)
     const resource_desc buffer_desc(kDebugBufferSize, memory_heap::default_,
                                     resource_usage::unordered_access | resource_usage::copy_source |
                                         resource_usage::copy_dest);
@@ -2293,6 +2391,8 @@ void on_destroy_device(device *dev)
     for (const pipeline pipe : pipes)
         dev->destroy_pipeline(pipe);
 
+    if (dev == g_cloud_settings_device)
+        destroy_cloud_settings(dev);
     if (dev != g_debug_device)
     {
         if (!pipes.empty() || dev->get_api() == device_api::d3d12)
@@ -2435,20 +2535,27 @@ void on_init_pipeline_layout(device *dev, uint32_t count, const pipeline_layout_
     {
         if (mod_param == UINT32_MAX && is_mod_param(params[i]))
             mod_param = i;
-        if (cloud_param == UINT32_MAX && is_mod_param(params[i], 1))
+        if (cloud_param == UINT32_MAX && is_cloud_param(params[i]))
             cloud_param = i;
         if (tlas_param == UINT32_MAX && params[i].type == pipeline_layout_param_type::push_descriptors &&
             params[i].push_descriptors.type == descriptor_type::acceleration_structure &&
             params[i].push_descriptors.dx_register_space == g_mod_space)
             tlas_param = i;
     }
+    auto copy = to_layout_params(count, params);
+    // (injected: what ReShade made of our parameters, as the root signature has them)
     write_line(g_rootsig_log, "created " + hex64(layout.handle) + ", " + std::to_string(count) + " params" +
                (mod_param != UINT32_MAX ? " [injected, mod params at " + std::to_string(mod_param) +
-                (cloud_param != UINT32_MAX ? ", cloud params at " + std::to_string(cloud_param) : "") + "]" : ""));
+                (cloud_param != UINT32_MAX ? ", cloud params at " + std::to_string(cloud_param) : "") + "]" +
+                describe_params(copy, mod_param) : ""));
     if (mod_param != UINT32_MAX)
         check_device(dev, "creating the injected root signature");
+    // The compute signature (the one with the TLAS) always gets the cloud tunables; without them as a root CBV,
+    // compute replacements can't be given them, and stay stock (on_bind_pipeline).
+    if (tlas_param != UINT32_MAX && cloud_param == UINT32_MAX)
+        event(reshade::log::level::error, "the injected compute root signature " + hex64(layout.handle) +
+              " has no root CBV for the cloud tunables; its replacements stay stock");
 
-    auto copy = to_layout_params(count, params);
     const std::unique_lock lock(g_mutex);
     g_layouts[layout.handle] = std::move(copy);
     if (mod_param != UINT32_MAX)
@@ -2619,7 +2726,7 @@ void on_bind_pipeline(command_list *cmd_list, pipeline_stage stages, pipeline pi
     pipeline replacement = {};
     uint32_t shader_index = UINT32_MAX;
     bool graphics = true;  // every compute pipeline is tracked, so an unknown one is graphics
-    bool tracked = false, shaded = false;
+    bool tracked = false, shaded = false, cloud = false;
     {
         const std::shared_lock lock(g_mutex);
         if (const auto it = g_pipelines.find(pipe.handle); it != g_pipelines.end())
@@ -2628,6 +2735,7 @@ void on_bind_pipeline(command_list *cmd_list, pipeline_stage stages, pipeline pi
             graphics = it->second.graphics;
             replacement = it->second.replacement;
             shader_index = it->second.shader_index;
+            cloud = it->second.cloud_param != UINT32_MAX;
         }
         shaded = g_graphics.contains(pipe.handle);
     }
@@ -2643,7 +2751,10 @@ void on_bind_pipeline(command_list *cmd_list, pipeline_stage stages, pipeline pi
             state->compute = pipe;
         }
     }
-    if (replacement.handle != 0 && g_enabled.load(std::memory_order_relaxed))
+    // A compute replacement only with the cloud tunables' slot to give it (before_dispatch): until the first present
+    // has written one, or if its root signature has no root CBV for it, the game's own pipeline runs.
+    if (replacement.handle != 0 && g_enabled.load(std::memory_order_relaxed) &&
+        (graphics || (cloud && g_cloud_settings_va.load(std::memory_order_acquire) != 0)))
     {
         cmd_list->bind_pipeline(stages, replacement);
         if (g_counting_mod_shaders.load(std::memory_order_relaxed))
@@ -2666,7 +2777,6 @@ void before_dispatch(command_list *cmd_list, const std::string &size)
 
     TrackedPipeline info;
     std::array<float, kTunableCount> tunables;
-    std::array<float, kCloudRootConstants> cloud = {};  // (the spare ones 0)
     {
         const std::shared_lock lock(g_mutex);
         const auto it = g_pipelines.find(state->compute.handle);
@@ -2674,7 +2784,6 @@ void before_dispatch(command_list *cmd_list, const std::string &size)
             return;
         info = it->second;
         tunables = g_effective_tunables;
-        std::copy(g_effective_cloud_tunables.begin(), g_effective_cloud_tunables.end(), cloud.begin());
     }
     if (info.watched)
     {
@@ -2702,9 +2811,12 @@ void before_dispatch(command_list *cmd_list, const std::string &size)
             reinterpret_cast<ID3D12GraphicsCommandList *>(cmd_list->get_native())->ResourceBarrier(1, &barrier);
         }
         push_mod_args(cmd_list, info, tunables);
-        if (info.cloud_param != UINT32_MAX)
-            cmd_list->push_constants(shader_stage::all_compute, info.layout, info.cloud_param, 0, kCloudRootConstants,
-                                     cloud.data());
+        // The cloud tunables' slot, on the native command list: push_mod_args has made info.layout the bound
+        // compute signature. (Without the slot, on_bind_pipeline left the game's pipeline bound.)
+        const uint64_t cloud = g_cloud_settings_va.load(std::memory_order_acquire);
+        if (info.cloud_param != UINT32_MAX && cloud != 0 && cmd_list->get_device()->get_api() == device_api::d3d12)
+            reinterpret_cast<ID3D12GraphicsCommandList *>(cmd_list->get_native())
+                ->SetComputeRootConstantBufferView(info.cloud_param, cloud);
         if (g_auto_capture.exchange(false))
             g_auto_capture_due = true;  // first replaced dispatch: capture once automatically
     }
@@ -3476,6 +3588,7 @@ void on_present(effect_runtime *runtime)
         log_dispatch_rates(frame);
     collect_garbage(frame);
     update_effective_tunables();
+    write_cloud_settings();
     upload_anchor_table(runtime, frame);
 }
 
