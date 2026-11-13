@@ -76,7 +76,7 @@ def finding() -> None:
                   {"ReShade64.dll": None, "dxgi.dll": None}):
         r = found(files)
         check(f"loaded by another program, {sorted(files)} {list(files.values())}",
-              not isinstance(r, Exception) and r[0].startswith("ReShade64.dll") and "reported" in r[1], repr(r))
+              not isinstance(r, Exception) and r[0].startswith("ReShade64.dll") and "tested with OptiShade" in r[1], repr(r))
     r = found({"ReShade64.dll": None, "dxgi.dll": "ReShade"})
     check("ReShade's dxgi.dll and a ReShade64.dll: warning",
           not isinstance(r, Exception) and r[0] == "dxgi.dll" and "twice" in r[1], repr(r))

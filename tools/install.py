@@ -265,9 +265,8 @@ def find_reshade(sim: Path) -> tuple[str, str | None]:
     """How ReShade is loaded in the sim's folder, and a note to show, if any.
     ReShade's own installer puts it in dxgi.dll. Another program can load it
     as ReShade64.dll instead: OptiShade does, from its own dxgi.dll or
-    winmm.dll. One user has reported that way working, with OptiShade 0.21.4
-    (pull request #5); it isn't tested here (no OptiShade release was
-    available to test with)."""
+    winmm.dll (through OptiScaler). Tested here with OptiShade 0.21.6 and 1.0
+    (November 2026); users reported it working from 0.21.2 on."""
     library = sim / RESHADE_LIBRARY
     reshade_dxgi = (sim / "dxgi.dll").exists() and (not library.exists()
                                                      or product_name(sim / "dxgi.dll") == "ReShade")
@@ -280,8 +279,8 @@ def find_reshade(sim: Path) -> tuple[str, str | None]:
         return "dxgi.dll", (f"Warning: there's also a {RESHADE_LIBRARY}, which another program such as OptiShade "
                             f"loads, so ReShade may load twice. Keep only one: OptiShade's or ReShade's own.")
     return (f"{RESHADE_LIBRARY}, loaded by another program such as OptiShade",
-            f"ReShade loaded by another program, such as OptiShade: one user has reported it working with "
-            f"OptiShade 0.21.4, but it isn't tested here. Please report whether it works for you: {ISSUES}")
+            f"ReShade loaded by another program, such as OptiShade (tested with OptiShade 0.21.6 and 1.0). "
+            f"If the mod doesn't work with it for you, please report it: {ISSUES}")
 
 
 def reshade_version(sim: Path) -> str | None:

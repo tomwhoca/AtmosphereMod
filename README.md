@@ -317,7 +317,9 @@ What it can do:
   - A station's new report fades in over five minutes.
   - Stations whose METAR gives no visibility don't count for the haze, and a
     report hours older than the others (a station that stopped reporting) is
-    ignored.
+    ignored. A METAR gives only the day of the month, so each report is
+    dated by the sim's clock: a station's report from last month isn't taken
+    for a new one.
   - "10 km or more" (9999, CAVOK) next to a station reporting less is taken
     as just over 10 km. Far from such stations it's estimated from the air
     mass and humidity.
@@ -520,7 +522,9 @@ What it can do:
   - **Several stations at once:** up to 8 stations are blended by distance,
     and stations ahead of you are looked up before you get there.
   - **Gradual changes:** a new station fades in over 3 minutes, and a new
-    report crossfades over 5 minutes.
+    report crossfades over 5 minutes. After a jump (a new flight, a
+    teleport, or a change of the sim's time) the new weather applies at once
+    instead.
 - **Thunderstorms** (`C32`, live weather, experimental, off by default). MSFS's
   live weather has no thunderstorm clouds: its heaviest rain falls from the
   same flat-topped deck as the drier cloud around it. With this on, the mod
@@ -589,6 +593,17 @@ add-on outside the sim can't read them directly.
   haze has stations all around.
 - For each new station, the add-on asks SimConnect for the station's position
   and elevation.
+- After a jump (a new flight, a teleport) or a change of the sim's time (live
+  weather to historical and back), all of them at once, 1 s apart, and the new
+  weather applies at once: the stations, their clouds and the haze, without the
+  usual fades.
+
+**Historical weather.** The sim gives the METARs of its own time, so the haze
+and the clouds follow historical weather too. Each report is dated by the
+sim's clock (a METAR gives only the day of the month). When the sim's time is
+changed in flight, by more than an hour either way, the mod starts over with
+the METARs of the new time, and reports of the old time that still come in are
+ignored.
 
 These are the sim's own METARs, describing the same weather MSFS renders. No
 outside weather service or Active Sky is involved. Everything the add-on does
@@ -886,6 +901,15 @@ Most problems come from ReShade not loading the add-on. The logs that tell:
 - `ReShade.log`, in the folder with `FlightSimulator2024.exe`;
 - `weather.log` and `install.log`, in `%LOCALAPPDATA%\AtmosphereMod\logs`.
   `weather.log` keeps adding to its end, so the last session is at the bottom.
+
+### The installer can't delete a folder
+
+Updating removes the old EFB app from your Community folder first, and
+uninstalling removes it too. If Windows refuses ("Access is denied"), the
+installer clears read-only marks and tries again. If it still can't, it names
+the folder: close the sim and any window showing that folder (an Explorer
+window, an add-on manager), or delete the folder yourself, then run the
+installer again.
 
 ### "There were errors loading some add-ons"
 

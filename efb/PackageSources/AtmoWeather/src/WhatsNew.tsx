@@ -8,23 +8,38 @@ import { ComponentProps, DataStore, DisplayComponent, FSComponent, Subject, VNod
 /** The release the popup is for, and what it says: change it with every release that has news for the
  * tablet (a release without news leaves it, so nothing shows again). */
 export const WHATS_NEW = {
-  release: "0.7.2",
-  title: "New in AtmosphereMod 0.7.2",
+  release: "0.7.3",
+  title: "New in AtmosphereMod 0.7.3",
   items: [
-    ["Low cloud bases",
-      "Under a low overcast with mist, the in-cloud fog could fill the air right down to the runway and turn a "
-      + "few kilometres of visibility into a few metres. It now starts at the reported cloud base: the nearest "
-      + "METAR's with live weather, the lowest layer's with a weather preset or Active Sky."],
-    ["Performance report",
-      "It now counts the mod's shaders that ran, and says so if none did (then the mod isn't working on your PC). "
-      + "It asks for your GitHub or flightsim.to username, so I can find your report if I asked you for one, "
-      + "points out a changing view in the GPU's time too, and sending again doesn't file the report twice."],
+    ["Hotkeys",
+      "The new Hotkeys tab changes the mod's keys: tap Change, then press the new keys in the sim. Glass Cockpit "
+      + "DLSS Fix, one of OptiShade's components, uses Ctrl+Shift+F9 and F11 by default: while it's loaded, the "
+      + "tab tells you if its keys are the same as the mod's."],
+    ["In-cloud fog on/off",
+      "A key of your choice switches the fog inside clouds off for now, and on again: for when it shows just "
+      + "below a cloud. It has no key until you give it one in the Hotkeys tab."],
+    ["Historical weather",
+      "The haze and the clouds now follow historical weather, and switching between live and historical "
+      + "weather in flight brings the other weather at once. The haze could also stay with a faraway station "
+      + "for the rest of a flight: fixed."],
+    ["Installer",
+      "Updating and uninstalling no longer stop at a read-only folder in Community (\"Access is denied\"), "
+      + "and the installer also runs under Wine on Linux."],
   ] as [string, string][],
 };
 
 /** Earlier releases' changes, newest first, folded away under "Changes in previous versions", for those who
  * skipped a release or two. When WHATS_NEW gets a new release, its items so far go on top here. */
 export const PREVIOUS: { release: string; items: [string, string][] }[] = [
+  {
+    release: "0.7.2",
+    items: [
+      ["Low cloud bases", "The in-cloud fog starts at the reported cloud base, so a low overcast no longer fogs "
+        + "the air down to the runway."],
+      ["Performance report", "Counts the mod's shaders that ran, asks for your username, and doesn't file the "
+        + "same report twice."],
+    ],
+  },
   {
     release: "0.7.1",
     items: [
