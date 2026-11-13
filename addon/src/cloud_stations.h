@@ -98,7 +98,8 @@ constexpr double kCrossfadeS = 300.0;    // a station's new METAR
 constexpr double kPositionWaitS = 10.0;  // for a station's facility data (position, elevation)
 constexpr double kDropKm = 200.0;        // stations farther from the aircraft fade out ...
 constexpr double kReturnKm = 160.0;      // ... and back in when it comes back within this
-constexpr double kInstantS = 30.0;       // after a start or a jump, stations appear at once for this long
+constexpr double kInstantS = 30.0;       // after a start or a jump (place or time), stations and their METARs apply
+                                         // at once for this long, from the first one in use
 
 // Great-circle distance, degrees in.
 inline double distance_km(double lat1, double lon1, double lat2, double lon2)
@@ -218,10 +219,11 @@ public:
 
     // Makes stations count once their position is known, fades out those left
     // far behind (and back in on return) and those whose report is stale
-    // (haze::kStaleReportMin older than newest_report, the newest report_min the
+    // (haze::kStaleReportMin older than newest_report, the newest report_time the
     // sim has given; -1 none), frees the faded ones. local_hour (the
     // aircraft's): stations' haze follows the time of day between METARs.
-    void tick(double aircraft_lat, double aircraft_lon, double now, double local_hour = NAN, int newest_report = -1)
+    void tick(double aircraft_lat, double aircraft_lon, double now, double local_hour = NAN,
+              int64_t newest_report = -1)
     {
         for (size_t i = 0; i < kStations; ++i)
         {
@@ -245,9 +247,8 @@ public:
                 }
                 continue;
             }
-            const int age = newest_report >= 0 && s.metar.report_min >= 0
-                                ? haze::report_minutes_older(s.metar.report_min, newest_report)
-                                : 0;
+            const int64_t age = newest_report >= 0 && s.metar.report_time >= 0 ? newest_report - s.metar.report_time
+                                                                                : 0;
             if (age > haze::kStaleReportMin && !s.leaving)
             {
                 s.leaving = true;
@@ -506,7 +507,7 @@ private:
         in.local_hour = s.local_hour;
         const Haze h = haze_values(haze::derive(in));
         s.haze_hour = s.local_hour;
-        const bool crossfade = weight(s, now) > 0.0;
+        const bool crossfade = crossfades(s, now);
         const double open = s.metar.vis_open ? 1.0 : 0.0, counts = std::isfinite(s.metar.vis_m) ? 1.0 : 0.0;
         if (open != s.open_to || counts != s.counts_to)
         {
@@ -615,8 +616,16 @@ private:
                            : "in use, fading in over " + std::to_string(std::lround(kFadeInS)) + " s");
     }
 
+    // A change to a station in use crossfades; one that doesn't count yet, or
+    // one within kInstantS after a start or a jump (the weather of another
+    // place or time: wanted at once, not over minutes), takes effect at once.
+    bool crossfades(const Station &s, double now) const
+    {
+        return weight(s, now) > 0.0 && now > instant_until_;
+    }
+
     // The station's rows from its latest METAR and position; a change while it
-    // counts crossfades, otherwise it takes effect at once.
+    // counts crossfades (crossfades()), otherwise it takes effect at once.
     void rebuild(Station &s, double now, const char *why)
     {
         const double elevation = std::isfinite(s.elevation_m) ? s.elevation_m : s.ground_m;
@@ -625,7 +634,7 @@ private:
         bool crossfade = false;
         if (rows != s.to)
         {
-            crossfade = weight(s, now) > 0.0;
+            crossfade = crossfades(s, now);
             s.from = crossfade ? current(s, now) : rows;
             s.change = crossfade ? now : -1e9;
             s.to = rows;

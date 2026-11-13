@@ -83,11 +83,18 @@ const char *const kRequestEvent = "AtmosphereMod.Request";
 // nearest station (every minute), the stations nearest points ahead, to the
 // sides and behind it, one every 15 s in turn, so stations are blended in
 // before the aircraft gets to them, and the haze has stations all around
-// (behind, too, at the start of a flight). Bearings relative to the heading.
+// (behind, too, at the start of a flight). After a jump in place or time
+// (a new flight, a teleport, live weather to historical and back) all of them
+// 1 s apart, so they're all in while their METARs still apply at once
+// (anchor::kInstantS). Bearings relative to the heading.
 constexpr struct { double bearing_deg, km; } kSurveyPoints[] = { { 0.0, 50.0 },    { 0.0, 110.0 }, { -60.0, 60.0 },
                                                                   { 60.0, 60.0 },  { -125.0, 80.0 },
                                                                   { 125.0, 80.0 }, { 180.0, 70.0 } };
 constexpr ULONGLONG kSurveyIntervalMs = 15000;
+constexpr ULONGLONG kSurveyBurstMs = 1000;
+// After a jump in place or time, the haze follows the METARs at once, not smoothed (kSmoothingSeconds), for this
+// long: the other place's or time's weather comes at once, as the stations' does.
+constexpr ULONGLONG kHazeInstantMs = 60000;
 
 // Order of kAircraftVars.
 struct AircraftVars
@@ -160,7 +167,11 @@ double g_logged_ozone_du = NAN;
 anchor::HazeBlend g_haze_blend;  // tunables.ini's haze and T13 (apply), for the table's haze rows
 bool g_have_blend = false;
 size_t g_haze_stations = 0;      // stations the aircraft's haze came from (0: the nearest METAR's)
-int g_newest_report = -1;        // the newest METAR's report_min (haze_mapping.h), for stale reports
+int64_t g_newest_report = -1;    // the newest METAR's report_time (haze_mapping.h), for stale reports
+int64_t g_clock_min = -1;        // the sim's UTC, minutes since 1970 (haze::clock_minutes), each frame
+ULONGLONG g_clock_moved = 0;     // when the sim's clock last moved at once (GetTickCount64)
+std::atomic<ULONGLONG> g_haze_instant_until{0};  // (GetTickCount64) kHazeInstantMs after a jump in place or time
+std::atomic<bool> g_clock_jumped{false};  // ask for METARs again, once the sim has the other time's weather
 std::string g_stale_logged;      // the last stale report logged
 
 std::atomic<bool> g_haze_field{true};  // T15
@@ -222,6 +233,25 @@ void update_shadow(const ShadowVars &v)
 {
     double azimuth = 0.0, elevation = 0.0;
     sun_position(v.year, v.day_of_year, v.zulu_s, v.lat, v.lon, azimuth, elevation);
+    // The sim's clock dates the METARs. Set to another time, back or forward (live weather to yesterday's
+    // historical, historical back to live, another hour of it), the weather is another: the newest report starts
+    // over, and the anchor stations too, and the METARs are asked for again, as after a jump to another place.
+    // Reports of the time before that still come in are stale: over an hour ahead of the clock (last month's,
+    // haze::report_time), or, for haze::kClockMovedHoldS, hours older than it.
+    const int64_t clock = haze::clock_minutes(v.year, v.day_of_year, v.zulu_s);
+    if (clock >= 0 && g_clock_min >= 0 && std::abs(clock - g_clock_min) > 60)
+    {
+        // (the sim can wind its clock over a dozen frames, each an hour or two: logged once)
+        if (g_clock_moved == 0 || GetTickCount64() - g_clock_moved > 5000)
+            log("the sim's clock moved %lld min at once: the newest METAR report and the cloud anchor stations start "
+                "over", static_cast<long long>(clock - g_clock_min));
+        g_newest_report = -1;
+        g_stations.restart();
+        g_clock_jumped = true;
+        g_clock_moved = GetTickCount64();
+        g_haze_instant_until = g_clock_moved + kHazeInstantMs;
+    }
+    g_clock_min = clock;
     const bool cockpit = v.view_type >= 1.0 && v.view_type <= 3.0;
     double relative = std::remainder(v.heading_rad - azimuth, 2.0 * kPi);
     g_shadow.valid = v.span_ft > 0.0;
@@ -522,6 +552,7 @@ bool dispatch(HANDLE sim, std::string &partial, std::string &last_metar, ULONGLO
                     g_stations.restart();
                     g_newest_report = -1;
                     g_jumped = true;
+                    g_haze_instant_until = GetTickCount64() + kHazeInstantMs;
                 }
                 const double before = g_inputs.ground_km;
                 g_inputs.ground_km = g_have_ground && !jumped && !near_ground
@@ -635,17 +666,28 @@ bool dispatch(HANDLE sim, std::string &partial, std::string &last_metar, ULONGLO
                     metar.request_lat, metar.request_lon);
                 break;
             }
-            // A report much older than the newest one: a station that stopped reporting.
-            if (metar.report_min >= 0)
+            // A report much older than the newest one: a station that stopped reporting; or much older than the
+            // sim's clock. Dated by the sim's clock (haze::report_time); before it's known, none is stale.
+            metar.report_time = haze::report_time(metar.report_min, g_clock_min);
+            if (metar.report_time >= 0 && g_clock_moved != 0 &&
+                GetTickCount64() - g_clock_moved < ULONGLONG(haze::kClockMovedHoldS * 1000.0) &&
+                g_clock_min - metar.report_time > haze::kStaleReportMin)
             {
-                if (g_newest_report < 0 || haze::report_minutes_older(g_newest_report, metar.report_min) > 0)
-                    g_newest_report = metar.report_min;
-                const int age = haze::report_minutes_older(metar.report_min, g_newest_report);
-                if (age > haze::kStaleReportMin)
+                log("METAR %s is %d h older than the sim's clock, which just moved: the time before's, ignored | %s",
+                    metar.icao.c_str(), static_cast<int>((g_clock_min - metar.report_time) / 60), metar.raw.c_str());
+                break;
+            }
+            if (metar.report_time >= 0)
+            {
+                const bool ancient = g_clock_min - metar.report_time > haze::kReportMaxAgeMin;
+                if (!ancient)
+                    g_newest_report = std::max(g_newest_report, metar.report_time);
+                const int64_t age = ancient ? g_clock_min - metar.report_time : g_newest_report - metar.report_time;
+                if (ancient || age > haze::kStaleReportMin)
                 {
                     if (metar.raw != g_stale_logged)
-                        log("METAR %s is %d h older than the newest report: stale, ignored | %s", metar.icao.c_str(),
-                            age / 60, metar.raw.c_str());
+                        log("METAR %s is %d h older than the %s: stale, ignored | %s", metar.icao.c_str(),
+                            static_cast<int>(age / 60), ancient ? "sim's clock" : "newest report", metar.raw.c_str());
                     g_stale_logged = metar.raw;
                     break;
                 }
@@ -760,12 +802,30 @@ void run_loop()
 
         std::string partial, last_metar;
         ULONGLONG last_logged = 0, next_request = GetTickCount64() + 5000, next_survey = next_request + 5000;
+        ULONGLONG second_request = 0;  // (after the sim's clock moved)
+        size_t burst = 0;              // survey points still to ask for 1 s apart (after a jump)
         bool connected = true;
         while (!g_stop && connected)
         {
             connected = dispatch(sim, partial, last_metar, last_logged);
             if (g_jumped.exchange(false))
+            {
                 next_request = next_survey = GetTickCount64();
+                burst = std::size(kSurveyPoints);
+            }
+            // After the sim's clock moved: in 3 s, when the sim has the other time's weather (asked at once, LOWI
+            // still answered with the time before's), and again at 10 s.
+            if (g_clock_jumped.exchange(false))
+            {
+                next_request = next_survey = GetTickCount64() + 3000;
+                second_request = GetTickCount64() + 10000;
+                burst = std::size(kSurveyPoints);
+            }
+            if (second_request != 0 && GetTickCount64() >= second_request)
+            {
+                request_metar(sim);
+                second_request = 0;
+            }
             if (GetTickCount64() >= next_request)
             {
                 request_metar(sim);
@@ -774,7 +834,8 @@ void run_loop()
             if (GetTickCount64() >= next_survey)
             {
                 survey(sim);
-                next_survey = GetTickCount64() + kSurveyIntervalMs;
+                burst -= burst > 0 ? 1 : 0;
+                next_survey = GetTickCount64() + (burst > 0 ? kSurveyBurstMs : kSurveyIntervalMs);
             }
             if (const auto state = settings::to_send())
                 SimConnect_CallCommBusEvent(sim, settings::kStateEvent, SIMCONNECT_COMM_BUS_BROADCAST_TO_JS,
@@ -925,7 +986,11 @@ std::array<float, kTunableCount> apply(const std::array<float, kTunableCount> &i
             return ini;
         target = g_target;
     }
-    const float k = g_smoothed_valid ? 1.0f - std::exp(-std::max(dt_seconds, 0.0f) / kSmoothingSeconds) : 1.0f;
+    // (at once for a while after a jump in place or time: kHazeInstantMs)
+    const bool instant = GetTickCount64() < g_haze_instant_until.load(std::memory_order_relaxed);
+    const float k = g_smoothed_valid && !instant
+                        ? 1.0f - std::exp(-std::max(dt_seconds, 0.0f) / kSmoothingSeconds)
+                        : 1.0f;
     for (size_t i = 0; i < target.size(); ++i)
         g_smoothed[i] += (target[i] - g_smoothed[i]) * k;
     g_smoothed_valid = true;

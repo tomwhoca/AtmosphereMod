@@ -121,6 +121,19 @@ int scenario()
     check(t.weight(0) == 1.0f, "the first station counts at once");
     const anchor::Rows ekch1_rows = anchor::from_metar(ekch1, 55.618, 12.656, 3.0, 12.0).rows();
     check(t.row(0, 3) == ekch1_rows[3] && t.row(0, 3)[0] > 0.5f, "EKCH's rows (BKN005 in slice 3)");
+    // Within the start's 30 s, a station's new METAR applies at once, no crossfade: the weather of a jump in
+    // place or time (live weather to historical, 2026-11-13) comes at once, not over 5 minutes.
+    const haze::Metar ekch_other = metar("EKCH", { { 2500.0, 3, -1 } });
+    const anchor::Rows other_rows = anchor::from_metar(ekch_other, 55.618, 12.656, 3.0, 12.0).rows();
+    set.on_metar(ekch_other, 55.62, 12.64, true, 3.0, 12.0, lat, lon, 10.0);
+    at(10.0);
+    bool at_once = true;
+    for (size_t k = 0; k < other_rows.size(); ++k)
+        at_once = at_once && t.row(0, k) == other_rows[k];
+    check(at_once && other_rows != ekch1_rows, "within the start's 30 s, a new METAR applies at once");
+    set.on_metar(ekch1, 55.62, 12.64, true, 3.0, 12.0, lat, lon, 12.0);
+    at(12.0);
+    check(t.row(0, 3) == ekch1_rows[3], "... and back at once");
 
     // a surveyed station: after the start's 30 s, fades in once its position arrives
     printf("surveyed station\n");
@@ -422,13 +435,13 @@ int haze_scenario()
     printf("stale report\n");
     haze::Metar fresh = hazier;
     check(fresh.report_min < 0, "the test's METARs have no report time");
+    // (LIRT's 8-day-old SPECI near LIMS, 2026-10-29: the sim's clock on the 29th)
+    const int64_t clock = haze::clock_minutes(2026, 302, 14 * 3600 + 25 * 60);
     blind.report_min = 21 * 1440 + 13 * 60 + 56;
+    blind.report_time = haze::report_time(blind.report_min, clock);
     set.on_metar(blind, 55.7, 12.5, false, 0.0, 22.0, lat, lon, 1500.0);
-    const int newest = 29 * 1440 + 14 * 60 + 20;
-    check(haze::report_minutes_older(blind.report_min, newest) / 60 == 192, "8 days old");
-    check(haze::report_minutes_older(30 * 1440 + 23 * 60, 1 * 1440 + 60) < 0 &&
-              haze::report_minutes_older(21 * 1440, 1 * 1440) > 7 * 1440,
-          "across a month's end: 2 h old isn't stale, 8+ days is");
+    const int64_t newest = haze::report_time(29 * 1440 + 14 * 60 + 20, clock);
+    check((newest - blind.report_time) / 60 == 192, "8 days old");
     set.tick(lat, lon, 1500.0, 22.0, newest);
     set.table(1500.0 + anchor::kRoomFadeS / 2, t.bytes.data(), &blend);
     check(near(t.weight(2), 0.5), "fading out: " + std::to_string(t.weight(2)));

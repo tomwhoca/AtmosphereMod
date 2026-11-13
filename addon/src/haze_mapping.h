@@ -25,7 +25,9 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <iterator>
 #include <regex>
@@ -76,6 +78,7 @@ struct Metar
     bool cavok = false;
     double request_lat = NAN, request_lon = NAN;  // where the EFB app asked for it (the aircraft then)
     int report_min = -1;          // the report's DDHHMMZ as day * 1440 + minutes; -1 unknown
+    int64_t report_time = -1;     // in minutes since 1970, dated by the sim's clock (report_time()); -1 unknown
     // The sky is described: layers, CAVOK, or SKC/CLR/NSC/NCD (not with VV,
     // an obscured sky). NSC/NCD/CAVOK: nothing significant below 5,000 ft.
     bool clouds_reported = false, no_significant_cloud = false;
@@ -135,16 +138,67 @@ inline double smoothstep(double a, double b, double x)
 // not the clock, so a sim set to another time keeps its METARs.
 constexpr int kStaleReportMin = 180;
 
-// How many minutes report `older` is older than report `newer` (report_min,
-// the same or the previous month; negative: it's newer). Across a month's end
-// the previous month counts as 28 days, the shortest, so a report is never
-// called older than it is.
-inline int report_minutes_older(int older, int newer)
+// The sim's UTC (ZULU YEAR, ZULU DAY OF YEAR, ZULU TIME in s) in minutes since
+// 1970; -1 if they make no date.
+inline int64_t clock_minutes(double year, double day_of_year, double zulu_s)
 {
-    int d = newer - older;
-    if (d < -15 * 1440)
-        d += 28 * 1440;
-    return d;
+    using namespace std::chrono;
+    if (!(year >= 1970.0 && year < 3000.0 && day_of_year >= 1.0 && day_of_year < 367.0 && zulu_s >= 0.0 &&
+          zulu_s < 86401.0))
+        return -1;
+    const sys_days jan1{std::chrono::year{static_cast<int>(year)} / January / 1};
+    const sys_days date = jan1 + days{static_cast<int>(day_of_year) - 1};
+    return int64_t(date.time_since_epoch().count()) * 1440 + static_cast<int64_t>(zulu_s / 60.0);
+}
+
+// A report time may be this far after the sim's clock (a clock a little
+// behind the reports); farther, its day is the previous month's. With
+// historical weather the sim gives the METARs of its own time, but right after
+// a flight loads it can give today's first (LOWI 131250Z with the clock at
+// 12 Nov 15:01, 2026-11-13): those count as last month's, and stale.
+constexpr int kReportAheadMin = 60;
+
+// A report more than this older than the sim's clock is stale whatever the
+// newest report is (a month-old one dated last month, say, among the first
+// METARs of a flight).
+constexpr int kReportMaxAgeMin = 20 * 1440;
+
+// For this long after the sim's clock moved at once (its time set back or
+// forward, between live and historical weather), a report more than
+// kStaleReportMin older than the clock is the old time's weather, and stale:
+// LOWI's of yesterday came in the second the clock went from yesterday back to
+// now, and its clouds then took 5 minutes to crossfade to today's
+// (2026-11-13). After it, the newest report decides again, so live weather
+// with the clock set later still has its METARs.
+constexpr double kClockMovedHoldS = 30.0;
+
+// A report's time (report_min, DDHHMM) in minutes since 1970, dated by the
+// sim's clock (clock_minutes): its day in the clock's month, or the month
+// before (or the one before that, for a 31st) when it would be more than
+// kReportAheadMin after the clock. A METAR has no month: on the 11th, a
+// station's last report from the 25th is last month's, as the 30th's is on the
+// 1st, not two weeks ahead. Taken as the newest report, such a one made every
+// current METAR stale, and the haze stuck to the station it had (issue #39);
+// with historical weather, today's first reports did the same to all of the
+// sim's (issue #23). -1 if the report or the clock has no time.
+inline int64_t report_time(int report_min, int64_t clock_min)
+{
+    using namespace std::chrono;
+    if (report_min < 0 || clock_min < 0)
+        return -1;
+    const unsigned report_day = static_cast<unsigned>(report_min / 1440);
+    const year_month_day today{sys_days{days{clock_min / 1440}}};
+    for (int back = 0; back < 3; ++back)
+    {
+        const year_month month = year_month{today.year(), today.month()} - months{back};
+        const year_month_day date{month.year(), month.month(), day{report_day}};
+        if (!date.ok())
+            continue;
+        const int64_t t = int64_t(sys_days{date}.time_since_epoch().count()) * 1440 + report_min % 1440;
+        if (t <= clock_min + kReportAheadMin)
+            return t;
+    }
+    return -1;
 }
 
 // Parses the EFB app's message: {"time":..., "metar":{...}} or "metar":null.
