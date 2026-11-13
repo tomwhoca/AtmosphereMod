@@ -44,6 +44,7 @@ import string
 import subprocess
 import sys
 import tempfile
+import time
 import traceback
 import urllib.request
 import zipfile
@@ -118,7 +119,10 @@ def version() -> str:
 
 def sim_running() -> bool:
     # (tasklist answers in the system's language and console code page: compare bytes, the exe name is ASCII)
-    out = subprocess.run(["tasklist", "/FI", f"IMAGENAME eq {EXE}", "/NH"], capture_output=True).stdout
+    try:
+        out = subprocess.run(["tasklist", "/FI", f"IMAGENAME eq {EXE}", "/NH"], capture_output=True).stdout
+    except OSError:  # (no tasklist: not Windows, issue #36)
+        return False
     return EXE.lower().encode() in out.lower()
 
 
@@ -310,8 +314,8 @@ def community_folder(sim: Path | None = None) -> Path | None:
     """<InstalledPackagesPath>\\Community, from MSFS 2024's UserCfg.opt: the
     Steam version's first for a sim in a Steam library, else the MS Store
     version's (a PC can have both, or one left over from an old install)."""
-    store = Path(os.environ["LOCALAPPDATA"]) / "Packages/Microsoft.Limitless_8wekyb3d8bbwe/LocalCache/UserCfg.opt"
-    steam = Path(os.environ["APPDATA"]) / "Microsoft Flight Simulator 2024/UserCfg.opt"
+    store = Path(os.environ.get("LOCALAPPDATA", "")) / "Packages/Microsoft.Limitless_8wekyb3d8bbwe/LocalCache/UserCfg.opt"
+    steam = Path(os.environ.get("APPDATA", "")) / "Microsoft Flight Simulator 2024/UserCfg.opt"
     on_steam = sim is not None and "steamapps" in (part.lower() for part in sim.parts)
     for cfg in (steam, store) if on_steam else (store, steam):
         if cfg.exists():
@@ -341,13 +345,41 @@ def is_link(path: Path) -> bool:
     return stat.S_ISLNK(st.st_mode) or getattr(st, "st_reparse_tag", 0) == junction
 
 
+def remove_tree(folder: Path) -> None:
+    """shutil.rmtree, also through read-only files and folders (their mark
+    cleared), and again a few times for a moment's lock (an antivirus scan, the
+    search indexer). If Windows still refuses, an InstallError names the folder
+    to delete by hand (issue #42: "Access is denied" on the EFB app's Assets
+    folder stopped the uninstaller, and the installer left the old app)."""
+    def writable(func, path, _exc):
+        os.chmod(path, stat.S_IWRITE)
+        func(path)
+
+    error = None
+    for attempt in range(4):
+        try:
+            if sys.version_info >= (3, 12):
+                shutil.rmtree(folder, onexc=writable)
+            else:
+                shutil.rmtree(folder, onerror=writable)
+            return
+        except OSError as e:
+            error = e
+            if not folder.exists():
+                return
+            time.sleep(0.5 * (attempt + 1))
+    raise InstallError(f"Windows didn't allow deleting {folder} ({getattr(error, 'strerror', None) or error}). "
+                       "Close the sim and any window showing that folder, or delete the folder yourself, "
+                       "then run this again.")
+
+
 def remove_package(target: Path) -> str | None:
     """Remove a package from Community. A link (is_link) goes as the link only:
     the folder it points to stays as it is (shutil.rmtree refuses links, the
     error of issues #8 and #10). Returns where the link pointed, None for a
     folder."""
     if not is_link(target):
-        shutil.rmtree(target)
+        remove_tree(target)
         return None
     try:
         points_to = os.readlink(target).removeprefix("\\\\?\\")
@@ -415,12 +447,23 @@ def powershell() -> str | None:
     return str(usual) if usual.exists() else shutil.which("powershell") or shutil.which("pwsh")
 
 
+def under_wine() -> bool:
+    """Running in Wine or Proton (Linux): its ntdll has wine_get_version."""
+    try:
+        import ctypes
+        return hasattr(ctypes.windll.ntdll, "wine_get_version")
+    except (AttributeError, OSError):
+        return False
+
+
 def signed_by_microsoft(folder: Path) -> bool | None:
     """dxc.exe, dxcompiler.dll and dxil.dll carry valid Microsoft Corporation
     Authenticode signatures (checked before running anything downloaded).
-    None: it can't be checked here, there's no PowerShell to run."""
+    None: it can't be checked here: there's no PowerShell to run, or it's
+    Wine's, which can't check signatures (issue #36; a download's checksum is
+    still checked)."""
     shell = powershell()
-    if shell is None:
+    if shell is None or under_wine():
         return None
     # (in a PowerShell string, a ' is written twice: a user name can have one)
     files = ", ".join("'" + str(folder / n).replace("'", "''") + "'" for n in DXC_FILES)
@@ -773,7 +816,7 @@ def uninstall(args) -> None:
         say(f"removed {community / EFB}" + (f" (a link: the folder it pointed to, {linked}, wasn't touched;"
                                             " delete it there if you no longer need it)" if linked else ""))
     if data.exists() and ask(f"Also delete {data} (patched shaders, logs, your tunables.ini, presets and hotkeys)?", args.yes):
-        shutil.rmtree(data)
+        remove_tree(data)
         say(f"removed {data}")
     say("Uninstalled.")
 

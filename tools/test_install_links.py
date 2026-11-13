@@ -7,6 +7,10 @@
 - install_efb: the new app lands as a real folder (fresh, over a folder, over
   a link); after a link the user is told, with the linked folder named, that
   it still holds the old version.
+- remove_tree: read-only files and folders go too; a file held open makes
+  an InstallError that names the folder (issue #42).
+- Wine (issue #36): the signatures count as not checkable there (None, not
+  unsigned); without tasklist the sim counts as not running.
 - community_folder(sim): the UserCfg.opt of the sim's own version first
   (Steam for a sim in a Steam library, else MS Store), the other as fallback.
 
@@ -90,6 +94,51 @@ def links(tmp: Path) -> None:
     check("a missing path isn't a link", not install.is_link(tmp / "missing"))
 
 
+def read_only(tmp: Path) -> None:
+    import stat
+    community = tmp / "ro"
+    app = package(community / install.EFB, "old app")
+    assets = app / "html_ui" / "Assets"
+    assets.mkdir(parents=True)
+    (assets / "icon.svg").write_text("<svg/>")
+    for path in (assets / "icon.svg", assets, app / "manifest.json"):
+        os.chmod(path, stat.S_IREAD)
+    install.remove_package(community / install.EFB)
+    check("read-only files and folders: removed (issue #42)", not (community / install.EFB).exists())
+    # a file held open (without delete sharing) can't go: the error names the folder, after the retries
+    app = package(community / install.EFB, "old app")
+    held = open(app / "manifest.json", "rb")
+    install.time.sleep, sleep = (lambda s: None), install.time.sleep
+    try:
+        install.remove_package(community / install.EFB)
+        check("a file held open: an InstallError", False, "no error")
+    except install.InstallError as e:
+        check("a file held open: an InstallError naming the folder", str(community / install.EFB) in str(e)
+              and "yourself" in str(e), str(e))
+    finally:
+        install.time.sleep = sleep
+        held.close()
+    shutil.rmtree(community, ignore_errors=True)
+
+
+def wine() -> None:
+    check("not in Wine here", not install.under_wine())
+    real, install.under_wine = install.under_wine, lambda: True
+    try:
+        check("in Wine: the signatures can't be checked (None), not unsigned",
+              install.signed_by_microsoft(ROOT / "build" / "dxc") is None)
+    finally:
+        install.under_wine = real
+
+    def no_tasklist(*args, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory: 'tasklist'")
+    run, install.subprocess.run = install.subprocess.run, no_tasklist
+    try:
+        check("no tasklist: the sim counts as not running", install.sim_running() is False)
+    finally:
+        install.subprocess.run = run
+
+
 def efb_step(tmp: Path) -> None:
     """install_efb: the new app as a real folder each time; the note only after a link."""
     community = tmp / "Community"
@@ -156,6 +205,9 @@ def main():
         links(Path(tmp))
     with tempfile.TemporaryDirectory() as tmp:
         efb_step(Path(tmp))
+    with tempfile.TemporaryDirectory() as tmp:
+        read_only(Path(tmp))
+    wine()
     with tempfile.TemporaryDirectory() as tmp:
         user_cfg(Path(tmp))
     sys.exit(1 if failures else 0)
