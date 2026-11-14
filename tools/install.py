@@ -152,13 +152,26 @@ def steam_libraries() -> list[Path]:
     return libs
 
 
+def local_drive_letters() -> list[str]:
+    """Fixed/removable/CD/RAM volumes only. os.path.exists on a disconnected
+    mapped network drive (DRIVE_REMOTE) can block for tens of seconds per
+    letter while Windows tries the share — that looked like a frozen installer."""
+    try:
+        import ctypes
+        get_type = ctypes.windll.kernel32.GetDriveTypeW
+    except (AttributeError, OSError):
+        return list(string.ascii_uppercase)
+    # DRIVE_REMOVABLE=2, FIXED=3, CDROM=5, RAMDISK=6; skip UNKNOWN/NO_ROOT/REMOTE
+    return [d for d in string.ascii_uppercase if get_type(f"{d}:\\") in (2, 3, 5, 6)]
+
+
 def xbox_libraries() -> list[Path]:
     """The MS Store / Xbox app's game folders: <drive>:\\XboxGames, or the
     folder chosen in the Xbox app, which each drive's .GamingRoot names (an
     "RGBX" header, a count, then null-terminated UTF-16 paths relative to the
     drive)."""
     libs = []
-    for d in string.ascii_uppercase:
+    for d in local_drive_letters():
         root = Path(f"{d}:\\")
         if not os.path.exists(root):
             continue
