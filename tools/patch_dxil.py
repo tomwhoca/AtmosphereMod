@@ -3382,6 +3382,7 @@ def apply_cloud_shape(ir: Ir) -> str:
     need(ir.defs[t] < min(ir.defs[a] for a in ms["adds"]), f"{t}: defined after the sun phase")
     pix_em = Emitter("shp")
     pix = shadow_pixel_lines(pix_em, dirs, light)
+    reach = shadow_reach_pixel_lines(pix_em, pix, ms["cos"], dirs, light)
     map_em = Emitter("shm")
     mp = shadow_map_pixel_lines(map_em, dirs)
     # the sun on the aircraft also through MSFS's cloud light volume (an overcast
@@ -3407,6 +3408,8 @@ def apply_cloud_shape(ir: Ir) -> str:
     ]))
     sample_em = Emitter("shs")
     shadow = shadow_sample_lines(sample_em, pix, ms["cos"], dirs, light, t, ms["s"], mp)
+    gate_em = Emitter("shg")  # (guard_cloud_shadow moves the shadow's lines behind it)
+    shadow_reach_sample_lines(gate_em, reach, mp, ms["cos"], t)
     # per sample: f = 1 - p v exp(-max(depth, 0) / k)
     i = ir.defs[depth]
     edits.append((i, [
@@ -3423,8 +3426,8 @@ def apply_cloud_shape(ir: Ir) -> str:
         j = ir.defs[a]
         edits.append((j, [
             # the shadow factor once per sample, before the first channel
-            *(sample_em.lines + [f"  %mod.sh.f = select i1 {mp['off']}, float 1.000000e+00, float {shadow}"]
-              if j == first else []),
+            *(gate_em.lines + sample_em.lines
+              + [f"  %mod.sh.f = select i1 {mp['off']}, float 1.000000e+00, float {shadow}"] if j == first else []),
             ir.lines[j].replace(f"{a} = ", f"%mod.pw.a{k} = ", 1),
             f"  %mod.pw.b{k} = fmul fast float %mod.pw.a{k}, %mod.pw.f",
             f"  %mod.pw.c{k} = select i1 %mod.cpwoff, float %mod.pw.a{k}, float %mod.pw.b{k}",
@@ -4330,6 +4333,69 @@ def shadow_sample_lines(em: Emitter, pix: dict, cos: str, dirs, light, t: str, s
                   f"float 1.000000e+00)")
 
 
+SHADOW_REACH_PAD = (1.01, 0.1)  # the capsules' reach R, padded: R * 1.01 + 0.1 m (rounding in d, far away)
+
+
+def shadow_reach_pixel_lines(em: Emitter, pix: dict, cos: str, dirs, light) -> dict:
+    """Per pixel, for the shadow's gate (shadow_reach_sample_lines): the view ray's offset from the
+    shadow axis per metre, |w| in the shadow plane (w = dir - cos L, as shadow_sample_lines' q = t w);
+    the capsules' reach R, the farthest end of any capsule from the axis plus its radius (padded,
+    SHADOW_REACH_PAD); and half the penumbra width per metre, sun (behind) and smear (as ipw's)."""
+    w = [em.sub(dirs[k], em.mul(cos, light[k])) for k in range(3)]
+    e1, e2 = pix["e1"], pix["e2"]
+    w1 = em.mad(w[2], e1[2], em.mad(w[1], e1[1], em.mul(w[0], e1[0])))
+    w2 = em.mad(w[2], e2[2], em.mad(w[1], e2[1], em.mul(w[0], e2[0])))
+    wn = em.sqrt(em.mad(w2, w2, em.mul(w1, w1)))
+    sin_off = em.sqrt(em.max(em.sub(1.0, em.mul(cos, cos)), 0.0))
+    reach = None
+    for A, D, _, radius in pix["caps"]:
+        B = (em.add(A[0], D[0]), em.add(A[1], D[1]))
+        far = em.sqrt(em.max(em.mad(A[1], A[1], em.mul(A[0], A[0])), em.mad(B[1], B[1], em.mul(B[0], B[0]))))
+        r = em.add(far, radius)
+        reach = r if reach is None else em.max(reach, r)
+    return {"wn": wn, "R": em.mad(reach, SHADOW_REACH_PAD[0], SHADOW_REACH_PAD[1]),
+            "pen": em.mul(cos, -0.5 * SUN_DIAMETER_TAN),
+            "sa": em.mul(sin_off, 0.5 * CLOUD_STEP_PER_M), "sb": em.mul(sin_off, 0.5 * CLOUD_STEP_MIN_M)}
+
+
+def shadow_reach_sample_lines(em: Emitter, rc: dict, mp: dict, cos: str, t: str) -> str:
+    """Per sample at distance t: %mod.shg.on, whether the aircraft's shadow can fall on it (the
+    shadow on, the sample behind the aircraft, down-sun, and near its shadow); guard_cloud_shadow
+    skips the shadow's lines elsewhere, where %mod.sh.f is 1 anyway. Near:
+    - the live window: the spot (x, y) in level-0 cells inside it, 0 < x, y < SIL_N0: every
+      level's outer ring is 0, and its bilinear taps reach in from x >= 2^(L-1) only;
+    - the capsules: t |w| - pw / 2 < R. Each capsule's d >= t |w| - (its farther end), so beyond
+      that sat((r - d) / pw + 0.5) is 0 for all of them."""
+    qn = em.mul(t, rc["wn"])
+    half_pw = em.max(em.max(em.mul(t, rc["pen"]), em.mad(t, rc["sa"], rc["sb"])), 0.025)
+    caps = em.cmp("olt", em.sub(qn, half_pw), rc["R"])
+    x = em.mad(t, mp["du"], mp["x0"])
+    y = em.mad(t, mp["dv"], mp["y0"])
+    n0 = float(SIL_N0)
+
+    def both(a, b):
+        return em.new(f"and i1 {a}, {b}")
+    inside = both(both(em.cmp("ogt", x, 0.0), em.cmp("olt", x, n0)), both(em.cmp("ogt", y, 0.0), em.cmp("olt", y, n0)))
+    ok, off = mp["ok"], mp["off"]
+    near = em.new(f"or i1 {both(ok, inside)}, {both(em.new(f'xor i1 {ok}, true'), caps)}")
+    behind = em.cmp("olt", em.mul(t, cos), 0.0)
+    em.lines.append(f"  %mod.shg.on = and i1 {both(near, behind)}, {em.new(f'xor i1 {off}, true')}")
+    return "%mod.shg.on"
+
+
+def guard_cloud_shadow(ir: Ir) -> str:
+    """The aircraft's shadow on the clouds (shadow_sample_lines' run and %mod.sh.f) behind
+    %mod.shg.on (shadow_reach_sample_lines): computed only where the shadow can fall, 1 elsewhere
+    (2026-11-16). After apply_cloud_shape's finders, as guard_cloud_types: it splits the block."""
+    ir.reindex()
+    run = [i for i, l in enumerate(ir.lines) if re.match(r"\s+%mod\.(?:shs\d+|sh\.f) = ", l)]
+    need(run and run[-1] - run[0] + 1 == len(run), "the aircraft shadow's lines aren't one run")
+    need(ir.defs["%mod.shg.on"] < run[0], "%mod.shg.on: not before the shadow's lines")
+    out = guard_run(ir, run[0], run[-1] + 1, "%mod.shg.on", "shgd", {"%mod.sh.f": "1.000000e+00"}, keep=True)
+    need(list(out) == ["%mod.sh.f"], f"the shadow's lines are used outside: {sorted(out)}")
+    return "aircraft shadow skipped where it can't fall"
+
+
 # Developers, experiment/cloud-detail (tunables.ini T17 > 0, the add-on sets this bit): each view sample
 # shows the slope of the clouds' depth field toward the sun, mu0 = (depth here - depth toward the sun) /
 # distance, from the short march's own samples. If field * 8000 is a true distance in metres, mu0 is the cosine
@@ -4678,6 +4744,7 @@ def patch_clouds(text: str) -> tuple[str, str]:
     ir.reindex()
     inside += "; " + apply_cloud_tilt_view(ir, march, inside_site)
     types += "; " + guard_cloud_types(ir)
+    shape += "; " + guard_cloud_shadow(ir)
     user = append_user_dump(ir)
     return finish(ir, cloud=True, debug_uav=True), (f"{colour}; {optical}; {detail}; {shape}; {types}; {ms}; {phase}; "
                                                     f"{inside}; {user}")

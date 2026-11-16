@@ -400,6 +400,52 @@ def check_shadow_map(patched, dir_names, light_names, t_name, s_name, failures):
     return worst
 
 
+def check_shadow_reach(patched, dir_names, light_names, t_name, s_name, failures):
+    """The shadow's gate (%mod.shg.on, guard_cloud_shadow): wherever it skips the shadow, the
+    shadow's own value (%mod.sh.f.g, computed anyway here) is 1. View directions all round and
+    near the antisolar point, distances 1 m - 30 km; the capsules (three aircraft) and the live
+    window. Also: the gate skips most of them, and the shadow isn't 1 everywhere it runs."""
+    rng = np.random.default_rng(16)
+    sun = np.array([math.cos(math.radians(32)) * math.sin(math.radians(-70)), math.sin(math.radians(32)),
+                    math.cos(math.radians(32)) * math.cos(math.radians(-70))])
+    a1 = np.cross(sun, [0.0, 1.0, 0.0])
+    a1 /= np.linalg.norm(a1)
+    a2 = np.cross(sun, a1)
+    anywhere = rng.normal(size=(3000, 3))
+    near = -sun + rng.uniform(-0.25, 0.25, (3000, 1)) * a1 + rng.uniform(-0.25, 0.25, (3000, 1)) * a2
+    view = np.concatenate([anywhere, near])
+    view /= np.linalg.norm(view, axis=1, keepdims=True)
+    dists = (1.0, 5.0, 20.0, 60.0, 200.0, 700.0, 2500.0, 10000.0, 30000.0)
+    view = np.repeat(view, len(dists), axis=0)
+    dist = np.tile(np.array(dists), len(view) // len(dists))
+    words, _, _, _ = window_buffer(sun, 0.33, MAP_FRAME)
+    window_mod = np.zeros((4, 4))
+    window_mod[0, 0] = np.array([(MAP_FRAME & 0xFFFF) << 16 | 16 | 12], np.uint32).view(np.float32)[0]
+    cases = [("capsules, span 35 m", (0.8, 0.7, 0.25, 35.0), np.zeros((4, 4)), None),
+             ("capsules, span 11 m, banked", (0.6, -2.5, -0.5, 11.0), np.zeros((4, 4)), None),
+             ("capsules, span 80 m", (1.0, 2.0, 0.1, 80.0), np.zeros((4, 4)), None),
+             ("live window", (0.8, 0.7, 0.25, 35.0), window_mod, words)]
+    for what, c12, mod, buffer in cases:
+        cloud = np.zeros((4, 4))
+        cloud.flat[:16] = (1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, *c12)
+        seeds = {t_name: dist.astype(F), s_name: np.ones(len(dist), F), LV: np.ones(len(dist), F)}
+        for k3 in range(3):
+            seeds[dir_names[k3]] = view[:, k3].astype(F)
+            seeds[light_names[k3]] = np.full(len(dist), sun[k3], dtype=F)
+        ev = Evaluator(patched, {"b1 space50": cloud, "b0 space50": mod}, seeds, buffer=buffer)
+        on = np.asarray(ev("%mod.shg.on"), bool)
+        value = np.asarray(ev("%mod.sh.f.g"), np.float64)
+        dropped = np.abs(value - 1)[~on]
+        if dropped.size and dropped.max() > 1e-5:
+            k = np.flatnonzero(~on)[int(np.argmax(dropped))]
+            failures.append(f"shadow gate, {what}: skips a shadow of {dropped.max():.1e} "
+                            f"(cos {view[k] @ sun:.4f}, {dist[k]:.0f} m)")
+        far = (np.arange(len(dist)) < len(anywhere) * len(dists)) & (dist >= 200)  # all round, 200 m on
+        if on[far].mean() > 0.02 or not (np.abs(value - 1)[on] > 1e-3).any():
+            failures.append(f"shadow gate, {what}: runs at {on[far].mean():.1%} of the samples all round from "
+                            f"200 m, shadow seen at {(np.abs(value - 1)[on] > 1e-3).mean():.1%} where it runs")
+
+
 def check_light_volume(stock, patched, failures):
     """light_volume_at_camera's copy of the cloud light volume lookup against
     the stock chain evaluated with the march at the camera (distance 0,
@@ -1338,6 +1384,7 @@ def check(crc: str, stock: str) -> list[str]:
             failures.append(f"{tag} %mod.tyg.on: the gate isn't S > -max(-lo, c step) or the band")
     worst_shadow = check_shadow(patched, dir_names, light_names, t_name, ms["s"], failures)
     worst_shadow = max(worst_shadow, check_shadow_map(patched, dir_names, light_names, t_name, ms["s"], failures))
+    check_shadow_reach(patched, dir_names, light_names, t_name, ms["s"], failures)
     check_light_volume(stock, patched, failures)
     worst_untile = check_untile(stock, patched, failures)
     print(f"{'FAIL' if failures else 'PASS'} {crc}: {len(blends)} phase blend(s), sun phase {ms['blend']}, "
