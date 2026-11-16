@@ -251,7 +251,7 @@ class Evaluator:
                    "une": a != b, "ult": ~(a >= b), "ugt": ~(a <= b)}[m[1]]
         elif m := re.match(r"select i1 (\S+), float (\S+), float (\S+)", rhs):
             out = np.where(v(m[1]), v(m[2]), v(m[3]))
-        elif (m := re.match(r"phi float \[ (\S+), (%mod\.[\w.]+\.go) \], \[ (\S+), %\d+ \]$", rhs))                 and m[2] in self.branches:
+        elif (m := re.match(r"phi float \[ (\S+), (%mod\.[\w.]+\.go) \], \[ (\S+), %[\w.]+ \]$", rhs))                 and m[2] in self.branches:
             out = np.where(self(self.branches[m[2]]), v(m[1]), v(m[3]))
         elif m := re.match(r"(and|or) i1 (\S+), (\S+)", rhs):
             out = np.logical_and(v(m[2]), v(m[3])) if m[1] == "and" else np.logical_or(v(m[2]), v(m[3]))

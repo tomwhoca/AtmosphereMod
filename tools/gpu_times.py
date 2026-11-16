@@ -4,6 +4,11 @@
     python tools/gpu_times.py 352               # one log
     python tools/gpu_times.py 352 353           # stock (Ctrl+Shift+F9 off) vs mod
     python tools/gpu_times.py 352 353 --top 40  # more rows
+    python tools/gpu_times.py 677,679,681 676,678,680  # several logs per side, averaged
+
+One log often catches a fragment of a frame, and the clouds' work changes from
+frame to frame: for a comparison, take several logs of each side in a frozen
+view (the sim paused) and give them comma-separated, summed per frame.
 
 Take the logs with Ctrl+Shift+F12 (the draw log alone): a capture's (F11) own
 times include the replacements writing the capture.
@@ -87,6 +92,21 @@ def timeline(capture: str, gaps: int) -> None:
             print(f"    {size / 1000:6.3f} ms idle after {before}, before {after}")
 
 
+def load_group(spec: str) -> tuple[dict, dict, float, int]:
+    """load() for comma-separated captures, summed (per frame: over all their frames)."""
+    by_entry, by_crc, total, frames = {}, {}, 0.0, 0
+    for capture in spec.split(","):
+        e, c, t, f = load(capture)
+        for mine, theirs in ((by_entry, e), (by_crc, c)):
+            for k, (us, n) in theirs.items():
+                acc = mine.setdefault(k, [0.0, 0])
+                acc[0] += us
+                acc[1] += n
+        total += t
+        frames += f
+    return by_entry, by_crc, total, max(frames, 1)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("captures", nargs="+")
@@ -94,10 +114,11 @@ def main():
     ap.add_argument("--gaps", type=int, default=8, help="idle gaps listed per queue")
     args = ap.parse_args()
     replaced = {p.stem.lower() for p in (ROOT / "build" / "shaders").glob("0x*.cso")}
-    runs = [load(c) for c in args.captures[:2]]
+    runs = [load_group(c) for c in args.captures[:2]]
     for c, (_, _, total, frames) in zip(args.captures, runs):
         print(f"capture {c}: {total / 1000 / frames:.2f} ms of GPU time per frame ({frames} frame(s) logged)")
-        timeline(c, args.gaps)
+        if "," not in c:
+            timeline(c, args.gaps)
     if len(runs) == 1:
         by_entry, by_crc, _, frames = runs[0]
         print(f"\n{'ms/frame':>9} {'count':>6}  pass")

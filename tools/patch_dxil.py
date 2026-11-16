@@ -301,6 +301,13 @@ def cloud_prologue_lines() -> list[str]:
         "  %mod.cpl0 = call float @dx.op.unary.f32(i32 7, float %mod.C35)",
         "  %mod.cpl = fmul fast float %mod.cmix, %mod.cpl0",
         "  %mod.cploff = fcmp fast ole float %mod.cpl, 0.000000e+00",
+        # ... its code runs only while it's on (guard_run): cplon; its march sums also with the tilt view's bit
+        "  %mod.cplon = xor i1 %mod.cploff, true",
+        f"  %mod.tvf = extractvalue {t} %mod.oz.r, 0",
+        "  %mod.tvb = bitcast float %mod.tvf to i32",
+        f"  %mod.tvt = and i32 %mod.tvb, {DEBUG_CLOUD_TILT}",
+        "  %mod.tilton = icmp ne i32 %mod.tvt, 0",
+        "  %mod.tvon = or i1 %mod.cplon, %mod.tilton",
         # build-up of bounced light (apply_cloud_shape): strength C0 * C6, depth C7 (m, 100 if <= 0)
         "  %mod.cpw0 = call float @dx.op.unary.f32(i32 7, float %mod.C6)",
         "  %mod.cpw = fmul fast float %mod.cmix, %mod.cpw0",
@@ -767,6 +774,47 @@ def guard_block(ir: Ir, at: int, cond: str, body: list[str], outputs: dict, tag:
                 edits.append((i, [new]))
             i += 1
     return lines, names, edits
+
+
+def guard_run(ir: Ir, start: int, end: int, cond: str, tag: str, otherwise: dict | None = None,
+              keep: bool = False) -> dict:
+    """Moves the lines [start, end) of one block behind a branch on cond (guard_block): the values they define
+    that are used elsewhere come out of the join block's phis, as `otherwise` gives them (name -> value; 0 by
+    default) where cond doesn't hold, and their uses elsewhere are renamed to the phis. For code whose result is
+    blended away while its setting is off: off, it's skipped instead of computed. Returns {name: phi}. keep: the
+    phis take the values' own names instead (inside, they're renamed name.g), so nothing outside changes."""
+    body = ir.lines[start:end]
+    need(body and all(re.match(rf"\s+{V} = ", l) and " = phi " not in l for l in body),
+         f"{tag}: lines {start}-{end} aren't one run of values")
+    defined = [re.match(rf"\s+({V}) = ", l)[1] for l in body]
+    rest = "\n".join(ir.lines[:start] + ir.lines[end:])
+    used = [n for n in defined if re.search(rf"{re.escape(n)}(?![\w.])", rest)]
+    otherwise = otherwise or {}
+    need(set(otherwise) <= set(used), f"{tag}: {sorted(set(otherwise) - set(used))} not used outside")
+    inner = {n: f"{n}.g" if keep else n for n in used}
+    if keep and used:
+        pat = re.compile("|".join(rf"{re.escape(n)}(?![\w.])" for n in sorted(used, key=len, reverse=True)))
+        body = [pat.sub(lambda m: inner[m[0]], l) for l in body]
+    outputs = {f"o{k}": (inner[n], otherwise.get(n, "0.000000e+00")) for k, n in enumerate(used)}
+    lines, names, edits = guard_block(ir, start, cond, body, outputs, tag)
+    for i, new in edits:  # (its successors' phis, line for line: before the splice)
+        ir.lines[i:i + 1] = new
+    if keep:  # (the join's phis take the values' own names)
+        phi_of = {f"  {names[f'o{k}']} = phi ": f"  {n} = phi " for k, n in enumerate(used)}
+        lines = [next((l.replace(a, b, 1) for a, b in phi_of.items() if l.startswith(a)), l) for l in lines]
+        ir.lines[start:end] = lines
+        ir.reindex()
+        return {n: n for n in used}
+    ir.lines[start:end] = lines
+    joined = {n: names[f"o{k}"] for k, n in enumerate(used)}
+    for i, line in enumerate(ir.lines):
+        if start <= i < start + len(lines):
+            continue
+        for n, j in joined.items():
+            line = re.sub(rf"{re.escape(n)}(?![\w.])", j, line)
+        ir.lines[i] = line
+    ir.reindex()
+    return joined
 
 
 def haze_field_lines(ir: Ir, at: int, site: dict, tag: str) -> tuple[list, dict, list]:
@@ -3576,7 +3624,8 @@ def apply_cloud_types(ir: Ir) -> str:
             f"  {p}na = fmul fast float {p}a, {f32(-scale[c])}",  # thickness
             f"  {p}b = fmul fast float %mod.ty.S, {f32(TYPES_BASE_MIX[c] * scale[c])}",  # base
         ]
-    # ---- per view sample, after the volume lookup: the grid cell around it, bilinearly
+    # ---- per view sample, after the volume lookup: the grid cell around it, bilinearly (every step: the
+    # anvils' cirrus band below needs it)
     em = Emitter("tys")
     corner = []
     for coord in (u, v):
@@ -3584,52 +3633,10 @@ def apply_cloud_types(ir: Ir) -> str:
         f0 = em.min(em.unary(27, f), float(TYPES_N - 2))
         corner.append((em.new(f"fptosi float {f0} to i32"), em.sub(f, f0)))
     (xi, ax), (yi, ay) = corner
-    k = em.new(f"fptosi float {em.min(em.mul(w, float(TYPES_SLICES)), float(TYPES_SLICES - 1))} to i32")
-    row = em.new(f"add i32 {em.new(f'mul i32 {k}, {TYPES_N}')}, {yi}")
-    cell = em.new(f"add i32 {em.new(f'mul i32 {row}, {TYPES_N}')}, {xi}")
-    a0 = em.new(f"add i32 {em.new(f'shl i32 {cell}, 2')}, {TYPES_REGION + 16}")
-    words = []
-    for dy in (0, 4 * TYPES_N):
-        addr = em.new(f"select i1 %mod.ty.on, i32 {em.new(f'add i32 {a0}, {dy}')}, i32 0")
-        ld = em.new(f"call {rr} @dx.op.rawBufferLoad.f32(i32 139, {t} %mod.ty.u, i32 {addr}, i32 undef, i8 3, i32 4)")
-        words += [em.new(f"bitcast float {em.new(f'extractvalue {rr} {ld}, {q}')} to i32") for q in (0, 1)]
     bx, by = em.sub(1.0, ax), em.sub(1.0, ay)
     bil = [em.mul(bx, by), em.mul(ax, by), em.mul(bx, ay), em.mul(ax, ay)]
-    thick, base, total = 1.0, None, None
-    vals = []
-    for c in range(4):
-        raw = [em.new(f"uitofp i32 {em.new(f'and i32 {x}, {255 << 8 * c}') if c < 3 else em.new(f'lshr i32 {x}, 24')}"
-                      " to float") for x in words]
-        val = em.mul(bil[0], raw[0])
-        for q in (1, 2, 3):
-            val = em.mad(bil[q], raw[q], val)
-        vals.append(val)
-        thick = em.mad(f"%mod.ty.k{c}na", val, thick)
-        base = em.mul(f"%mod.ty.k{c}b", val) if base is None else em.mad(f"%mod.ty.k{c}b", val, base)
-        total = em.mad(val, -scale[c], 1.0 if total is None else total)
-    cu = em.max(total, 0.0)
-    # the 8 km octave's own noise by type (TYPES_NOISE): their weights S w_x
-    noise_w = {c: em.mul(em.mul(vals[c], scale[c]), "%mod.ty.S") for c, _, _ in TYPES_NOISE}
-    # the puffs (MSFS's 8 km and 1 km erosion octaves) by type: 1 - S + S (cu + sum w_x p_x)
-    for octave, (pf, factors) in enumerate((("%mod.ty.pf", TYPES_PUFF), ("%mod.ty.pf1", TYPES_PUFF_FINE))):
-        puff = cu
-        for c in range(4):
-            puff = em.mad(vals[c], scale[c] * factors[c], puff)
-        less = em.sub(puff, 1.0)
-        em.lines += [
-            f"  {pf}m = call float @dx.op.tertiary.f32(i32 46, float %mod.ty.S, float {less}, float 1.000000e+00)",
-            f"  {pf} = select i1 %mod.ty.on, float {pf}m, float 1.000000e+00",
-        ]
-    em.lines += [
-        f"  %mod.ty.T = fadd fast float {thick}, 0.000000e+00",
-        f"  %mod.ty.m = fadd fast float {base}, 0.000000e+00",
-        f"  %mod.ty.ct = call float @dx.op.tertiary.f32(i32 46, float {cu}, float %mod.ty.ce1, float %mod.ty.ce0)",
-        "  %mod.ty.ce = select i1 %mod.ty.on, float %mod.ty.ct, float %mod.ce",
-        "  %mod.ty.cek = fadd fast float %mod.ty.ce, 1.000000e+00",
-        "  %mod.ty.ceoff = fcmp fast ole float %mod.ty.ce, 0.000000e+00",
-    ]
-    # ---- the storm cells' anvils (ANVIL_REGION): cover bilinearly, level weighted by cover
     acell = em.new(f"add i32 {em.new(f'mul i32 {yi}, {TYPES_N}')}, {xi}")
+    # ---- the storm cells' anvils (ANVIL_REGION): cover bilinearly, level weighted by cover
     aaddr = em.new(f"add i32 {em.new(f'shl i32 {acell}, 3')}, {ANVIL_REGION}")
     corners = []
     for dy in (0, 8 * TYPES_N):
@@ -3648,32 +3655,79 @@ def apply_cloud_types(ir: Ir) -> str:
         f"  %mod.ci.alt = fdiv fast float {wsum}, {floor}",
         f"  %mod.ci.on = fcmp fast ogt float %mod.ci.cov, {f32(CI_MIN_COV)}",
     ]
-    # ---- the storm towers' marks (TOWER_REGION): the mark bilinearly, the base weighted by it; the
+    # ---- the types' weights and all they set (tyw), at the end of the lookup's block, where
+    # guard_cloud_types puts them behind cloud_types_gate: in empty air they're skipped
+    wt = Emitter("tyw")
+    k = wt.new(f"fptosi float {wt.min(wt.mul(w, float(TYPES_SLICES)), float(TYPES_SLICES - 1))} to i32")
+    row = wt.new(f"add i32 {wt.new(f'mul i32 {k}, {TYPES_N}')}, {yi}")
+    cell = wt.new(f"add i32 {wt.new(f'mul i32 {row}, {TYPES_N}')}, {xi}")
+    a0 = wt.new(f"add i32 {wt.new(f'shl i32 {cell}, 2')}, {TYPES_REGION + 16}")
+    words = []
+    for dy in (0, 4 * TYPES_N):
+        addr = wt.new(f"select i1 %mod.ty.on, i32 {wt.new(f'add i32 {a0}, {dy}')}, i32 0")
+        ld = wt.new(f"call {rr} @dx.op.rawBufferLoad.f32(i32 139, {t} %mod.ty.u, i32 {addr}, i32 undef, i8 3, i32 4)")
+        words += [wt.new(f"bitcast float {wt.new(f'extractvalue {rr} {ld}, {q}')} to i32") for q in (0, 1)]
+    thick, base, total = 1.0, None, None
+    vals = []
+    for c in range(4):
+        raw = [wt.new(f"uitofp i32 {wt.new(f'and i32 {x}, {255 << 8 * c}') if c < 3 else wt.new(f'lshr i32 {x}, 24')}"
+                      " to float") for x in words]
+        val = wt.mul(bil[0], raw[0])
+        for q in (1, 2, 3):
+            val = wt.mad(bil[q], raw[q], val)
+        vals.append(val)
+        thick = wt.mad(f"%mod.ty.k{c}na", val, thick)
+        base = wt.mul(f"%mod.ty.k{c}b", val) if base is None else wt.mad(f"%mod.ty.k{c}b", val, base)
+        total = wt.mad(val, -scale[c], 1.0 if total is None else total)
+    cu = wt.max(total, 0.0)
+    # the 8 km octave's own noise by type (TYPES_NOISE): their weights S w_x
+    noise_w = {c: wt.mul(wt.mul(vals[c], scale[c]), "%mod.ty.S") for c, _, _ in TYPES_NOISE}
+    # the puffs (MSFS's 8 km and 1 km erosion octaves) by type: 1 - S + S (cu + sum w_x p_x)
+    for octave, (pf, factors) in enumerate((("%mod.ty.pf", TYPES_PUFF), ("%mod.ty.pf1", TYPES_PUFF_FINE))):
+        puff = cu
+        for c in range(4):
+            puff = wt.mad(vals[c], scale[c] * factors[c], puff)
+        less = wt.sub(puff, 1.0)
+        wt.lines += [
+            f"  {pf}m = call float @dx.op.tertiary.f32(i32 46, float %mod.ty.S, float {less}, float 1.000000e+00)",
+            f"  {pf} = select i1 %mod.ty.on, float {pf}m, float 1.000000e+00",
+        ]
+    wt.lines += [
+        f"  %mod.ty.T = fadd fast float {thick}, 0.000000e+00",
+        f"  %mod.ty.m = fadd fast float {base}, 0.000000e+00",
+        f"  %mod.ty.ct = call float @dx.op.tertiary.f32(i32 46, float {cu}, float %mod.ty.ce1, float %mod.ty.ce0)",
+        "  %mod.ty.ce = select i1 %mod.ty.on, float %mod.ty.ct, float %mod.ce",
+    ]
+    after = ["  %mod.ty.cek = fadd fast float %mod.ty.ce, 1.000000e+00",
+             "  %mod.ty.ceoff = fcmp fast ole float %mod.ty.ce, 0.000000e+00"]
+    # ---- the storm towers' marks (TOWER_REGION; tyt): the mark bilinearly, the base weighted by it; the
     # floor of the light volume's above and below visibilities (sums of its n taps):
-    # n CB_SIDE_AMBIENT mark sat((h - base) / CB_SIDE_RAMP_M)
+    # n CB_SIDE_AMBIENT mark sat((h - base) / CB_SIDE_RAMP_M). Only in cloud: next to the light volume's sums
     sums = find_light_volume_sums(ir)
+    tower = Emitter("tyt")
     if sums:
-        taddr = em.new(f"add i32 {em.new(f'shl i32 {acell}, 3')}, {TOWER_REGION}")
+        taddr = tower.new(f"add i32 {tower.new(f'shl i32 {acell}, 3')}, {TOWER_REGION}")
         corners = []
         for dy in (0, 8 * TYPES_N):
-            addr = em.new(f"select i1 %mod.ty.on, i32 {em.new(f'add i32 {taddr}, {dy}')}, i32 0")
-            ld = em.new(f"call {rr} @dx.op.rawBufferLoad.f32(i32 139, {t} %mod.ty.u, i32 {addr}, i32 undef, i8 15, "
-                        "i32 4)")
-            q = [em.new(f"extractvalue {rr} {ld}, {c}") for c in range(4)]
+            addr = tower.new(f"select i1 %mod.ty.on, i32 {tower.new(f'add i32 {taddr}, {dy}')}, i32 0")
+            ld = tower.new(f"call {rr} @dx.op.rawBufferLoad.f32(i32 139, {t} %mod.ty.u, i32 {addr}, i32 undef, "
+                           "i8 15, i32 4)")
+            q = [tower.new(f"extractvalue {rr} {ld}, {c}") for c in range(4)]
             corners += [(q[0], q[1]), (q[2], q[3])]
         mark, bsum = None, None
         for b, (mk, mb) in zip(bil, corners):
-            wm = em.mul(b, mk)
-            mark = wm if mark is None else em.add(mark, wm)
-            bsum = em.mul(wm, mb) if bsum is None else em.mad(wm, mb, bsum)
-        ramp = em.sat(em.mul(em.sub(h, em.div(bsum, em.max(mark, 1e-6))), 1.0 / CB_SIDE_RAMP_M))
-        em.lines += [f"  %mod.sa.lf = select i1 %mod.ty.on, float {em.mul(em.mul(mark, ramp), sums[2] * CB_SIDE_AMBIENT)}, "
-                     "float 0.000000e+00"]
+            wm = tower.mul(b, mk)
+            mark = wm if mark is None else tower.add(mark, wm)
+            bsum = tower.mul(wm, mb) if bsum is None else tower.mad(wm, mb, bsum)
+        ramp = tower.sat(tower.mul(tower.sub(h, tower.div(bsum, tower.max(mark, 1e-6))), 1.0 / CB_SIDE_RAMP_M))
+        tower.lines += [f"  %mod.sa.lf = select i1 %mod.ty.on, float "
+                        f"{tower.mul(tower.mul(mark, ramp), sums[2] * CB_SIDE_AMBIENT)}, float 0.000000e+00"]
     edits = [(at, [ir.lines[at], *em.lines])]
+    first = min(ir.defs[top] for top in sums[:2]) if sums else None
     for c, top in enumerate(sums[:2] if sums else ()):
         n = ir.defs[top]
-        edits.append((n, [ir.lines[n], f"  %mod.sa.v{c} = call float @dx.op.binary.f32(i32 35, float {top}, "
-                                       "float %mod.sa.lf)"]))
+        edits.append((n, [ir.lines[n], *(tower.lines if n == first else []),
+                          f"  %mod.sa.v{c} = call float @dx.op.binary.f32(i32 35, float {top}, float %mod.sa.lf)"]))
         for i in ir.users(top):
             edits.append((i, [re.sub(rf"{re.escape(top)}\b", f"%mod.sa.v{c}", ir.lines[i])]))
     # ---- the optical thickness: thinner and with a softer base by type
@@ -3756,6 +3810,14 @@ def apply_cloud_types(ir: Ir) -> str:
                                                          "float %mod.ci.cov)")):
             n = ir.defs[name]
             edits.append((n, [ir.lines[n].replace(f"{name} = ", f"{old} = ", 1), f"  {name} = {new}"]))
+    # ---- the weights and what they set, before the branch to the erosion octaves (the lookup's block's, or
+    # after the thin 2D layer's block, its own), with the test for where they can matter (guard_cloud_types
+    # moves them behind it once the other patches are done)
+    yes = block_of(ir, eight[0])
+    terms = [n for n in range(at, eight[0]) if re.match(rf"\s+br i1 \S+, label {re.escape(yes)}, label ", ir.lines[n])]
+    need(len(terms) == 1, f"{len(terms)} branches to the 8 km erosion octave's block {yes}")
+    term = terms[0]
+    edits.append((term, [*cloud_types_gate(ir, term, eight[0], cirrus), *wt.lines, *after, ir.lines[term]]))
     need(all(n > at for n, _ in edits[1:]), "the view-march lines come before the volume lookup")
     need(len({n for n, _ in edits}) == len(edits), "two edits of one line")
     for n, new_lines in sorted(edits, key=lambda e: -e[0]):
@@ -3765,6 +3827,116 @@ def apply_cloud_types(ir: Ir) -> str:
     return (f"cloud types: grid at {TYPES_REGION:#x}, read at the volume lookup ({u}, {v}, {w}); "
             + (f"anvils' cirrus at {cirrus[0]}, {cirrus[1]}" if cirrus else "no cirrus band")
             + (f"; towers' sky light on {sums[0]}, {sums[1]}" if sums else "; no light volume"))
+
+
+def block_of(ir: Ir, line: int) -> str:
+    """The label of the block holding line (%0: the entry block)."""
+    for j in range(line, -1, -1):
+        if m := re.match(r"; <label>:(\d+)|([\w.]+):\s*$", ir.lines[j]):
+            return "%" + (m[1] or m[2])
+        if ir.lines[j].startswith("define "):
+            return "%0"
+    raise PatchError(f"line {line}: no block")
+
+
+def cloud_types_gate(ir: Ir, term: int, octave: int, cirrus: tuple | None) -> list[str]:
+    """Where a view-march step can feel the cloud types (%mod.tyg.on), for the end of the block that branches at
+    line term to the erosion octaves (MSFS's test; their block holds line octave). The types act
+    on those octaves, which run only where the coarse value S is above the test's lower bound lo, and on the edge
+    ramp and the optical thickness, which reach the density only through the ramp's product (the test of
+    apply_cloud_types checks this): the ramp sat(1.5 - 2^(EDGE_SLOPE x)) is 0 where its input
+    x = 8000 D / max(floor, step) is at most log2(1.5) / EDGE_SLOPE, with D = S where the octaves don't run and
+    the step is outside the cirrus band (in it max(S, the cirrus's)). So the gate:
+    S > -max(-lo, c step), c that bound per metre of step with a quarter more, or the step within 100 m of the
+    cirrus band, and the types on. Off it, D <= -c max(floor, step) (c floor <= -lo: checked), the ramp is 0."""
+    m = re.match(r"\s+br i1 (%[\w.]+), label (%[\w.]+), label (%[\w.]+)$", ir.lines[term])
+    need(m, f"line {term}: not a two-way branch")
+    cond, yes, no = m[1], m[2], m[3]
+    need(block_of(ir, octave) == yes, f"line {term}: not the branch to the 8 km erosion octave")
+    a = re.match(rf"\s+{re.escape(cond)} = and i1 (\S+), (\S+)$", ir.lines[ir.defs[cond]])
+    parts = [a[1], a[2]] if a else [cond]
+    lows = [r for r in (re.match(rf"\s+{re.escape(q)} = fcmp fast ogt float (%[\w.]+), ([^%\s]+)$",
+                                 ir.lines[ir.defs[q]]) for q in parts if q in ir.defs) if r]
+    need(len(lows) == 1, f"{cond}: not (S > lo) and ...")
+    s, lo = lows[0][1], literal_value(lows[0][2])
+    need(lo < 0, f"{cond}: the erosion octaves' lower bound {lo} isn't below 0")
+    head = block_of(ir, term)
+    top = [i for i, l in enumerate(ir.lines) if re.match(rf"; <label>:{re.escape(no[1:])}\b", l)
+           or l.rstrip() == f"{no[1:]}:"]
+    need(len(top) == 1, f"no block {no}")
+    passed, i = [], top[0] + 1
+    while re.match(rf"\s+{V} = phi ", ir.lines[i]):
+        if f"[ {s}, {head} ]" in ir.lines[i]:
+            passed.append(ir.def_name(i))
+        i += 1
+    need(len(passed) == 1, f"{no}: {len(passed)} phis pass {s} on from {head}")
+    edges = find_cloud_edges(ir)
+    x, depth = edges["ramps"][0][0], edges["depth"]
+    dist = [o for o in ir.binops[depth][1:] if o != "8.000000e+03"][0]
+    den, step = view_march_step(ir, x)
+    floor = max(literal_value(o) for o in re.findall(r"float ([-\d][^\s,)]*)", ir.lines[ir.defs[den]]))
+    if dist != passed[0]:  # (the cirrus band's max with the octaves' result, or that result)
+        ph = re.match(rf"\s+{re.escape(dist)} = phi float \[ (\S+), %[\w.]+ \], \[ (\S+), %[\w.]+ \]$",
+                      ir.lines[ir.defs[dist]])
+        need(ph and passed[0] in (ph[1], ph[2]), f"{dist}: the ramp's depth isn't {passed[0]} or a phi with it")
+        other = ph[1] if ph[2] == passed[0] else ph[2]
+        mx = re.match(rf"\s+{re.escape(other)} = call float @dx\.op\.binary\.f32\(i32 35, float (\S+), "
+                      r"float (\S+)\)", ir.lines[ir.defs[other]])
+        need(mx and passed[0] in (mx[1], mx[2]) and cirrus, f"{other}: not the cirrus band's max with {passed[0]}")
+    c = 1.25 * math.log2(1.5) / -literal_value(EDGE_SLOPE) / 8000.0
+    need(c * floor <= -lo, f"the ramp's floor {floor:g} m reaches below the erosion octaves' bound {lo:g}")
+    need(ir.defs[s] < term and ir.defs[step] < term, f"{s} or {step} is defined after the lookup's block")
+    lines = [
+        f"  %mod.tyg.s = fmul fast float {step}, {f32(c)}",
+        f"  %mod.tyg.t = call float @dx.op.binary.f32(i32 35, float %mod.tyg.s, float {f32(-lo)})",
+        "  %mod.tyg.nt = fsub fast float -0.000000e+00, %mod.tyg.t",
+        f"  %mod.tyg.near = fcmp fast ogt float {s}, %mod.tyg.nt",
+    ]
+    near = "%mod.tyg.near"
+    if cirrus:
+        alt0 = cirrus[0]
+        r9 = ir.extracts[alt0][0]
+        band = {b: n for n, (kind, a1, b1) in ir.binops.items() if kind == "fadd" and alt0 in (a1, b1)
+                for b in (a1, b1) if b in ("-5.000000e+02", "3.500000e+02")}
+        need(len(band) == 2, f"{alt0}: the cirrus band's bounds")
+        hs = {re.match(rf"\s+{V} = fcmp fast \w+ float ({V}), {re.escape(band[k])}$", ir.lines[i])[1]
+              for k in band for i in ir.users(band[k])
+              if re.match(rf"\s+{V} = fcmp fast \w+ float ({V}), {re.escape(band[k])}$", ir.lines[i])}
+        need(len(hs) == 1, f"the cirrus band's tests: heights {sorted(hs)}")
+        hb = hs.pop()
+        need(ir.defs[hb] < term, f"{hb}: the cirrus band's height is defined after the lookup's block")
+        if ir.defs[r9] > term:  # (User[9] read after the block: read it here too)
+            lines.append(re.sub(rf"^\s+{re.escape(r9)} = ", "  %mod.tyg.r9 = ", ir.lines[ir.defs[r9]]).split(";")[0]
+                         .rstrip())
+            r9 = "%mod.tyg.r9"
+        lines += [
+            f"  %mod.tyg.a0 = extractvalue %dx.types.CBufRet.f32 {r9}, 0",
+            "  %mod.tyg.al = select i1 %mod.ci.on, float %mod.ci.alt, float %mod.tyg.a0",
+            "  %mod.tyg.lo = fadd fast float %mod.tyg.al, -6.000000e+02",
+            "  %mod.tyg.hi = fadd fast float %mod.tyg.al, 4.500000e+02",
+            f"  %mod.tyg.ab = fcmp fast ogt float {hb}, %mod.tyg.lo",
+            f"  %mod.tyg.be = fcmp fast olt float {hb}, %mod.tyg.hi",
+            "  %mod.tyg.band = and i1 %mod.tyg.ab, %mod.tyg.be",
+            "  %mod.tyg.any = or i1 %mod.tyg.near, %mod.tyg.band",
+        ]
+        near = "%mod.tyg.any"
+    return lines + [f"  %mod.tyg.on = and i1 %mod.ty.on, {near}"]
+
+
+def guard_cloud_types(ir: Ir) -> str:
+    """The cloud types' weights (apply_cloud_types' run before the view march's branch to the erosion octaves)
+    behind their gate %mod.tyg.on (cloud_types_gate): skipped in empty air, where the march takes most of its
+    steps, the values as without types there (2026-11-13). Last of the cloud patches: it splits the block, which
+    the others' finders don't expect."""
+    ir.reindex()
+    run = [i for i, l in enumerate(ir.lines) if re.match(r"\s+%mod\.(?:tyw\d+|ty\.(?:pfm|pf|pf1m|pf1|T|m|ct|ce)) = ", l)]
+    need(run and run[-1] - run[0] + 1 == len(run), "the cloud types' weights aren't one run")
+    rest = "\n".join(ir.lines[:run[0]] + ir.lines[run[-1] + 1:])
+    plain = {"%mod.ty.T": "1.000000e+00", "%mod.ty.m": "0.000000e+00", "%mod.ty.ce": "%mod.ce",
+             "%mod.ty.pf": "1.000000e+00", "%mod.ty.pf1": "1.000000e+00"}
+    plain = {n: x for n, x in plain.items() if re.search(rf"{re.escape(n)}(?![\w.])", rest)}
+    guard_run(ir, run[0], run[-1] + 1, "%mod.tyg.on", "tyw", plain, keep=True)
+    return "cloud types skipped in empty air"
 
 
 def find_light_volume_sums(ir: Ir) -> tuple[str, str, int] | None:
@@ -4452,8 +4624,27 @@ def apply_cloud_tilt_view(ir: Ir, march: dict | None, site: dict) -> str:
             merged[j] = new_lines
     for j, new_lines in sorted(merged.items(), key=lambda e: -e[0]):
         ir.lines[j:j + 1] = new_lines
+
+    # Off, none of it runs (guard_run): it was computed and blended away, about a fifth of the mod's work per
+    # in-cloud step and its march's every step, while 94 % of the performance reports have it off (2026-11-13).
+    # The march's sums only for the formula or the tilt view; the formula and each channel's blend only with C36;
+    # the tilt view's colours only with its bit.
+    ir.reindex()
+    run = lambda pattern: [i for i, l in enumerate(ir.lines) if re.match(pattern, l)]
+    sums = run(r"\s+%mod\.tv\.m\d+ = ")
+    guard_run(ir, sums[0], sums[-1] + 1, "%mod.tvon", "tvg",
+              {mu_next: "%mod.tv.mu0", raw_next: "%mod.tv.raw0", f_next: "%mod.tv.f0", left: "%mod.tv.l0",
+               other: "%mod.tv.t0"})
+    formula = run(r"\s+%mod\.pl\.\d+ = ")
+    guard_run(ir, formula[0], formula[-1] + 1, "%mod.cplon", "plg")
+    for c in range(len(march["terms"])):
+        blend = run(rf"\s+%mod\.pl\.(?:gs|g|h|r|a|e|d|q|w|v|l|m){c} = ")
+        guard_run(ir, blend[0], blend[-1] + 1, "%mod.cplon", f"plg{c}", {f"%mod.pl.m{c}": f"%mod.pl.o{c}"})
+    view = run(r"\s+%mod\.tv\.c\d+ = ")
+    k = view.index(ir.defs[on]) + 1  # (the bit's test stays: the channels' selects read it)
+    guard_run(ir, view[k], view[-1] + 1, on, "tvc")
     return (f"tilt view: march of {march['step']:g} i m, samples {march['first']}-{march['last']}, "
-            f"{len(channels)} channel(s)")
+            f"{len(channels)} channel(s); skipped while off")
 
 
 def patch_clouds(text: str) -> tuple[str, str]:
@@ -4486,6 +4677,7 @@ def patch_clouds(text: str) -> tuple[str, str]:
     inside += "; " + apply_cloud_fog_record(ir, inside_site)
     ir.reindex()
     inside += "; " + apply_cloud_tilt_view(ir, march, inside_site)
+    types += "; " + guard_cloud_types(ir)
     user = append_user_dump(ir)
     return finish(ir, cloud=True, debug_uav=True), (f"{colour}; {optical}; {detail}; {shape}; {types}; {ms}; {phase}; "
                                                     f"{inside}; {user}")

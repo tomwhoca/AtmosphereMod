@@ -589,7 +589,10 @@ def check_tilt_view(stock: str, patched: str, failures: list) -> None:
     seeds = {march["index"]: index.astype(np.int64), march["index_f"]: index.astype(F), march["scale"]: f,
              march["depth"]: dep, march["depth_q"]: q, "%mod.tv.mu0": np.zeros(n, F), "%mod.tv.raw0": np.zeros(n, F)}
     cbs = {"b1 space50": np.zeros((P.CLOUD_PARAMS_SIZE // 16, 4)), "b0 space50": np.zeros((4, 4))}
-    got = Evaluator(patched, cbs, seeds)
+    # (the march's sums run only with the tilt view's bit or the plane light on: guard_run)
+    tilt = np.zeros((4, 4))
+    tilt[0, 0] = np.uint32(P.DEBUG_CLOUD_TILT).view(np.float32)
+    got = Evaluator(patched, {**cbs, "b0 space50": tilt}, seeds)
     step = march["step"]
     along = np.maximum(step * index * (index - 1) / 2 + step * index * f.astype(np.float64), 1.0)
     used = (index >= march["first"]) & (index <= march["last"])
@@ -607,7 +610,8 @@ def check_tilt_view(stock: str, patched: str, failures: list) -> None:
     l0, t0 = rng.uniform(0, 1, n).astype(F), rng.uniform(0, 3, n).astype(F)
     before_sum = rng.uniform(0, 5, n).astype(F)
     grown = before_sum + rng.uniform(0, 2, n).astype(F)
-    got_s = Evaluator(patched, cbs, {**seeds, "%mod.tv.l0": l0, "%mod.tv.t0": t0, prev: before_sum, march["optical"]: grown})
+    got_s = Evaluator(patched, {**cbs, "b0 space50": tilt},
+                      {**seeds, "%mod.tv.l0": l0, "%mod.tv.t0": t0, prev: before_sum, march["optical"]: grown})
     far = np.clip((along - P.PLANE_OWN_M[0]) / (P.PLANE_OWN_M[1] - P.PLANE_OWN_M[0]), 0.0, 1.0)
     left = np.maximum(np.maximum(l0.astype(np.float64), np.clip(-q.astype(np.float64) / P.PLANE_LEFT_M, 0.0, 1.0)), far)
     want_t = t0.astype(np.float64) + left * (grown.astype(np.float64) - before_sum.astype(np.float64))
@@ -615,6 +619,13 @@ def check_tilt_view(stock: str, patched: str, failures: list) -> None:
         err = float(np.max(np.abs(got_s(name).astype(np.float64) - want)))
         if err > 1e-3:
             failures.append(f"plane light's shadow {name}: off by {err:.1e}")
+    # with both off, the sums aren't computed: each stays as it was (2026-11-13: skipped, not blended away)
+    sums = ("%mod.tv.mu0", "%mod.tv.raw0", "%mod.tv.f0", "%mod.tv.l0", "%mod.tv.t0")
+    kept = {name: rng.uniform(-1, 1, n).astype(F) for name in sums}
+    off = Evaluator(patched, cbs, {**seeds, **kept, prev: before_sum, march["optical"]: grown})
+    for name in sums:
+        if not np.array_equal(off(next_of(name)), kept[name]):
+            failures.append(f"tilt view and plane light off: {name} changed")
     # the colours
     channels = len(P.find_inside_site(P.Ir(stock))["radiance"])
     mu = rng.uniform(-1, 1, n).astype(F)
@@ -763,6 +774,7 @@ def check(crc: str, stock: str) -> list[str]:
     den = P.Ir(stock).lines[P.Ir(stock).defs[P.view_march_step(ir, edges["ramps"][0][0])[0]]]
     floor = float(P.literal_value(re.search(r"float ([0-9.e+-]+|0x[0-9A-F]+)[,)]", den)[1]))
     q = np.maximum(floor, step.astype(np.float64)) / step.astype(np.float64)
+    ramp_floor = floor
     cap = P.OPTICAL_STEP_TAU / step.astype(np.float64)
     softs = []
     for x, quarter in ms["softs"]:
@@ -798,6 +810,7 @@ def check(crc: str, stock: str) -> list[str]:
     tu, tv = rng.uniform(-0.05, 1.05, N).astype(F), rng.uniform(-0.05, 1.05, N).astype(F)
     tw = np.concatenate([[0.0, 0.5, 31.5 / 32, 1.0, 1.2], rng.uniform(0, 1, N - 5)]).astype(F)
     dseeds.update({vu: tu, vv: tv, vw: tw})
+    dseeds["%mod.tyg.on"] = np.ones(N, bool)  # (the types' gate: its own check is with the types)
     failures, worst = [], 0.0
     for c in SETS:
         c = tuple(c) + (0.0,) * (P.CLOUD_PARAMS_SIZE // 4 - len(c))
@@ -1131,6 +1144,45 @@ def check(crc: str, stock: str) -> list[str]:
     words, grid = types_buffer(rng)
     bad_magic, _ = types_buffer(np.random.default_rng(3), magic=P.TYPES_MAGIC ^ 1)
     ramp0 = edges["ramps"][0][1]
+    # the weights behind their gate (guard_cloud_types): S > -max(-lo, c step) or near the cirrus band. Off it the
+    # view ramp is 0 for any step, and the types reach the density only through the ramp's product (prod)
+    gate = re.search(r"%mod\.tyg\.s = fmul fast float (\S+), (\S+)\n  %mod\.tyg\.t = call float "
+                     r"@dx\.op\.binary\.f32\(i32 35, float %mod\.tyg\.s, float (\S+)\)\n.*\n"
+                     r"  %mod\.tyg\.near = fcmp fast ogt float (\S+), %mod\.tyg\.nt", patched)
+    band_h = re.search(r"%mod\.tyg\.ab = fcmp fast ogt float (\S+), ", patched)
+    if gate is None or "  br i1 %mod.tyg.on, label %mod.tyw.go, " not in patched:
+        failures.append("types: the weights aren't behind their gate")
+    else:
+        gc, neglo = P.literal_value(gate[2]), P.literal_value(gate[3])
+        if gate[1] != step_name:
+            failures.append(f"types: the gate scales {gate[1]}, not the march's step {step_name}")
+        steps = np.geomspace(1.0, 1e5, 500)
+        xb = -np.maximum(gc * steps, neglo) * 8000.0 / np.maximum(ramp_floor, steps)
+        if np.any(1.5 - np.exp2(xb * P.literal_value(P.EDGE_SLOPE)) > 0):
+            failures.append("types: off the gate, the view ramp isn't 0 at every step")
+        if band != (band_h is not None):
+            failures.append("types: the gate and the cirrus band disagree")
+        pir = P.Ir(patched)
+        uses = {}
+        for i, l in enumerate(pir.lines):
+            m = re.match(r"\s+%[\w.]+ = (.*)", l)
+            for tok in set(re.findall(r"%[\w.]+", m[1] if m else l)):
+                uses.setdefault(tok, []).append(i)
+        todo = ["%mod.ty.T", "%mod.ty.m", "%mod.ty.cek", "%mod.ty.ceoff"]
+        seen, leaks = set(todo), []
+        while todo:
+            v = todo.pop()
+            if v == opt["prod"]:
+                continue
+            for i in uses.get(v, []):
+                m = re.match(r"\s+(%[\w.]+) = (\w+)", pir.lines[i])
+                if not m or m[2] == "phi":
+                    leaks.append(pir.lines[i].strip()[:70])
+                elif m[1] not in seen:
+                    seen.add(m[1])
+                    todo.append(m[1])
+        if leaks or opt["prod"] not in seen:
+            failures.append(f"types: the thickness and edges reach more than {opt['prod']}: {leaks[:3]}")
     x64 = ramp_x.astype(np.float64)
     stock_ramp = np.clip(1.5 - np.exp2(x64 * P.literal_value(P.EDGE_SLOPE)), 0, 1)
     for c in TYPE_SETS:
@@ -1250,6 +1302,40 @@ def check(crc: str, stock: str) -> list[str]:
         worst = max(worst, float(np.percentile(err, 99.9)))
         if e > 1e-4:
             failures.append(f"{tag} {opt['prod']}: typed optical thickness rel. error max {e:.1e}")
+        if gate is None:
+            continue
+        # off the gate: as without types (thickness 1, base 0, MSFS's sharpening, no puffs) ...
+        cbs_t = {"b1 space50": cloud, "b0 space50": mod}
+        shut_seeds = {**seeds, "%mod.tyg.on": np.zeros(N, bool)}
+        shut = Evaluator(patched, cbs_t, shut_seeds, sampler=fine_sampler, buffer=words)
+        for name, want in (("%mod.ty.T", 1.0), ("%mod.ty.m", 0.0), ("%mod.ty.pf", 1.0), ("%mod.ty.pf1", 1.0)):
+            if f"  {name} = phi " in patched and not np.all(shut(name) == want):
+                failures.append(f"{tag} {name}: off the gate not {want:g}")
+        if not np.all(shut("%mod.ty.ce") == shut("%mod.ce")):  # (%mod.ce: one value, the cbuffer's)
+            failures.append(f"{tag} %mod.ty.ce: off the gate not MSFS's sharpening")
+        # ... and where the view ramp is 0 (all of off the gate) the density is the same either way
+        xz = rng.uniform(-3.0, -0.51, N).astype(F)
+        zero = {edges["ramps"][0][0]: xz, edges["depth"]: (xz * q * step).astype(F)}
+        on_z = Evaluator(patched, cbs_t, {**seeds, **zero}, sampler=fine_sampler, buffer=words)
+        off_z = Evaluator(patched, cbs_t, {**shut_seeds, **zero}, sampler=fine_sampler, buffer=words)
+        if not np.array_equal(on_z(opt["prod"]), off_z(opt["prod"])):
+            failures.append(f"{tag} {opt['prod']}: where the ramp is 0, the density differs off the gate")
+        # the gate: the coarse value S above -max(-lo, c step), or near the cirrus band, with the types on
+        gseeds = {k: x for k, x in seeds.items() if k != "%mod.tyg.on"}
+        S = rng.uniform(-0.2, 0.1, N).astype(F)
+        gseeds.update({gate[4]: S, "%mod.tyg.a0": np.full(N, 12000.0, F)})
+        if band_h:
+            gseeds[band_h[1]] = height
+        ge = Evaluator(patched, cbs_t, gseeds, sampler=fine_sampler, buffer=words)
+        t32 = np.maximum((step * F(gc)).astype(F), F(neglo))
+        want = S > -t32
+        if band_h:
+            al = np.where(ge("%mod.ci.on"), ge("%mod.ci.alt"), F(12000.0))
+            want |= (height > al - 600) & (height < al + 450)
+        want &= np.asarray(ge("%mod.ty.on"), bool)
+        clear = np.abs(S + t32) > 1e-6
+        if not np.array_equal(np.asarray(ge("%mod.tyg.on"), bool)[clear], want[clear]):
+            failures.append(f"{tag} %mod.tyg.on: the gate isn't S > -max(-lo, c step) or the band")
     worst_shadow = check_shadow(patched, dir_names, light_names, t_name, ms["s"], failures)
     worst_shadow = max(worst_shadow, check_shadow_map(patched, dir_names, light_names, t_name, ms["s"], failures))
     check_light_volume(stock, patched, failures)
