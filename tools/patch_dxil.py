@@ -3685,6 +3685,13 @@ def apply_cloud_types(ir: Ir) -> str:
     cu = wt.max(total, 0.0)
     # the 8 km octave's own noise by type (TYPES_NOISE): their weights S w_x
     noise_w = {c: wt.mul(wt.mul(vals[c], scale[c]), "%mod.ty.S") for c, _, _ in TYPES_NOISE}
+    # ... and how much of them there is, sum |S w_x| (%mod.ty.nw): 0 where the cell has none of those types (or
+    # off the gate), and guard_cloud_types_noise skips their lookups
+    nw = None
+    for c, _, _ in TYPES_NOISE:
+        a = wt.new(f"call float @dx.op.unary.f32(i32 6, float {noise_w[c]})")
+        nw = a if nw is None else wt.add(nw, a)
+    wt.lines.append(f"  %mod.ty.nw = fadd fast float {nw}, 0.000000e+00")
     # the puffs (MSFS's 8 km and 1 km erosion octaves) by type: 1 - S + S (cu + sum w_x p_x)
     for octave, (pf, factors) in enumerate((("%mod.ty.pf", TYPES_PUFF), ("%mod.ty.pf1", TYPES_PUFF_FINE))):
         puff = cu
@@ -3932,7 +3939,8 @@ def guard_cloud_types(ir: Ir) -> str:
     steps, the values as without types there (2026-11-13). Last of the cloud patches: it splits the block, which
     the others' finders don't expect."""
     ir.reindex()
-    run = [i for i, l in enumerate(ir.lines) if re.match(r"\s+%mod\.(?:tyw\d+|ty\.(?:pfm|pf|pf1m|pf1|T|m|ct|ce)) = ", l)]
+    run = [i for i, l in enumerate(ir.lines)
+           if re.match(r"\s+%mod\.(?:tyw\d+|ty\.(?:pfm|pf|pf1m|pf1|T|m|ct|ce|nw)) = ", l)]
     need(run and run[-1] - run[0] + 1 == len(run), "the cloud types' weights aren't one run")
     rest = "\n".join(ir.lines[:run[0]] + ir.lines[run[-1] + 1:])
     plain = {"%mod.ty.T": "1.000000e+00", "%mod.ty.m": "0.000000e+00", "%mod.ty.ce": "%mod.ce",
@@ -3940,6 +3948,38 @@ def guard_cloud_types(ir: Ir) -> str:
     plain = {n: x for n, x in plain.items() if re.search(rf"{re.escape(n)}(?![\w.])", rest)}
     guard_run(ir, run[0], run[-1] + 1, "%mod.tyg.on", "tyw", plain, keep=True)
     return "cloud types skipped in empty air"
+
+
+def guard_cloud_types_noise(ir: Ir) -> str:
+    """The 8 km octave's lookups by type (apply_cloud_types' %mod.tn. run: TYPES_NOISE, two texture reads per step
+    of the view march's erosion octaves) behind the types on and some of those types in the cell (%mod.ty.nw > 0):
+    elsewhere their weights are 0 and %mod.tn.n is the octave's own noise, as it was there anyway (2026-11-17).
+    Before guard_cloud_types: using %mod.ty.nw here has its join give it (0 off its gate)."""
+    ir.reindex()
+    sel = [i for i, l in enumerate(ir.lines) if l.startswith("  %mod.tn.n = select i1 %mod.ty.on, float ")]
+    need(len(sel) == 1, f"{len(sel)} lines give %mod.tn.n")
+    m = re.match(r"  %mod\.tn\.n = select i1 %mod\.ty\.on, float (\S+), float (\S+)$", ir.lines[sel[0]])
+    typed, n1 = m[1], m[2]
+    run = [i for i, l in enumerate(ir.lines) if re.match(r"\s+%mod\.tn\.\d+ = ", l)]
+    need(run and run[-1] - run[0] + 1 == len(run) and run[-1] + 1 == sel[0],
+         "the lookups by type aren't one run before %mod.tn.n")
+    ir.lines[run[0]:run[0]] = ["  %mod.tng.any = fcmp fast ogt float %mod.ty.nw, 0.000000e+00",
+                               "  %mod.tng.on = and i1 %mod.ty.on, %mod.tng.any"]
+    guard_run(ir, run[0] + 2, run[-1] + 3, "%mod.tng.on", "tn", {typed: n1}, keep=True)
+    return "the 8 km octave's lookups by type only where those types are"
+
+
+def guard_cloud_detail(ir: Ir) -> str:
+    """The finer octave (apply_cloud_detail's %mod.fo. lookup and blend: one texture read per view-march step of
+    the erosion octaves) behind C30 on: off, the default, it's skipped instead of blended away (2026-11-17)."""
+    ir.reindex()
+    run = [i for i, l in enumerate(ir.lines) if re.match(r"\s+%mod\.fo\.(?:u|v|w|lod|n|nx|d|k|s3) = ", l)]
+    if not run:  # (variants without the 1 km octave)
+        return "no finer octave"
+    need(run[-1] - run[0] + 1 == len(run), "the finer octave isn't one run")
+    ir.lines[run[0]:run[0]] = ["  %mod.fo.on = xor i1 %mod.cfooff, true"]
+    guard_run(ir, run[0] + 1, run[-1] + 2, "%mod.fo.on", "fo", {"%mod.fo.s3": "%mod.fo.s2"}, keep=True)
+    return "the finer octave skipped while off"
 
 
 def find_light_volume_sums(ir: Ir) -> tuple[str, str, int] | None:
@@ -4743,8 +4783,10 @@ def patch_clouds(text: str) -> tuple[str, str]:
     inside += "; " + apply_cloud_fog_record(ir, inside_site)
     ir.reindex()
     inside += "; " + apply_cloud_tilt_view(ir, march, inside_site)
+    types += "; " + guard_cloud_types_noise(ir)
     types += "; " + guard_cloud_types(ir)
     shape += "; " + guard_cloud_shadow(ir)
+    detail += "; " + guard_cloud_detail(ir)
     user = append_user_dump(ir)
     return finish(ir, cloud=True, debug_uav=True), (f"{colour}; {optical}; {detail}; {shape}; {types}; {ms}; {phase}; "
                                                     f"{inside}; {user}")

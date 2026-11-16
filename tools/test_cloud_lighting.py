@@ -488,14 +488,18 @@ def check_light_volume(stock, patched, failures):
     return err
 
 
-def types_buffer(rng, magic=P.TYPES_MAGIC):
+def types_buffer(rng, magic=P.TYPES_MAGIC, noise_types=True):
     """The debug buffer (float32 words) with the generator's header and a
     random grid of type weights (sum <= 1; some cells all cumulus), and the
     grid as bytes [slice, y, x, type], the anvils' (level, cover) and the
-    towers' (mark, base) per cell."""
+    towers' (mark, base) per cell. noise_types=False: no cell has any of the
+    types with a noise of their own (P.TYPES_NOISE)."""
     n, k = P.TYPES_N, P.TYPES_SLICES
     raw = rng.dirichlet(np.ones(5), size=(k, n, n))[..., :4]
     raw[rng.uniform(size=(k, n, n)) < 0.2] = 0.0
+    if not noise_types:
+        for c, _, _ in P.TYPES_NOISE:
+            raw[..., c] = 0.0
     grid = np.floor(raw * 255).astype(np.uint8)
     words = np.zeros(P.TOWER_REGION // 4 + 2 * n * n, np.uint32)
     words[P.TYPES_REGION // 4:P.TYPES_REGION // 4 + 4] = (magic, 7, 512, np.float32(TYPE_OFFSET).view(np.uint32))
@@ -858,6 +862,10 @@ def check(crc: str, stock: str) -> list[str]:
     dseeds.update({vu: tu, vv: tv, vw: tw})
     dseeds["%mod.tyg.on"] = np.ones(N, bool)  # (the types' gate: its own check is with the types)
     failures, worst = [], 0.0
+    # the finer octave behind C30 on (guard_cloud_detail): off, its lookup is skipped; on or off, the
+    # settings below check its value
+    if detail and "  br i1 %mod.fo.on, label %mod.fo.go, " not in patched:
+        failures.append("detail: the finer octave's lookup isn't behind C30")
     for c in SETS:
         c = tuple(c) + (0.0,) * (P.CLOUD_PARAMS_SIZE // 4 - len(c))
         cloud = np.zeros((P.CLOUD_PARAMS_SIZE // 16, 4))
@@ -1189,6 +1197,11 @@ def check(crc: str, stock: str) -> list[str]:
         failures.append("types: the towers' sky light isn't on the light volume")
     words, grid = types_buffer(rng)
     bad_magic, _ = types_buffer(np.random.default_rng(3), magic=P.TYPES_MAGIC ^ 1)
+    # the lookups by type behind their gate (guard_cloud_types_noise): the types on and some of those types in the
+    # cell; a grid without them (below) skips the lookups
+    no_noise_types, _ = types_buffer(np.random.default_rng(5), noise_types=False)
+    if octave and "  br i1 %mod.tng.on, label %mod.tn.go, " not in patched:
+        failures.append("types: the 8 km octave's lookups by type aren't behind their gate")
     ramp0 = edges["ramps"][0][1]
     # the weights behind their gate (guard_cloud_types): S > -max(-lo, c step) or near the cirrus band. Off it the
     # view ramp is 0 for any step, and the types reach the density only through the ramp's product (prod)
@@ -1283,6 +1296,13 @@ def check(crc: str, stock: str) -> list[str]:
             err = float(np.abs(got("%mod.tn.n").astype(np.float64) - ref).max())
             if err > 2e-5:
                 failures.append(f"{tag} %mod.tn.n: 8 km octave noise by type abs. error max {err:.1e}")
+            # no stratocumulus or altocumulus anywhere: the lookups skipped, the octave's own noise bit for bit
+            bare = Evaluator(patched, {"b1 space50": cloud, "b0 space50": mod}, seeds, sampler=fine_sampler,
+                             buffer=no_noise_types)
+            if np.asarray(bare("%mod.tng.on")).astype(bool).any():
+                failures.append(f"{tag}: without the types with a noise, their lookups still run")
+            if not np.array_equal(bare("%mod.tn.n"), bare(octave["n1"])):
+                failures.append(f"{tag}: without the types with a noise, the 8 km octave isn't its own noise")
         # the towers' sky light: the floor n CB_SIDE_AMBIENT mark sat((h - base) / ramp), and the
         # light volume's sums raised to it exactly
         if lv_sums:
