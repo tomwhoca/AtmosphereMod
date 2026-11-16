@@ -544,11 +544,14 @@ check(model.value("T3").get() === 4 && model.effectiveValue("T3").get() === 7.5,
   // hotkeys (Hotkeys.tsx): the actions, the add-on's notes, other add-ons' keys, the model's messages
   {
     const names = hk.HOTKEY_ACTIONS.map((a) => a.name);
-    check(JSON.stringify([...names].sort()) === JSON.stringify(["capture", "cloudFog", "gpuTimes", "reload", "toggle"]),
-          "hotkeys: the add-on's five actions (hotkeys.h kNames)");
+    check(JSON.stringify([...names].sort()) ===
+          JSON.stringify(["capture", "cloudFog", "gpuTimes", "pause", "reload", "toggle"]),
+          "hotkeys: the add-on's six actions (hotkeys.h kNames)");
     check(hk.DEFAULT_HOTKEYS.toggle === "Ctrl+Shift+F9" && hk.DEFAULT_HOTKEYS.reload === "Ctrl+Shift+F10" &&
           hk.DEFAULT_HOTKEYS.capture === "Ctrl+Shift+F11" && hk.DEFAULT_HOTKEYS.gpuTimes === "Ctrl+Shift+F12" &&
           hk.DEFAULT_HOTKEYS.cloudFog === "", "hotkeys: the shipping keys, the in-cloud fog's none (hotkeys.cpp defaults)");
+    check(hk.HOTKEY_ACTIONS.filter((a) => a.developer).map((a) => a.name).join() === "pause" &&
+          !("pause" in hk.DEFAULT_HOTKEYS), "hotkeys: the pause is for development, not among the shipping keys");
     const keys = { ...hk.DEFAULT_HOTKEYS, cloudFog: "Ctrl+Shift+F8" };
     check(hk.hotkeyNoteText("set:cloudFog", keys) === "In-cloud fog on/off: Ctrl+Shift+F8.", "note: set");
     check(hk.hotkeyNoteText("cleared:capture", keys) === "Capture: no key now.", "note: cleared");

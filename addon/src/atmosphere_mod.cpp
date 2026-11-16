@@ -36,6 +36,7 @@
 #include <reshade.hpp>
 #include <d3d12.h>
 
+#include "ab_test.h"
 #include "cloud_stations.h"
 #include "file_dialog.h"
 #include "hotkeys.h"
@@ -60,6 +61,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#include <thread>
 #include <vector>
 
 using namespace reshade::api;
@@ -345,6 +347,9 @@ struct TrackedPipeline
     pipeline replacement = {};
     uint32_t shader_index = UINT32_MAX;  // the replacement's shader in g_mod_shaders_ran
     device *dev = nullptr;  // the game's pipeline and its replacement belong to it
+    // While an A/B test runs (developer installs, ab_test.h): its sides' pipelines, A's (none: the replacement)
+    // and B's. Only pipelines with a B take part.
+    std::array<pipeline, 2> ab = {};
 };
 
 struct LayoutParam
@@ -367,6 +372,12 @@ struct __declspec(uuid("7c1f3d52-9a4e-4f0b-8e2d-5b6a1c9d0e47")) CommandListState
     // pending: reset while measuring, the start comes with its first command (start_frame_timing)
     uint64_t frame_begin = UINT64_MAX, frame_end = UINT64_MAX;
     bool frame_pending = false;
+    // the A/B test's: the side of the compute pipeline bound (-1: not in the test), the test's frame it was
+    // bound in, its shader; and the list's A/B timestamps, resolved at its close
+    int ab_side = -1;
+    uint64_t ab_frame = 0;
+    uint32_t ab_crc = 0;
+    std::vector<uint32_t> ab_timers;
 };
 
 // Every graphics pipeline's pixel shader and how it writes its targets
@@ -438,6 +449,10 @@ std::atomic<int> g_cloud_tops{2};
 std::atomic<bool> g_fog_tint{false};  // C35 > 0: DebugCapture bit 13 on graphics draws
 std::atomic<bool> g_forward_fog_off{false};  // C35 < 0: no fog on the forward pass (bits 10-12 left 0)
 // The hotkeys (hotkeys.h): <DataPath>/hotkeys.ini, changed from the EFB app's Hotkeys tab. Present thread.
+// A developer's install (ReShade.ini [ATMOSPHEREMOD] Developer=1, set by tools/deploy.py, never by the
+// installer): the development hotkeys (hotkeys.h kDeveloperOnly), and the weather holding in a pause
+// (weather_feed.h), for measuring.
+bool g_developer = false;
 hotkeys::Keys g_hotkeys = hotkeys::defaults();
 hotkeys::Learner g_hotkey_learner;
 hotkeys::GlassFix g_glass_fix;
@@ -560,6 +575,38 @@ struct GpuTimingCounts
     std::map<ID3D12CommandQueue *, uint64_t> queues;  // -> its timestamp frequency
     std::string first;  // the first frame read back, in detail
 } g_gpu_counts;
+// The A/B test (ab_test.h; developer installs only). The present thread takes its request, notes which of the
+// mod's compute pipelines the game binds (scouting), creates the sets' pipelines for those, and turns g_ab_on
+// on: then each frame has one side, every pair of frames one of each in a random order (ab_side_now), and
+// each dispatch of a pipeline in the test is timed on its own (ab_timed_dispatch). Afterwards it reads the
+// times back and writes the result (advance_ab).
+constexpr uint32_t kAbTimers = 16384;     // two per timed dispatch
+constexpr uint64_t kAbWarmupFrames = 30;  // the test's first frames, not counted (the new pipelines' first use)
+constexpr uint64_t kAbPollFrames = 30;    // how often the request file is looked for
+constexpr uint64_t kAbScoutFrames = 60;   // frames to see which pipelines the game binds
+ID3D12QueryHeap *g_ab_heap = nullptr;     // the game's device (g_debug_device)
+resource g_ab_readback = {};
+std::atomic<uint32_t> g_ab_next{0};       // timestamps used
+std::atomic<bool> g_ab_scouting{false};
+std::atomic<bool> g_ab_on{false};
+struct AbStamp
+{
+    uint64_t frame;
+    int side;
+    uint32_t crc, timer;
+    uint32_t x, y, z;
+    bool background;  // the sim's window wasn't in front: another window may have had the GPU (left out)
+};
+std::atomic<bool> g_ab_foreground{true};  // the sim's window in front, as of the last present
+std::mutex g_ab_mutex;                    // guards the fields below
+std::unordered_set<uint64_t> g_ab_bound;  // scouting: the mod's compute pipelines the game bound
+// the test's frame: a new one (and the other side) when a pipeline in the test is bound again, so a frame is
+// one of each that the game renders, whatever the presents do (frame generation presents twice)
+std::unordered_set<uint64_t> g_ab_in_frame;
+uint64_t g_ab_frame = 0;
+uint64_t g_ab_seed = 0;  // the sides' order (ab::side_of), new each test
+int g_ab_side = 0;       // the frame's
+std::vector<AbStamp> g_ab_stamps;
 bool g_inject = false;
 bool g_inject_graphics = false;
 fs::path g_data_dir;
@@ -2165,11 +2212,314 @@ uint32_t next_capture_id()
         for (const auto &f : fs::directory_iterator(g_data_dir / "logs" / "captures", ec))
         {
             const std::string name = f.path().filename().string();
-            if (name.ends_with("_sky_atmosphere.txt") || name.ends_with("_draws.tsv"))
+            if (name.ends_with("_sky_atmosphere.txt") || name.ends_with("_draws.tsv") || name.ends_with("_ab.tsv"))
                 g_capture_id = std::max(g_capture_id, uint32_t(std::strtoul(name.c_str(), nullptr, 10)));
         }
     }
     return ++g_capture_id;
+}
+
+// The A/B test's progress (ab_test.h), on the present thread.
+struct AbRun
+{
+    enum class Phase
+    {
+        idle,
+        scouting,  // which of the mod's compute pipelines does the game bind?
+        running,   // the sides take turns
+        reading,   // waiting for the GPU to have run the last frames
+    } phase = Phase::idle;
+    ab::Request request;
+    uint32_t id = 0;
+    uint64_t until = 0;  // scouting: its end; running: the time-out; reading: when to read
+    std::string pipelines;  // "entry 0x<crc>, ..." in the test
+} g_ab_run;
+
+std::string ab_side_name(const std::string &set)
+{
+    return set.empty() ? "the loaded shaders" : set;
+}
+
+// Tones for whoever holds the view (Beep blocks, so on a thread of its own): measuring begins (one), the result is
+// in (two, rising), the test failed (one, low).
+enum class AbTone
+{
+    start,
+    done,
+    failed,
+};
+void ab_beep(AbTone tone)
+{
+    std::thread([tone] {
+        switch (tone)
+        {
+        case AbTone::start:
+            Beep(660, 180);
+            break;
+        case AbTone::done:
+            Beep(660, 140);
+            Beep(990, 220);
+            break;
+        case AbTone::failed:
+            Beep(300, 450);
+            break;
+        }
+    }).detach();
+}
+
+// The test's end: its line to events.log and to <DataPath>/ab/result.txt (tools/ab.py waits for it).
+void finish_ab(const std::string &line, bool ok)
+{
+    event(ok ? reshade::log::level::info : reshade::log::level::warning,
+          "A/B " + std::to_string(g_ab_run.id) + ": " + line);
+    std::ofstream(g_data_dir / "ab" / "result.txt") << g_ab_run.id << '\n' << line << '\n';
+    g_ab_run.phase = AbRun::Phase::idle;
+    ab_beep(ok ? AbTone::done : AbTone::failed);
+}
+
+// The .cso files of <DataPath>/ab/<set>, by crc.
+std::unordered_map<uint32_t, std::vector<uint8_t>> load_ab_set(const std::string &set)
+{
+    std::unordered_map<uint32_t, std::vector<uint8_t>> result;
+    std::error_code ec;
+    for (const auto &item : fs::directory_iterator(g_data_dir / "ab" / set, ec))
+    {
+        if (item.path().extension() != ".cso")
+            continue;
+        try
+        {
+            const auto crc = static_cast<uint32_t>(std::stoul(item.path().stem().string(), nullptr, 16));
+            if (std::vector<uint8_t> code = read_file(item.path()); !code.empty())
+                result[crc] = std::move(code);
+        }
+        catch (const std::exception &)
+        {
+        }
+    }
+    return result;
+}
+
+// After scouting: the sets' pipelines for the mod's compute pipelines the game bound whose shader B has, and the
+// test on.
+void start_ab(uint64_t frame)
+{
+    const ab::Request &request = g_ab_run.request;
+    const auto b = load_ab_set(request.b);
+    const auto a = request.a.empty() ? std::unordered_map<uint32_t, std::vector<uint8_t>>{} : load_ab_set(request.a);
+    if (b.empty() || (!request.a.empty() && a.empty()))
+        return finish_ab("no shaders in " + (g_data_dir / "ab" / (b.empty() ? request.b : request.a)).string(), false);
+    struct Job
+    {
+        uint64_t handle;
+        uint32_t crc;
+        pipeline_layout layout;
+        device *dev;
+        std::string entry;
+    };
+    std::vector<Job> jobs;
+    {
+        const std::shared_lock lock(g_mutex);
+        const std::lock_guard ab_lock(g_ab_mutex);
+        for (const uint64_t handle : g_ab_bound)
+            if (const auto it = g_pipelines.find(handle); it != g_pipelines.end())
+            {
+                const TrackedPipeline &info = it->second;
+                if (!info.graphics && info.replacement.handle != 0 && info.dev != nullptr && b.contains(info.crc) &&
+                    (a.empty() || a.contains(info.crc)) && g_layouts.contains(info.layout.handle))
+                    jobs.push_back({handle, info.crc, info.layout, info.dev, info.entry});
+            }
+    }
+    if (jobs.empty())
+        return finish_ab("none of the mod's pipelines the game ran has a shader in ab/" + request.b +
+                         " (clouds in view? the mod on?)", false);
+    g_ab_run.pipelines.clear();
+    for (const Job &job : jobs)
+    {
+        const pipeline pa = a.empty() ? pipeline{} : create_replacement(job.dev, job.layout, a.at(job.crc), job.crc);
+        const pipeline pb = create_replacement(job.dev, job.layout, b.at(job.crc), job.crc);
+        const std::unique_lock lock(g_mutex);
+        const auto it = g_pipelines.find(job.handle);
+        if (it == g_pipelines.end() || pb.handle == 0 || (!a.empty() && pa.handle == 0))
+        {
+            retire(job.dev, pa);
+            retire(job.dev, pb);
+            continue;
+        }
+        it->second.ab = {pa, pb};
+        g_ab_run.pipelines += (g_ab_run.pipelines.empty() ? "" : ", ") + job.entry + ' ' + hex32(job.crc);
+    }
+    if (g_ab_run.pipelines.empty())
+        return finish_ab("the sets' pipelines couldn't be created", false);
+    // no stale times: the readback zeroed (a list that never ran leaves its slots 0)
+    void *mapped = nullptr;
+    if (g_debug_device != nullptr &&
+        g_debug_device->map_buffer_region(g_ab_readback, 0, uint64_t(kAbTimers) * 8, map_access::write_only, &mapped) &&
+        mapped)
+    {
+        std::memset(mapped, 0, size_t(kAbTimers) * 8);
+        g_debug_device->unmap_buffer_region(g_ab_readback);
+    }
+    {
+        const std::lock_guard lock(g_ab_mutex);
+        g_ab_stamps.clear();
+        g_ab_in_frame.clear();
+        g_ab_frame = 0;
+        g_ab_seed = GetTickCount64() ^ (uint64_t(g_ab_run.id) << 32);
+        g_ab_side = ab::side_of(0, g_ab_seed);
+    }
+    g_ab_next = 0;
+    // (with frame generation two presents a frame; then some to spare)
+    g_ab_run.until = frame + 3 * (kAbWarmupFrames + request.frames) + 600;
+    g_ab_run.phase = AbRun::Phase::running;
+    g_ab_on = true;
+    ab_beep(AbTone::start);
+    event(reshade::log::level::info, "A/B " + std::to_string(g_ab_run.id) + ": " + ab_side_name(request.a) +
+          " vs " + request.b + ", " + std::to_string(request.frames) + " frames, taking turns: " + g_ab_run.pipelines);
+}
+
+// The times read back: the result, every timed dispatch to captures/<id>_ab.tsv, and the sets' pipelines retired.
+void read_ab()
+{
+    std::vector<AbStamp> stamps;
+    {
+        const std::lock_guard lock(g_ab_mutex);
+        stamps.swap(g_ab_stamps);
+    }
+    const uint32_t used = std::min(g_ab_next.load(), kAbTimers);
+    const uint64_t frequency = g_timer_frequency.load();
+    std::vector<uint64_t> ticks;
+    void *mapped = nullptr;
+    if (used > 0 && g_debug_device != nullptr &&
+        g_debug_device->map_buffer_region(g_ab_readback, 0, uint64_t(used) * 8, map_access::read_only, &mapped) &&
+        mapped)
+    {
+        ticks.assign(static_cast<const uint64_t *>(mapped), static_cast<const uint64_t *>(mapped) + used);
+        g_debug_device->unmap_buffer_region(g_ab_readback);
+    }
+    std::vector<ab::Sample> samples;
+    const fs::path dir = g_data_dir / "logs" / "captures";
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    std::ofstream file(dir / (std::to_string(g_ab_run.id) + "_ab.tsv"));
+    file << "frame\tside\tcrc32\tgroups\tin front\tgpu us\n";
+    size_t untimed = 0;
+    std::unordered_set<uint64_t> background;  // frames with the sim's window behind another
+    for (const AbStamp &s : stamps)
+    {
+        if (s.background)
+            background.insert(s.frame);
+        double us = -1.0;
+        if (frequency > 0 && s.timer + 1 < ticks.size())
+        {
+            const uint64_t t0 = ticks[s.timer], t1 = ticks[s.timer + 1];
+            if (t0 != 0 && t1 >= t0 && t1 - t0 < frequency)  // (under a second: else not run)
+                us = double(t1 - t0) * 1e6 / double(frequency);
+        }
+        char line[160];
+        snprintf(line, sizeof(line), "%" PRIu64 "\t%c\t%s\t%u x %u x %u\t%s\t", s.frame, s.side == 0 ? 'A' : 'B',
+                 hex32(s.crc).c_str(), s.x, s.y, s.z, s.background ? "no" : "yes");
+        file << line;
+        if (us < 0.0)
+        {
+            file << "-\n";
+            ++untimed;
+            continue;
+        }
+        snprintf(line, sizeof(line), "%.1f\n", us);
+        file << line;
+        if (!s.background)
+            samples.push_back({s.frame, s.side, us});
+    }
+    {
+        const std::unique_lock lock(g_mutex);
+        for (auto &[handle, info] : g_pipelines)
+            if (info.ab[0].handle != 0 || info.ab[1].handle != 0)
+            {
+                retire(info.dev, info.ab[0]);
+                retire(info.dev, info.ab[1]);
+                info.ab = {};
+            }
+    }
+    const ab::Summary summary = ab::summarize(samples, kAbWarmupFrames);
+    std::string line = ab::describe(summary, ab_side_name(g_ab_run.request.a), g_ab_run.request.b) + "; " +
+                       g_ab_run.pipelines;
+    if (untimed > 0)
+        line += "; " + std::to_string(untimed) + " dispatch(es) without a time";
+    if (!background.empty())
+        line += "; " + std::to_string(background.size()) +
+                " frame(s) left out: the sim's window wasn't in front (keep it in front while a test runs)";
+    finish_ab(line, summary.valid());
+}
+
+// Once per present on a developer's install: the A/B test's request (<DataPath>/ab/request.txt), and the test.
+// window: the sim's, to see whether it's in front.
+void advance_ab(uint64_t frame, void *window)
+{
+    if (g_ab_run.phase != AbRun::Phase::idle)
+    {
+        const HWND front = GetForegroundWindow();
+        g_ab_foreground.store(front != nullptr && window != nullptr &&
+                                  GetAncestor(front, GA_ROOT) == GetAncestor(static_cast<HWND>(window), GA_ROOT),
+                              std::memory_order_relaxed);
+    }
+    switch (g_ab_run.phase)
+    {
+    case AbRun::Phase::idle:
+    {
+        const fs::path file = g_data_dir / "ab" / "request.txt";
+        std::error_code ec;
+        if (frame % kAbPollFrames != 0 || !fs::exists(file, ec))
+            return;
+        std::string text;
+        {
+            std::ifstream in(file);
+            text.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        }
+        fs::remove(file, ec);
+        g_ab_run = {};
+        g_ab_run.id = next_capture_id();
+        g_ab_run.request = ab::parse_request(text);
+        if (!g_ab_run.request.error.empty())
+            return finish_ab("request.txt: " + g_ab_run.request.error, false);
+        if (g_ab_heap == nullptr)
+            return finish_ab("no GPU timestamps (see the start of this log)", false);
+        if (!g_enabled.load())
+            return finish_ab("the mod is off (its toggle hotkey): nothing to compare", false);
+        {
+            const std::lock_guard lock(g_ab_mutex);
+            g_ab_bound.clear();
+        }
+        g_ab_scouting = true;
+        g_ab_run.until = frame + kAbScoutFrames;
+        g_ab_run.phase = AbRun::Phase::scouting;
+        return;
+    }
+    case AbRun::Phase::scouting:
+        if (frame < g_ab_run.until)
+            return;
+        g_ab_scouting = false;
+        start_ab(frame);
+        return;
+    case AbRun::Phase::running:
+    {
+        uint64_t done;
+        {
+            const std::lock_guard lock(g_ab_mutex);
+            done = g_ab_frame;
+        }
+        if (done < kAbWarmupFrames + g_ab_run.request.frames && frame < g_ab_run.until &&
+            g_ab_next.load() + 64 < kAbTimers)
+            return;
+        g_ab_on = false;
+        g_ab_run.until = frame + kGpuTimerDelayFrames;
+        g_ab_run.phase = AbRun::Phase::reading;
+        return;
+    }
+    case AbRun::Phase::reading:
+        if (frame >= g_ab_run.until)
+            read_ab();
+        return;
+    }
 }
 
 // Ctrl+Shift+F12: the draw log alone, for its GPU times. No capture is armed, so no
@@ -2368,6 +2718,18 @@ void create_debug_resources(device *dev)
             event(reshade::log::level::warning,
                   "failed to create the performance report's GPU timestamps; it measures the frame rate only");
         }
+        // the A/B test's (developer installs only)
+        const D3D12_QUERY_HEAP_DESC ab_timers = {D3D12_QUERY_HEAP_TYPE_TIMESTAMP, kAbTimers, 0};
+        if (g_developer &&
+            (!dev->create_resource(resource_desc(uint64_t(kAbTimers) * 8, memory_heap::readback,
+                                                 resource_usage::copy_dest),
+                                   nullptr, resource_usage::copy_dest, &g_ab_readback) ||
+             FAILED(reinterpret_cast<ID3D12Device *>(dev->get_native())
+                        ->CreateQueryHeap(&ab_timers, IID_PPV_ARGS(&g_ab_heap)))))
+        {
+            g_ab_heap = nullptr;
+            event(reshade::log::level::warning, "failed to create the A/B test's GPU timestamps; no A/B tests");
+        }
         event(reshade::log::level::info, "debug resources created");
         return;
     }
@@ -2400,8 +2762,9 @@ void on_destroy_device(device *dev)
                 ++it;
                 continue;
             }
-            if (it->second.replacement.handle != 0)
-                pipes.push_back(it->second.replacement);
+            for (const pipeline p : {it->second.replacement, it->second.ab[0], it->second.ab[1]})
+                if (p.handle != 0)
+                    pipes.push_back(p);
             it = g_pipelines.erase(it);  // (the game's pipeline goes with its device)
         }
     }
@@ -2435,6 +2798,12 @@ void on_destroy_device(device *dev)
         std::exchange(g_frame_timer_heap, nullptr)->Release();
     if (g_frame_timer_readback.handle != 0)
         dev->destroy_resource(std::exchange(g_frame_timer_readback, resource{}));
+    g_ab_on = false;
+    g_ab_scouting = false;
+    if (g_ab_heap != nullptr)
+        std::exchange(g_ab_heap, nullptr)->Release();
+    if (g_ab_readback.handle != 0)
+        dev->destroy_resource(std::exchange(g_ab_readback, resource{}));
 }
 
 void on_init_command_list(command_list *cmd_list)
@@ -2516,6 +2885,14 @@ void on_close_command_list(command_list *cmd_list)
             native->ResolveQueryData(g_frame_timer_heap, D3D12_QUERY_TYPE_TIMESTAMP, UINT(n % kFrameTimers), 1,
                                      reinterpret_cast<ID3D12Resource *>(g_frame_timer_readback.handle),
                                      (n % kFrameTimers) * 8);
+    }
+    if (state != nullptr && !state->ab_timers.empty() && g_ab_heap != nullptr)
+    {
+        auto *native = reinterpret_cast<ID3D12GraphicsCommandList *>(cmd_list->get_native());
+        for (const uint32_t timer : state->ab_timers)
+            native->ResolveQueryData(g_ab_heap, D3D12_QUERY_TYPE_TIMESTAMP, timer, 2,
+                                     reinterpret_cast<ID3D12Resource *>(g_ab_readback.handle), uint64_t(timer) * 8);
+        state->ab_timers.clear();
     }
     if (state == nullptr || state->timers.empty() || g_timer_heap == nullptr)
         return;
@@ -2722,6 +3099,7 @@ void on_init_pipeline(device *dev, pipeline_layout layout, uint32_t count, const
 void on_destroy_pipeline(device *dev, pipeline pipe)
 {
     pipeline replacement = {};
+    std::array<pipeline, 2> ab_pipes = {};
     {
         const std::unique_lock lock(g_mutex);
         g_graphics.erase(pipe.handle);
@@ -2729,19 +3107,59 @@ void on_destroy_pipeline(device *dev, pipeline pipe)
         if (it == g_pipelines.end())
             return;
         replacement = it->second.replacement;
+        ab_pipes = it->second.ab;
         g_pipelines.erase(it);
     }
     // The game only destroys a pipeline once the GPU is done with it, and the
-    // replacement was only ever used in its place.
-    if (replacement.handle != 0)
-        dev->destroy_pipeline(replacement);
+    // replacement (and an A/B test's) was only ever used in its place.
+    for (const pipeline p : {replacement, ab_pipes[0], ab_pipes[1]})
+        if (p.handle != 0)
+            dev->destroy_pipeline(p);
+}
+
+// An A/B test's side for a pipeline in it bound now, and the test's frame: a pipeline bound again begins the
+// next frame, its side drawn with the others of its pair (ab::side_of).
+int ab_side_now(pipeline pipe, uint64_t &frame)
+{
+    const std::lock_guard lock(g_ab_mutex);
+    if (!g_ab_in_frame.insert(pipe.handle).second)
+    {
+        g_ab_in_frame = {pipe.handle};
+        ++g_ab_frame;
+        g_ab_side = ab::side_of(g_ab_frame, g_ab_seed);
+    }
+    frame = g_ab_frame;
+    return g_ab_side;
+}
+
+// An A/B test's pipeline dispatched: timestamps right before and after it, so its time is its own. The add-on
+// dispatches it here (on the native list: no events) and tells ReShade to skip the game's call.
+bool ab_timed_dispatch(command_list *cmd_list, uint32_t x, uint32_t y, uint32_t z)
+{
+    auto *state = cmd_list->get_private_data<CommandListState>();
+    if (state == nullptr || state->ab_side < 0 || g_ab_heap == nullptr || !state->timeable ||
+        cmd_list->get_device() != g_debug_device)
+        return false;
+    const uint32_t timer = g_ab_next.fetch_add(2, std::memory_order_relaxed);
+    if (timer + 2 > kAbTimers)
+        return false;
+    auto *native = reinterpret_cast<ID3D12GraphicsCommandList *>(cmd_list->get_native());
+    native->EndQuery(g_ab_heap, D3D12_QUERY_TYPE_TIMESTAMP, timer);
+    native->Dispatch(x, y, z);
+    native->EndQuery(g_ab_heap, D3D12_QUERY_TYPE_TIMESTAMP, timer + 1);
+    state->ab_timers.push_back(timer);
+    const std::lock_guard lock(g_ab_mutex);
+    g_ab_stamps.push_back({state->ab_frame, state->ab_side, state->ab_crc, timer, x, y, z,
+                           !g_ab_foreground.load(std::memory_order_relaxed)});
+    return true;
 }
 
 void on_bind_pipeline(command_list *cmd_list, pipeline_stage stages, pipeline pipe)
 {
     start_frame_timing(cmd_list);
     pipeline replacement = {};
-    uint32_t shader_index = UINT32_MAX;
+    std::array<pipeline, 2> ab_pipes = {};
+    uint32_t shader_index = UINT32_MAX, crc = 0;
     bool graphics = true;  // every compute pipeline is tracked, so an unknown one is graphics
     bool tracked = false, shaded = false, cloud = false;
     {
@@ -2751,12 +3169,15 @@ void on_bind_pipeline(command_list *cmd_list, pipeline_stage stages, pipeline pi
             tracked = true;
             graphics = it->second.graphics;
             replacement = it->second.replacement;
+            ab_pipes = it->second.ab;
             shader_index = it->second.shader_index;
+            crc = it->second.crc;
             cloud = it->second.cloud_param != UINT32_MAX;
         }
         shaded = g_graphics.contains(pipe.handle);
     }
-    if (auto *state = cmd_list->get_private_data<CommandListState>())
+    auto *state = cmd_list->get_private_data<CommandListState>();
+    if (state != nullptr)
     {
         if (graphics)
         {
@@ -2766,13 +3187,33 @@ void on_bind_pipeline(command_list *cmd_list, pipeline_stage stages, pipeline pi
         else
         {
             state->compute = pipe;
+            state->ab_side = -1;
         }
+    }
+    if (!graphics && replacement.handle != 0 && g_ab_scouting.load(std::memory_order_relaxed))
+    {
+        const std::lock_guard lock(g_ab_mutex);
+        g_ab_bound.insert(pipe.handle);
     }
     // A compute replacement only with the cloud tunables' slot to give it (before_dispatch): until the first present
     // has written one, or if its root signature has no root CBV for it, the game's own pipeline runs.
     if (replacement.handle != 0 && g_enabled.load(std::memory_order_relaxed) &&
         (graphics || (cloud && g_cloud_settings_va.load(std::memory_order_acquire) != 0)))
     {
+        // (an A/B test: this frame's side)
+        if (!graphics && ab_pipes[1].handle != 0 && g_ab_on.load(std::memory_order_relaxed))
+        {
+            uint64_t frame;
+            const int side = ab_side_now(pipe, frame);
+            if (ab_pipes[side].handle != 0)
+                replacement = ab_pipes[side];
+            if (state != nullptr)
+            {
+                state->ab_side = side;
+                state->ab_frame = frame;
+                state->ab_crc = crc;
+            }
+        }
         cmd_list->bind_pipeline(stages, replacement);
         if (g_counting_mod_shaders.load(std::memory_order_relaxed))
         {
@@ -2960,7 +3401,7 @@ bool on_dispatch(command_list *cmd_list, uint32_t x, uint32_t y, uint32_t z)
     log_dispatch_draw_log(cmd_list, std::to_string(x) + " x " + std::to_string(y) + " x " + std::to_string(z) +
                                         " groups");
     before_dispatch(cmd_list, std::to_string(x) + '\t' + std::to_string(y) + '\t' + std::to_string(z));
-    return false;
+    return ab_timed_dispatch(cmd_list, x, y, z);
 }
 
 // Draws with a tracked graphics pipeline bound are logged, and replacements
@@ -3169,8 +3610,9 @@ std::string hotkeys_summary()
 {
     std::string keys;
     for (int a = 0; a < hotkeys::kActions; ++a)
-        keys += std::string(a > 0 ? ", " : "") + hotkeys::kNames[a] + ' ' +
-                (g_hotkeys[a].none() ? "none" : hotkeys::text(g_hotkeys[a]));
+        if (g_developer || !hotkeys::kDeveloperOnly[a])
+            keys += std::string(keys.empty() ? "" : ", ") + hotkeys::kNames[a] + ' ' +
+                    (g_hotkeys[a].none() ? "none" : hotkeys::text(g_hotkeys[a]));
     return keys;
 }
 
@@ -3299,7 +3741,7 @@ std::string settings_state(bool pending)
            ",\"presetNote\":\"" + json_text(g_preset_note) + "\"" +
            (g_report_asked ? ",\"report\":" + perf::state_json(g_measurement, perf::Clock::now(), g_report_system)
                            : std::string()) +
-           ",\"hotkeys\":" + hotkeys::json(g_hotkeys) + ",\"learning\":\"" +
+           ",\"hotkeys\":" + hotkeys::json(g_hotkeys, g_developer) + ",\"learning\":\"" +
            (g_hotkey_learner.action() >= 0 ? hotkeys::kNames[g_hotkey_learner.action()] : "") +
            "\",\"hotkeyNote\":\"" + json_text(g_hotkey_learner.note()) + "\",\"cloudFogOff\":" +
            (g_cloud_fog_off.load(std::memory_order_relaxed) ? "true" : "false") +
@@ -3729,7 +4171,8 @@ std::array<bool, hotkeys::kActions> poll_hotkeys(effect_runtime *runtime)
     for (int a = 0; a < hotkeys::kActions; ++a)
     {
         const hotkeys::Key &k = g_hotkeys[a];
-        fired[a] = !k.none() && k.ctrl == ctrl && k.shift == shift && k.alt == alt && runtime->is_key_pressed(k.vk);
+        fired[a] = !k.none() && k.ctrl == ctrl && k.shift == shift && k.alt == alt && runtime->is_key_pressed(k.vk) &&
+                   (g_developer || !hotkeys::kDeveloperOnly[a]);
     }
     return fired;
 }
@@ -3764,6 +4207,12 @@ void on_present(effect_runtime *runtime)
     }
     if (keys[hotkeys::kCloudFog])
         set_cloud_fog_off(!g_cloud_fog_off.load(std::memory_order_relaxed), key_name(hotkeys::kCloudFog));
+    if (keys[hotkeys::kPause])
+    {
+        event(reshade::log::level::info, std::string("the sim's full pause ") + (weather::sim_paused() ? "off" : "on") +
+                                             " (" + key_name(hotkeys::kPause) + ")");
+        weather::toggle_pause();
+    }
     // (the EFB app's unsaved changes go to tunables.ini before the reload reads it; the state goes out at once
     // when a hotkey changed what it shows)
     const bool shown = keys[hotkeys::kToggle] || keys[hotkeys::kCloudFog] ||
@@ -3782,6 +4231,8 @@ void on_present(effect_runtime *runtime)
     update_effective_tunables();
     write_cloud_settings();
     upload_anchor_table(runtime, frame);
+    if (g_developer)
+        advance_ab(frame, runtime->get_hwnd());
 }
 
 void open_logs()
@@ -3816,7 +4267,11 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE re
     reshade::get_config_value(nullptr, "ATMOSPHEREMOD", "InjectRootSignature", g_inject);
     reshade::get_config_value(nullptr, "ATMOSPHEREMOD", "InjectGraphicsRootSignature", g_inject_graphics);
     reshade::get_config_value(nullptr, "ATMOSPHEREMOD", "RegisterSpace", g_mod_space);
+    reshade::get_config_value(nullptr, "ATMOSPHEREMOD", "Developer", g_developer);
     open_logs();
+    if (g_developer)
+        event(reshade::log::level::info, "developer install (ReShade.ini Developer=1): the pause hotkey, and the weather "
+                                         "holds in any pause");
     if (g_mod_space != 50)
         event(reshade::log::level::info, "root parameters in register space " + std::to_string(g_mod_space) + " (installed with --renodx)");
     load_names();
@@ -3837,7 +4292,7 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE re
     bool weather_feed = true;
     reshade::get_config_value(nullptr, "ATMOSPHEREMOD", "WeatherFeed", weather_feed);
     if (weather_feed)
-        weather::start(g_data_dir / "logs");
+        weather::start(g_data_dir / "logs", g_developer);
 
     reshade::register_event<reshade::addon_event::destroy_device>(on_destroy_device);
     reshade::register_event<reshade::addon_event::init_command_list>(on_init_command_list);

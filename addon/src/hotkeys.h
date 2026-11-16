@@ -26,9 +26,13 @@ enum Action
     kCapture,   // the constants the replacements see, and the draws (developers)
     kGpuTimes,  // the draws' GPU times (developers)
     kCloudFog,  // the in-cloud fog off for now, and on again (not saved: on at every start)
+    kPause,     // the sim's full pause on and off, for measuring (weather_feed.h toggle_pause)
     kActions,
 };
-constexpr const char *kNames[kActions] = {"toggle", "reload", "capture", "gpuTimes", "cloudFog"};
+constexpr const char *kNames[kActions] = {"toggle", "reload", "capture", "gpuTimes", "cloudFog", "pause"};
+// Actions for development: they fire, and the app lists them, only on a developer's install (ReShade.ini
+// [ATMOSPHEREMOD] Developer=1, which tools/deploy.py sets and the installer never does).
+constexpr bool kDeveloperOnly[kActions] = {false, false, false, false, false, true};
 
 // The action of that name, or -1.
 int action(const std::string &name);
@@ -45,7 +49,8 @@ struct Key
 };
 using Keys = std::array<Key, kActions>;
 
-// Ctrl+Shift+F9 .. F12 as before; the in-cloud fog's none (so it can't take a key anything else has).
+// Ctrl+Shift+F9 .. F12 as before; the in-cloud fog's and the pause's none (so they can't take a key anything
+// else has).
 Keys defaults();
 
 // The keys a hotkey can be: F1-F12, A-Z, 0-9 (virtual-key codes).
@@ -67,8 +72,8 @@ bool usable(const Key &key);
 Keys load(const std::filesystem::path &file);
 bool save(const std::filesystem::path &file, const Keys &keys);
 
-// For the app's state: {"toggle":"Ctrl+Shift+F9",...}
-std::string json(const Keys &keys);
+// For the app's state: {"toggle":"Ctrl+Shift+F9",...}; the development actions only for a developer.
+std::string json(const Keys &keys, bool developer);
 
 // The keyboard in a frame while a key is learned: the first learnable key pressed (0 for none), the
 // modifiers down, and Esc (cancel) and Backspace (no key).

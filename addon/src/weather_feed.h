@@ -22,8 +22,9 @@ namespace weather
 constexpr size_t kTunableCount = 14;  // T0..T13, as in the add-on
 
 // Starts the SimConnect thread; it retries until the sim's SimConnect server
-// is up. Log: <log_dir>/weather.log.
-void start(const std::filesystem::path &log_dir);
+// is up. Log: <log_dir>/weather.log. developer: a developer's install, with
+// the pause hotkey and the weather holding in a pause (sim_paused).
+void start(const std::filesystem::path &log_dir, bool developer);
 
 // Signals the thread and waits briefly; never blocks indefinitely (it may be
 // called while the process is exiting).
@@ -85,6 +86,18 @@ size_t cloud_anchor_table(std::array<uint8_t, kAnchorTableBytes> &out);
 // stations around instead of the nearest one's. Any thread.
 void set_haze_field(bool on);
 bool haze_field();
+
+// On a developer's install (start), for measuring: the sim's pause (SimConnect's Pause_EX1: the full pause, the
+// active pause, or the aircraft's simulation paused); false elsewhere. While it lasts, the METAR fades and crossfades (cloud_anchor_table) and the haze's smoothing (apply)
+// hold. The sim says when each pause begins and ends (MSFS 2024, 16 Nov 2026: PAUSE_SET 1 gives flag 1, the Esc
+// menu 8, the active pause 4). Should it not say that a full or Esc-menu pause is over, its simulation clock
+// running again ends it (SIMULATION TIME stops in those, not in the active pause; the UTC runs on in all).
+// Any thread.
+bool sim_paused();
+
+// The pause hotkey (a developer's install only): the sim's full pause on, or off while the sim is paused. The feed's thread sends PAUSE_SET
+// within 50 ms (MSFS 2024's own Toggle Pause key, PAUSE_TOGGLE, no longer pauses). Any thread.
+void toggle_pause();
 
 // How strong the haze from METARs is (T16): 1 as they report, 0..2.
 void set_haze_strength(float strength);

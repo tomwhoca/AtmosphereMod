@@ -21,6 +21,8 @@ interface HotkeyAction {
   tip: string;
   /** "" for none. */
   default: string;
+  /** For development: shown only when the add-on lists it, on a developer's install (hotkeys.h kDeveloperOnly). */
+  developer?: boolean;
 }
 
 /** The add-on's waiting time for the keys (hotkeys.h Learner::kTimeoutSeconds). */
@@ -39,6 +41,11 @@ export const HOTKEY_ACTIONS: HotkeyAction[] = [
       + "at the next start. No key until you choose one.",
   },
   {
+    name: "pause", label: "Pause on/off", default: "", developer: true,
+    tip: "Development: the sim's full pause, on and off, for measuring. In any pause the mod's METAR changes "
+      + "wait until the sim runs again.",
+  },
+  {
     name: "reload", label: "Reload tunables.ini", default: "Ctrl+Shift+F10",
     tip: "Reads tunables.ini and the mod's shaders again, as the button on each tab: after editing the "
       + "file by hand.",
@@ -55,9 +62,9 @@ export const HOTKEY_ACTIONS: HotkeyAction[] = [
   },
 ];
 
-/** The shipping keys, until the add-on says. */
-export const DEFAULT_HOTKEYS: Readonly<Record<string, string>> =
-  HOTKEY_ACTIONS.reduce<Record<string, string>>((all, a) => ({ ...all, [a.name]: a.default }), {});
+/** The shipping keys, until the add-on says (no development ones). */
+export const DEFAULT_HOTKEYS: Readonly<Record<string, string>> = HOTKEY_ACTIONS.filter((a) => !a.developer)
+  .reduce<Record<string, string>>((all, a) => ({ ...all, [a.name]: a.default }), {});
 
 const labelOf = (name: string): string => HOTKEY_ACTIONS.find((a) => a.name === name)?.label ?? name;
 
@@ -136,8 +143,9 @@ export class HotkeysPage extends DisplayComponent<HotkeysPageProps> {
           const learning = model.learning.map((l) => l === action.name);
           const shown = MappedSubject.create(([k, l]) => (l ? "Press the new keys..." : k === "" ? "none" : k), keys, learning);
           const change = learning.map((l) => (l ? "Cancel" : "Change"));
+          const hidden = model.hotkeys.map((h) => action.developer === true && !(action.name in h));
           return (
-            <div class={{ "atmo-row": true, "atmo-hotkey": true, "atmo-disabled": off }}>
+            <div class={{ "atmo-row": true, "atmo-hotkey": true, "atmo-disabled": off, "atmo-hidden": hidden }}>
               <div class="atmo-label">
                 <span class="atmo-name">{action.label}</span>
                 <div class="atmo-tip">{action.tip}</div>

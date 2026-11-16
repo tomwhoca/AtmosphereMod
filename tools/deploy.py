@@ -8,6 +8,11 @@ and sets [ATMOSPHEREMOD] DataPath (build/) and TunablesPath
 are picked up with Ctrl+Shift+F10 without redeploying. Refuses to run
 while the sim is open (the DLL would be locked and ReShade rewrites its ini on
 exit). ReShade.ini is backed up before the first change.
+
+Also sets Developer=1, which the installer never does: the development hotkeys
+(the Hotkeys tab's "Pause on/off": the sim's full pause, for measuring) and the
+METAR fades holding in any pause (weather_feed.h), so GPU-time logs taken in
+one pause compare. Not for users.
 """
 
 import argparse
@@ -69,9 +74,10 @@ def main() -> None:
     # ReShade.ini to fall back to stock for those passes.
     set_key(ini, "InjectRootSignature", "1")
     set_key(ini, "InjectGraphicsRootSignature", "1")
+    set_key(ini, "Developer", "1")
     print(f"installed {addon.name} -> {args.content}")
     print(f"ReShade.ini DataPath -> {ROOT / 'build'}, TunablesPath -> shaders/tunables.ini, "
-          f"InjectRootSignature=1, InjectGraphicsRootSignature=1 (backup: {backup.name})")
+          f"InjectRootSignature=1, InjectGraphicsRootSignature=1, Developer=1 (backup: {backup.name})")
 
     # The EFB weather-bridge package (tools/build_efb.py), if built.
     efb = ROOT / "build" / "efb" / "atmospheremod-weather"

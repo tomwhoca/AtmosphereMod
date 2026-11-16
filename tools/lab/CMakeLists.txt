@@ -81,3 +81,11 @@ set_target_properties(perf_report_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY_RELEA
 add_executable(queue_clocks_probe queue_clocks_probe.cpp)
 target_compile_definitions(queue_clocks_probe PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
 target_link_libraries(queue_clocks_probe PRIVATE d3d12)
+
+# The A/B test's request and statistics (tools/test_ab.py).
+add_executable(ab_test_test ab_test_test.cpp ../../addon/src/ab_test.cpp)
+target_compile_features(ab_test_test PRIVATE cxx_std_20)
+target_compile_definitions(ab_test_test PRIVATE NOMINMAX)
+target_compile_options(ab_test_test PRIVATE /W4 /permissive- /utf-8)
+target_include_directories(ab_test_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../addon/src)
+set_target_properties(ab_test_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/../../build/lab)

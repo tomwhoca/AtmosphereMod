@@ -8,7 +8,15 @@
 
 One log often catches a fragment of a frame, and the clouds' work changes from
 frame to frame: for a comparison, take several logs of each side in a frozen
-view (the sim paused) and give them comma-separated, summed per frame.
+view (the sim paused) and give them comma-separated, summed per frame. The cloud
+renderer's own time per call is printed per side too (a log that caught only a
+fragment of a frame may miss it), and a WEATHER warning when the add-on's METAR
+stations faded in new clouds during or between the logs (weather.log): a fade
+of 300 s changed the cloud pass by 0.36 ms between two logs of the same shaders
+(16 Nov 2026). The add-on holds its fades while the sim is paused (any pause:
+weather.log's "the sim is paused" and "the sim runs again" lines), so logs
+taken in one pause see the same weather; before, they didn't hold. Swap the
+sides back and forth (A B A B) to see drift.
 
 Take the logs with Ctrl+Shift+F12 (the draw log alone): a capture's (F11) own
 times include the replacements writing the capture.
@@ -24,11 +32,98 @@ longest idle gaps, where it waited (for the CPU to submit, or another queue).
 
 import argparse
 import csv
+import re
 from collections import defaultdict
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 CAPTURES = ROOT / "build" / "logs" / "captures"
+LOGS = ROOT / "build" / "logs"
+CLOUD_PASS = "ch_volumetric_clouds_render"
+CROSSFADE_S = 300  # an updated station's clouds and haze (cloud_stations.h)
+
+
+def seconds(hms: str) -> int:
+    h, m, s = map(int, hms.split(":"))
+    return 3600 * h + 60 * m + s
+
+
+def unwrapped(lines):
+    """(seconds since the first line's midnight, line) for lines starting with HH:MM:SS, past midnight too."""
+    day, last = 0, None
+    for line in lines:
+        if not re.match(r"\d\d:\d\d:\d\d ", line):
+            continue
+        t = seconds(line[:8])
+        if last is not None and t < last - 3600:
+            day += 86400
+        last = t
+        yield t + day, line
+
+
+def weather_clock(lines):
+    """Time (s) -> the add-on's weather clock, which stops while the sim is paused (the pause lines in
+    `lines`, (time, line) pairs as unwrapped() gives them; a pause without its end lasts on)."""
+    pauses, since = [], None
+    for t, line in lines:
+        if line[9:].startswith("the sim is paused (") and since is None:
+            since = t
+        elif line[9:].startswith("the sim runs again (") and since is not None:
+            pauses.append((since, t))
+            since = None
+    if since is not None:
+        pauses.append((since, float("inf")))
+    return lambda t: t - sum(max(0, min(t, b) - a) for a, b in pauses)
+
+
+def weather_changes(captures: list[str]) -> list[str]:
+    """The clouds that changed while (or between) the logs were taken: the add-on's METAR stations fading
+    in (weather.log, this session: after its last "weather feed starting"), each from its line on for
+    its fade (CROSSFADE_S when the line doesn't say), on the weather's clock (weather_clock: a fade holds
+    while the sim is paused); a change at once, between the first log and the last. The logs' times from
+    events.log (this session)."""
+    try:
+        events = (LOGS / "events.log").read_text(encoding="utf-8", errors="replace").splitlines()
+        weather = (LOGS / "weather.log").read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    when = {}
+    for t, line in unwrapped(events):
+        if m := re.match(r"\S+ GPU times (\d+):", line):
+            when[m[1]] = t
+    times = [when[c] for c in captures if c in when]
+    if len(times) < len(captures) or not times:
+        return ["(some logs aren't in this session's events.log: no weather check)"]
+    start = max((i for i, l in enumerate(weather) if l[9:].startswith("weather feed starting")), default=0)
+    first, last = min(times), max(times)
+    lines = list(unwrapped(weather[start:]))
+    w = weather_clock(lines)
+    changes = []  # (start, fade, text)
+    for t, line in lines:
+        m = re.match(r"\S+ cloud anchor (\S+)", line)
+        if not m:
+            continue
+        if f := re.search(r"(?:fading in|crossfad(?:es|ing)) over (\d+) s", line):
+            fade = int(f[1])
+        elif "updated]" in line:
+            fade = CROSSFADE_S
+        elif "in use at once" in line:
+            fade = 0
+        else:
+            continue
+        if "after a jump" in line:  # (a new flight or a jump: what faded in before is gone)
+            changes = [c for c in changes if c[0] >= t]
+        changes.append((t, fade, f"{m[1]} {line[:8]} ({'at once' if not fade else f'fading over {fade} s'})"))
+    wf, wl = w(first), w(last)
+    return [text for t, fade, text in changes
+            if (first <= t <= last if not fade else max(wf, w(t)) < min(wl, w(t) + fade))]
+
+
+def per_call(capture: str, entry: str = CLOUD_PASS) -> list[float]:
+    """The entry's own times (us) in one log; [] if the log caught no call (a fragment of a frame)."""
+    with open(CAPTURES / f"{capture}_draws.tsv", encoding="utf-8", errors="replace") as f:
+        return [float(r["gpu us"]) for r in csv.DictReader(f, delimiter="	")
+                if r["entry"] == entry and (r.get("gpu us") or "-") != "-"]
 
 
 def load(capture: str) -> tuple[dict, dict, float, int]:
@@ -119,6 +214,19 @@ def main():
         print(f"capture {c}: {total / 1000 / frames:.2f} ms of GPU time per frame ({frames} frame(s) logged)")
         if "," not in c:
             timeline(c, args.gaps)
+    # the cloud renderer per call: whole frames vary with what each log caught; this doesn't
+    for c in args.captures[:2]:
+        calls = {x: per_call(x) for x in c.split(",")}
+        got = [t for ts in calls.values() for t in ts]
+        missed = [x for x, ts in calls.items() if not ts]
+        print(f"{CLOUD_PASS} per call, {c}: " + (f"{sum(got) / len(got) / 1000:.3f} ms ({min(got) / 1000:.3f}-"
+              f"{max(got) / 1000:.3f}, {len(got)} call(s))" if got else "no call logged")
+              + (f"; without it: {', '.join(missed)}" if missed else ""))
+    changes = weather_changes([x for c in args.captures[:2] for x in c.split(",")])
+    if changes:
+        print("WEATHER: the clouds changed during or between these logs, so they don't compare cleanly:")
+        for line in changes:
+            print("   ", line)
     if len(runs) == 1:
         by_entry, by_crc, _, frames = runs[0]
         print(f"\n{'ms/frame':>9} {'count':>6}  pass")

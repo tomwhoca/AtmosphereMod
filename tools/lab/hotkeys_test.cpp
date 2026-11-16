@@ -58,7 +58,9 @@ void text_checks()
     check(parse("") == Key{} && parse("none") == Key{} && parse("NONE") == Key{}, "parse: none");
     check(!parse("Ctrl+Ctrl+F8") && !parse("Ctrl+") && !parse("Ctrl+F13") && !parse("Win+F8") && !parse("Ctrl+Num 5"),
           "parse: nonsense is nothing");
-    check(action("cloudFog") == kCloudFog && action("gpuTimes") == kGpuTimes && action("x") == -1, "action names");
+    check(action("cloudFog") == kCloudFog && action("gpuTimes") == kGpuTimes && action("pause") == kPause &&
+              action("x") == -1,
+          "action names");
 }
 
 void usable_checks()
@@ -93,9 +95,13 @@ void file_checks()
     check(read[kCapture] == defaults()[kCapture], "load: nonsense keeps the default");
     check(read[kGpuTimes] == key('T', true, false, true), "load: no spaces, lower case");
     check(read[kCloudFog].none(), "load: an action the file lacks keeps its default");
-    check(json(defaults()) == R"({"toggle":"Ctrl+Shift+F9","reload":"Ctrl+Shift+F10","capture":"Ctrl+Shift+F11",)"
-                              R"("gpuTimes":"Ctrl+Shift+F12","cloudFog":""})",
-          "json: the app's state");
+    check(json(defaults(), false) == R"({"toggle":"Ctrl+Shift+F9","reload":"Ctrl+Shift+F10",)"
+                                     R"("capture":"Ctrl+Shift+F11","gpuTimes":"Ctrl+Shift+F12","cloudFog":""})",
+          "json: the app's state, no development actions");
+    check(json(defaults(), true) == R"({"toggle":"Ctrl+Shift+F9","reload":"Ctrl+Shift+F10",)"
+                                    R"("capture":"Ctrl+Shift+F11","gpuTimes":"Ctrl+Shift+F12","cloudFog":"",)"
+                                    R"("pause":""})",
+          "json: a developer's, with the pause");
     std::filesystem::remove_all(dir);
 }
 

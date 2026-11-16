@@ -189,11 +189,12 @@ bool save(const std::filesystem::path &file, const Keys &keys)
     return !ec;
 }
 
-std::string json(const Keys &keys)
+std::string json(const Keys &keys, bool developer)
 {
     std::string out = "{";
     for (int a = 0; a < kActions; ++a)
-        out += std::string(a > 0 ? "," : "") + "\"" + kNames[a] + "\":\"" + text(keys[a]) + "\"";
+        if (developer || !kDeveloperOnly[a])
+            out += std::string(out.size() > 1 ? "," : "") + "\"" + kNames[a] + "\":\"" + text(keys[a]) + "\"";
     return out + "}";
 }
 

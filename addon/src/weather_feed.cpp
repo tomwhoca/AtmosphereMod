@@ -35,6 +35,8 @@ enum : DWORD
     kDefAircraft = 1, kReqAircraft = 1, kDefAirport = 2, kReqAirport = 2, kDefRadar = 3, kReqRadar = 3,
     kReqAircraftPath = 4, kDefShadow = 5, kReqShadow = 5, kEvtMetar = 10, kEvtAircraftLoaded = 11,
     kEvtSettings = 12,   // the EFB app's settings (settings_bridge.h)
+    kEvtPause = 13,      // the sim's pause state (Pause_EX1)
+    kEvtPauseSet = 14,   // PAUSE_SET, for the pause hotkey
     kReqStation0 = 100,  // ... + kStationRequests: the anchoring stations' facility data
 };
 constexpr DWORD kStationRequests = 16;
@@ -99,7 +101,7 @@ constexpr ULONGLONG kHazeInstantMs = 60000;
 // Order of kAircraftVars.
 struct AircraftVars
 {
-    double ground_m, local_time_s, agl_m, lat, lon;
+    double ground_m, local_time_s, agl_m, lat, lon, sim_time_s;
 };
 const struct { const char *name, *units; } kAircraftVars[] = {
     { "GROUND ALTITUDE", "meters" },
@@ -107,6 +109,7 @@ const struct { const char *name, *units; } kAircraftVars[] = {
     { "PLANE ALT ABOVE GROUND", "meters" },
     { "PLANE LATITUDE", "degrees" },
     { "PLANE LONGITUDE", "degrees" },
+    { "SIMULATION TIME", "seconds" },  // stops in a pause (set_pause)
 };
 static_assert(sizeof(AircraftVars) == std::size(kAircraftVars) * sizeof(double));
 
@@ -174,6 +177,18 @@ std::atomic<ULONGLONG> g_haze_instant_until{0};  // (GetTickCount64) kHazeInstan
 std::atomic<bool> g_clock_jumped{false};  // ask for METARs again, once the sim has the other time's weather
 std::string g_stale_logged;      // the last stale report logged
 
+// The sim's pause (Pause_EX1's flags), on a developer's install only (start): any pause holds the weather's
+// clock (now_s), so the METAR fades and crossfades and the haze's smoothing hold too, and logs of the GPU times
+// taken in one pause compare. Elsewhere the weather runs on in a pause, as before. The flags: 1 full pause (PAUSE_SET 1), 4 active pause, 8 the
+// aircraft's simulation paused, traffic still running (the Esc menu); 2 isn't used any more.
+constexpr DWORD kPauseFlags = 1 | 4 | 8;
+std::atomic<DWORD> g_pause_flags{0};
+ULONGLONG g_held_ms = 0;     // the weather's clock behind the PC's: time paused before this pause
+ULONGLONG g_pause_from = 0;  // (GetTickCount64) when this pause began, 0 while the sim runs
+double g_pause_sim_s = NAN;  // the sim's SIMULATION TIME in this pause (the first position update's)
+std::atomic<bool> g_pause_toggle{false};  // the pause hotkey, for the feed's thread
+std::atomic<bool> g_developer{false};
+
 std::atomic<bool> g_haze_field{true};  // T15
 std::atomic<float> g_haze_strength{1.0f};  // T16
 
@@ -198,9 +213,47 @@ void log(const char *fmt, ...)
 
 anchor::StationSet g_stations([](const std::string &line) { log("%s", line.c_str()); });
 
+// Caller holds g_mutex. The weather's clock (s): the PC's, stopped while the sim is paused.
 double now_s()
 {
-    return static_cast<double>(GetTickCount64()) * 0.001;
+    const ULONGLONG tick = GetTickCount64();
+    const ULONGLONG held = g_held_ms + (g_pause_from != 0 ? tick - g_pause_from : 0);
+    return static_cast<double>(tick - held) * 0.001;
+}
+
+std::string pause_text(DWORD flags)
+{
+    std::string out;
+    for (const auto &[bit, name] : { std::pair<DWORD, const char *>{ 1, "full pause" }, { 4, "active pause" },
+                                     { 8, "the aircraft's simulation paused" }, { 2, "legacy pause" } })
+        if (flags & bit)
+            out += std::string(out.empty() ? "" : ", ") + name;
+    return out.empty() ? "running" : out;
+}
+
+// Caller holds g_mutex. The sim's pause state (Pause_EX1's flags); `why` for the log.
+void set_pause(DWORD flags, const char *why)
+{
+    const DWORD before = g_pause_flags.exchange(flags);
+    if (flags == before)
+        return;
+    const ULONGLONG tick = GetTickCount64();
+    const bool paused = (flags & kPauseFlags) != 0;
+    if (paused && g_pause_from == 0)
+    {
+        g_pause_from = tick;
+        g_pause_sim_s = NAN;
+        log("the sim is paused (%s, %s): the METAR fades and the haze hold", pause_text(flags).c_str(), why);
+    }
+    else if (!paused && g_pause_from != 0)
+    {
+        const ULONGLONG held = tick - g_pause_from;
+        g_held_ms += held;
+        g_pause_from = 0;
+        log("the sim runs again (%s): the METAR fades and the haze go on, held %.0f s", why, held * 0.001);
+    }
+    else
+        log("the sim's pause: %s (%s)", pause_text(flags).c_str(), why);
 }
 
 // The sun's azimuth (clockwise from true north) and elevation, radians, from
@@ -524,6 +577,7 @@ bool dispatch(HANDLE sim, std::string &partial, std::string &last_metar, ULONGLO
                 break;
             // Copy only what arrived: a SimVar the sim rejects shortens the data.
             AircraftVars v = { 0.0, 12.0 * 3600.0 };
+            v.sim_time_s = NAN;
             const size_t offset = offsetof(SIMCONNECT_RECV_SIMOBJECT_DATA, dwData);
             memcpy(&v, &data->dwData, std::min(sizeof(v), size > offset ? size - offset : 0));
             std::string line;
@@ -545,6 +599,15 @@ bool dispatch(HANDLE sim, std::string &partial, std::string &last_metar, ULONGLO
                 const double ground_km = v.ground_m * 0.001;
                 const bool jumped = away_from_aircraft(v.lat, v.lon);
                 const bool near_ground = v.agl_m < 300.0;
+                // (the sim's simulation clock stops in the full pause and the Esc menu's: running, the pause is over,
+                // though the sim didn't say. It runs on in the active pause, and the UTC in all of them.)
+                if (g_pause_from != 0 && (g_pause_flags & 4) == 0 && std::isfinite(v.sim_time_s))
+                {
+                    if (!std::isfinite(g_pause_sim_s))
+                        g_pause_sim_s = v.sim_time_s;
+                    else if (std::abs(v.sim_time_s - g_pause_sim_s) > 1.0)
+                        set_pause(0, "the sim's simulation clock runs, though the sim didn't say the pause was over");
+                }
                 if (jumped)
                 {
                     log("the aircraft moved %.1f, %.1f deg at once: cloud anchor stations cleared", v.lat - g_last_lat,
@@ -594,6 +657,16 @@ bool dispatch(HANDLE sim, std::string &partial, std::string &last_metar, ULONGLO
             {
                 const std::lock_guard lock(g_mutex);
                 set_aircraft(state->szString);
+            }
+            break;
+        }
+        case SIMCONNECT_RECV_ID_EVENT:
+        {
+            const auto *event = static_cast<SIMCONNECT_RECV_EVENT *>(msg);
+            if (event->uEventID == kEvtPause)
+            {
+                const std::lock_guard lock(g_mutex);
+                set_pause(event->dwData, "Pause_EX1");
             }
             break;
         }
@@ -798,7 +871,15 @@ void run_loop()
             g_logged_camera = -1.0;
             g_held_metar.valid = false;
             g_loading = false;
+            set_pause(0, "connected");
         }
+        // A developer's: the sim's pause, as it changes (and at once as it is); the pause hotkey's event.
+        if (g_developer)
+        {
+            SimConnect_SubscribeToSystemEvent(sim, kEvtPause, "Pause_EX1");
+            SimConnect_MapClientEventToSimEvent(sim, kEvtPauseSet, "PAUSE_SET");
+        }
+        g_pause_toggle = false;
 
         std::string partial, last_metar;
         ULONGLONG last_logged = 0, next_request = GetTickCount64() + 5000, next_survey = next_request + 5000;
@@ -837,6 +918,16 @@ void run_loop()
                 burst -= burst > 0 ? 1 : 0;
                 next_survey = GetTickCount64() + (burst > 0 ? kSurveyBurstMs : kSurveyIntervalMs);
             }
+            // The pause hotkey: the full pause on, or off while the sim is paused (MSFS 2024's Toggle Pause key,
+            // PAUSE_TOGGLE, no longer pauses; PAUSE_SET does).
+            if (g_pause_toggle.exchange(false) && g_developer)
+            {
+                const DWORD on = (g_pause_flags & kPauseFlags) != 0 ? 0 : 1;
+                SimConnect_TransmitClientEvent(sim, SIMCONNECT_OBJECT_ID_USER, kEvtPauseSet, on,
+                                               SIMCONNECT_GROUP_PRIORITY_HIGHEST,
+                                               SIMCONNECT_EVENT_FLAG_GROUPID_IS_PRIORITY);
+                log("pause hotkey: PAUSE_SET %lu", on);
+            }
             if (const auto state = settings::to_send())
                 SimConnect_CallCommBusEvent(sim, settings::kStateEvent, SIMCONNECT_COMM_BUS_BROADCAST_TO_JS,
                                             static_cast<DWORD>(state->size() + 1), state->c_str());
@@ -854,10 +945,11 @@ void run_loop()
 }
 } // namespace
 
-void start(const std::filesystem::path &log_dir)
+void start(const std::filesystem::path &log_dir, bool developer)
 {
     if (!g_finished)
         return;
+    g_developer = developer;
     g_log = _wfsopen((log_dir / "weather.log").c_str(), L"a", _SH_DENYNO);  // readable while running
     log("weather feed starting");
     g_stop = false;
@@ -954,6 +1046,16 @@ bool haze_field()
     return g_haze_field;
 }
 
+void toggle_pause()
+{
+    g_pause_toggle = true;
+}
+
+bool sim_paused()
+{
+    return (g_pause_flags.load(std::memory_order_relaxed) & kPauseFlags) != 0;
+}
+
 float freezing_level_m()
 {
     const std::lock_guard lock(g_mutex);
@@ -987,9 +1089,11 @@ std::array<float, kTunableCount> apply(const std::array<float, kTunableCount> &i
         target = g_target;
     }
     // (at once for a while after a jump in place or time: kHazeInstantMs)
+    // (none while the sim is paused, as the weather's clock)
     const bool instant = GetTickCount64() < g_haze_instant_until.load(std::memory_order_relaxed);
+    const bool paused = (g_pause_flags.load(std::memory_order_relaxed) & kPauseFlags) != 0;
     const float k = g_smoothed_valid && !instant
-                        ? 1.0f - std::exp(-std::max(dt_seconds, 0.0f) / kSmoothingSeconds)
+                        ? (paused ? 0.0f : 1.0f - std::exp(-std::max(dt_seconds, 0.0f) / kSmoothingSeconds))
                         : 1.0f;
     for (size_t i = 0; i < target.size(); ++i)
         g_smoothed[i] += (target[i] - g_smoothed[i]) * k;
