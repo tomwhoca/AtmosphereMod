@@ -82,7 +82,15 @@
       "entry": "ch_volumetric_clouds_render",
       "kind": "clouds",
       "crcs": "all",
-      "note": "per-channel aerial-perspective transmittance on volumetric clouds (T11), a forward lobe in their sun/moon phase, multiple scattering, build-up of bounced light, crisper edges, a glory and the aircraft's shadow from ch_deferred_shadows' window, else a drawn silhouette (C0-C15)"
+      "args": {"lean": true},
+      "note": "the lean set (patch_dxil.LEAN_LEAVE_OUT: without the rare features, for while they are off): per-channel aerial-perspective transmittance on volumetric clouds (T11), a forward lobe in their sun/moon phase, multiple scattering, build-up of bounced light, crisper edges, a glory and the aircraft's shadow from ch_deferred_shadows' window, else a drawn silhouette (C0-C15)"
+    },
+    {
+      "entry": "ch_volumetric_clouds_render",
+      "kind": "clouds",
+      "crcs": "all",
+      "out": "full",
+      "note": "the full set, with the rare features (C36, the tilt view): shaders/full/, which the add-on runs while any is on"
     },
     {
       "entry": "ch_deferred_shadows",

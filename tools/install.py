@@ -625,6 +625,13 @@ def patch(pak: Path, dxc: Path, work: Path, shaders: Path, log, workers: int, sp
     made = sorted((work / "build" / "shaders").glob("*.cso"))
     for f in made:
         shutil.move(str(f), shaders / f.name)
+    # the cloud renderer's full set (patch_dxil.LEAN_LEAVE_OUT): the add-on runs it while a rare feature is on
+    full = sorted((work / "build" / "shaders" / "full").glob("*.cso"))
+    if full:
+        (shaders / "full").mkdir(exist_ok=True)
+        for f in full:
+            shutil.move(str(f), shaders / "full" / f.name)
+    made += full
     rows = list(csv.DictReader(open(work / "extracted" / "index.csv")))
     names = sorted({f"{r['crc32']}\t{r['entry']}" for r in rows})
     (shaders.parent / "shader_names.tsv").write_text("\n".join(names) + "\n")

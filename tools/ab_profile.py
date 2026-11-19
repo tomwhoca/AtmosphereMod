@@ -9,7 +9,8 @@ the preset scene, the sim's full pause, full screen, the sim in front for the wh
     python tools/ab_profile.py                     # the profile, 3 rounds (about 25 min)
     python tools/ab_profile.py --rounds 4 --only haze,types
 
-Each row's cost is A - B, as a share of A's cloud pass: B leaves the feature out of A. The cloud types build on
+Each row's cost is A - B, as a share of A's cloud pass: B leaves the feature out of A. A is the lean set (what runs
+while the rare features are off), but in the row of the full set, which has them. The cloud types build on
 the optical-thickness and cloud-shape patches, and the in-cloud structure on the optical thickness, so the cloud
 shape is measured against the mod without types and the optical thickness against the mod without types and
 in-cloud structure; the in-cloud structure goes with its fog record (which records it). Without the cloud shape,
@@ -34,30 +35,32 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 import ab  # noqa: E402
 
-# (row, A, B, B's features left out; None: the sim's own shaders). The full mod is p-full.
-SETS = {"p-full": "", "p-stock": None, "p-haze": "haze", "p-untile": "untile", "p-detail": "detail",
-        "p-types": "types", "p-ms": "ms", "p-phase": "phase", "p-tilt": "tilt", "p-dump": "dump",
+# The sets: features left out of the lean set ("" none; None: the sim's own shaders; "full": the full set). The mod as
+# most run it, the lean set, is p-mod.
+SETS = {"p-mod": "", "p-mod-full": "full", "p-stock": None, "p-haze": "haze", "p-untile": "untile",
+        "p-detail": "detail", "p-types": "types", "p-ms": "ms", "p-phase": "phase", "p-dump": "dump",
         "p-fogrec": "fogrec", "p-inside": "inside,fogrec", "p-types-inside": "types,inside,fogrec",
         "p-types-optical": "types,optical,inside,fogrec", "p-types-shape": "types,shape"}
 ROWS = [
-    ("whole mod", "p-full", "p-stock"),
-    ("haze colour", "p-full", "p-haze"),
-    ("untiling", "p-full", "p-untile"),
-    ("surface detail", "p-full", "p-detail"),
-    ("cloud types", "p-full", "p-types"),
-    ("multiple scattering", "p-full", "p-ms"),
-    ("forward lobe", "p-full", "p-phase"),
-    ("in-cloud structure + fog record", "p-full", "p-inside"),
-    ("fog record", "p-full", "p-fogrec"),
-    ("tilt view (developers)", "p-full", "p-tilt"),
-    ("capture dump (developers)", "p-full", "p-dump"),
+    ("whole mod", "p-mod", "p-stock"),
+    ("rare features: the full set (C36, tilt view)", "p-mod-full", "p-mod"),
+    ("haze colour", "p-mod", "p-haze"),
+    ("untiling", "p-mod", "p-untile"),
+    ("surface detail", "p-mod", "p-detail"),
+    ("cloud types", "p-mod", "p-types"),
+    ("multiple scattering", "p-mod", "p-ms"),
+    ("forward lobe", "p-mod", "p-phase"),
+    ("in-cloud structure + fog record", "p-mod", "p-inside"),
+    ("fog record", "p-mod", "p-fogrec"),
+    ("capture dump (developers)", "p-mod", "p-dump"),
     ("optical thickness (without types, in-cloud structure)", "p-types-inside", "p-types-optical"),
     ("cloud shape: powder, glory, shadow, edges (without types)", "p-types", "p-types-shape"),
-    ("noise (the same shaders)", "p-full", "p-null"),
+    ("noise (the same shaders)", "p-mod", "p-null"),
 ]
 KEYS = {"whole mod": "stock", "haze colour": "haze", "untiling": "untile", "surface detail": "detail",
+        "rare features: the full set (C36, tilt view)": "full",
         "cloud types": "types", "multiple scattering": "ms", "forward lobe": "phase",
-        "in-cloud structure + fog record": "inside", "fog record": "fogrec", "tilt view (developers)": "tilt",
+        "in-cloud structure + fog record": "inside", "fog record": "fogrec",
         "capture dump (developers)": "dump", "optical thickness (without types, in-cloud structure)": "optical",
         "cloud shape: powder, glory, shadow, edges (without types)": "shape", "noise (the same shaders)": "noise"}
 RESULT = re.compile(r"A (\d+\.\d+) ms, B (\d+\.\d+) ms per frame.*?B - A ([+-]\d+\.\d+) ms")
@@ -67,7 +70,8 @@ def build(parallel: int) -> None:
     def one(item):
         name, leave_out = item
         cmd = [sys.executable, str(ROOT / "tools" / "build_ab.py"), name]
-        cmd += ["--stock"] if leave_out is None else (["--leave-out", leave_out] if leave_out else [])
+        cmd += ["--stock"] if leave_out is None else ["--full"] if leave_out == "full" else (
+            ["--leave-out", leave_out] if leave_out else [])
         run = subprocess.run(cmd, capture_output=True, text=True)
         return name, run.returncode, (run.stdout + run.stderr).strip().splitlines()[-1:]
     with ThreadPoolExecutor(parallel) as pool:
@@ -76,8 +80,8 @@ def build(parallel: int) -> None:
             if code:
                 raise SystemExit(1)
     shutil.rmtree(ab.AB / "p-null", ignore_errors=True)
-    shutil.copytree(ab.AB / "p-full", ab.AB / "p-null")  # (the add-on refuses a set against itself)
-    print("p-null: a copy of p-full")
+    shutil.copytree(ab.AB / "p-mod", ab.AB / "p-null")  # (the add-on refuses a set against itself)
+    print("p-null: a copy of p-mod")
 
 
 def main():

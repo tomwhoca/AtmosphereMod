@@ -766,6 +766,40 @@ def check_plane_light(stock: str, patched: str, failures: list) -> None:
                     failures.append(f"plane light {strength} glory {glory_on}, channel {c}: rel. error {err:.1e}")
 
 
+def check_lean_set(stock: str, patched: str, failures: list) -> None:
+    """The lean set (patch_dxil.LEAN_LEAVE_OUT: what the add-on runs while C36 and the tilt view are off) has no
+    tilt patch, and gives each channel's sun term and step radiance bit for bit as the full set does with both off."""
+    lean, _ = P.patch_clouds(stock, lean=True)
+    if "%mod.tv." in lean or "%mod.pl." in lean:
+        failures.append("lean set: the tilt patch is in it")
+    ir = P.Ir(stock)
+    march = P.find_sun_march(ir, P.find_cloud_ms(ir))
+    if march is None:
+        return
+    n = 1000
+    rng = np.random.default_rng(17)
+    u = lambda a, b: rng.uniform(a, b, n).astype(F)
+    # (what the full set's tilt view and plane light read, for its branches the evaluator also follows)
+    seeds = {"%mod.tv.f": u(-1, 1), "%mod.tv.d": u(0, 10), "%mod.tv.o": u(0, 1), "%mod.sh.f": u(0, 1),
+             "%mod.tv.mu": u(-1, 1), "%mod.tv.raw": u(-6, 6), "%mod.tv.ran": u(0, 1), march["weight"]: u(0, 1)}
+    if march["layer"]:
+        seeds[march["layer"]] = u(0, 1)
+    seeds.update({name: u(0.05, 2) for name in march["phase"]})
+    seeds.update({f"%mod.gl.t{k}": u(0, 0.1) for k in range(march["phases"])})
+    seeds.update({name: u(0.5, 20) for name in march["sun"]})
+    lean_rhs = {m[1]: m[2] for m in re.finditer(r"^\s+(%[\w.]+) = (.*?)(?:\s+;.*)?$", lean, re.M)}
+    names = [eps for eps, _, _ in march["terms"]] + [x for x, _ in P.find_inside_site(ir)["radiance"]]
+    for name in names:
+        for op in re.findall(r"%[\w.]+", lean_rhs[name]):  # (its operands in the lean set, as random values)
+            if not op.startswith("%dx.") and op not in seeds:
+                seeds[op] = u(0, 2)
+    cbs = {"b1 space50": P.cloud_cbuffer([1.0]), "b0 space50": np.zeros((4, 4))}  # (C36 0, no tilt view)
+    full_ev, lean_ev = Evaluator(patched, cbs, seeds), Evaluator(lean, cbs, seeds)
+    for name in names:
+        if not np.array_equal(full_ev(name), lean_ev(name)):
+            failures.append(f"lean set: {name} isn't the full set's with C36 and the tilt view off")
+
+
 def check(crc: str, stock: str) -> list[str]:
     ir = P.Ir(stock)
     blends = P.find_phase_blends(ir)
@@ -1431,6 +1465,7 @@ def check(crc: str, stock: str) -> list[str]:
           f"untiling max error {worst_untile:.2f} m")
     check_tilt_view(stock, patched, failures)
     check_plane_light(stock, patched, failures)
+    check_lean_set(stock, patched, failures)
     return failures
 
 

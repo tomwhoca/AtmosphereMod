@@ -355,6 +355,9 @@ struct TrackedPipeline
     // While an A/B test runs (developer installs, ab_test.h): its sides' pipelines, A's (none: the replacement)
     // and B's. Only pipelines with a B take part.
     std::array<pipeline, 2> ab = {};
+    // The full set's (make_full_pipelines): bound instead of the replacement while a rare feature is on.
+    pipeline full = {};
+    bool has_full = false;  // the full set has a shader for it (g_full_files)
 };
 
 struct LayoutParam
@@ -448,6 +451,23 @@ std::array<float, kCloudTunableCount> g_effective_cloud_tunables = {};  // pushe
 std::atomic<bool> g_storms_off{true};
 std::atomic<bool> g_cloud_tilt_view{false};  // T17 > 0 (developers): DebugCapture bit 14, patch_dxil.py DEBUG_CLOUD_TILT
 std::atomic<float> g_cloud_plane_light{0.0f};  // C36 (0..1, the app's Sun-facing cloud sides): pushed as C35's slot, patch_dxil.py PLANE_*
+// The cloud renderer's full set (<DataPath>/shaders/full, patch_dxil.py LEAN_LEAVE_OUT): its replacements with the
+// features few use that slow the lean ones (shaders/) by their mere presence, now C36 and the tilt view. While one of
+// them is on, the full set's pipelines run instead, made in the background the first time (make_full_pipelines).
+std::unordered_map<uint32_t, fs::path> g_full_files;  // by crc (g_mutex)
+// The pipelines bound while a rare feature was on, without their full set's yet: made next (only those in use).
+std::mutex g_full_needed_mutex;
+std::unordered_set<uint64_t> g_full_needed;  // (g_full_needed_mutex)
+std::atomic<bool> g_full_stale{false};  // g_full_needed has some
+std::atomic<bool> g_full_busy{false};   // the background thread is making them
+std::mutex g_full_thread_mutex;
+std::thread g_full_thread;  // (g_full_thread_mutex)
+
+bool full_wanted()
+{
+    return g_cloud_plane_light.load(std::memory_order_relaxed) > 0.0f ||
+           g_cloud_tilt_view.load(std::memory_order_relaxed);
+}
 // Varied cloud tops, C37 (tunables.ini only): 0 MSFS's, 1 gentle tops (DebugCapture bit 15), 2 also rising air at full
 // strength (C30's slot -1), the default; patch_dxil.py TOP_*. (experiment/cloud-detail: more states, C38, Ctrl+Shift+F7)
 std::atomic<int> g_cloud_tops{2};
@@ -756,6 +776,26 @@ std::unordered_map<uint32_t, std::vector<uint8_t>> load_replacements(std::unorde
         std::vector<uint8_t> code = read_file(item.path());
         if (!code.empty())
             result[crc] = std::move(code);
+    }
+    return result;
+}
+
+// The full set's files, <DataPath>/shaders/full/<crc>.cso, by crc (read when a pipeline needs one).
+std::unordered_map<uint32_t, fs::path> load_full_files()
+{
+    std::unordered_map<uint32_t, fs::path> result;
+    std::error_code ec;
+    for (const auto &item : fs::directory_iterator(g_data_dir / "shaders" / "full", ec))
+    {
+        if (item.path().extension() != ".cso")
+            continue;
+        try
+        {
+            result[static_cast<uint32_t>(std::stoul(item.path().stem().string(), nullptr, 16))] = item.path();
+        }
+        catch (const std::exception &)
+        {
+        }
     }
     return result;
 }
@@ -1201,10 +1241,14 @@ void retire(device *dev, pipeline pipe)
         g_graveyard.push_back({ dev, pipe, g_frame.load(), std::chrono::steady_clock::now() });  // caller holds g_mutex
 }
 
+void join_full_thread();
+
 void reload(device *dev)
 {
+    join_full_thread();  // (its pipelines would come from the old files)
     std::unordered_map<uint32_t, fs::path> lazy;
     auto fresh = load_replacements(lazy);
+    auto full_files = load_full_files();
     const auto tunables = load_tunables();
     const auto radar_tunables = load_tunables('R');
     const auto cloud_tunables = load_tunables<kCloudTunableCount>('C');
@@ -1227,6 +1271,12 @@ void reload(device *dev)
         const std::unique_lock lock(g_mutex);
         g_replacements = fresh;
         g_lazy_replacements = std::move(lazy);
+        g_full_files = std::move(full_files);
+        for (auto &[handle, info] : g_pipelines)  // (made again from the new files when next needed)
+        {
+            retire(info.dev != nullptr ? info.dev : dev, std::exchange(info.full, pipeline{}));
+            info.has_full = !info.graphics && g_full_files.contains(info.crc);
+        }
         g_tunables = tunables;
         g_radar_tunables = radar_tunables;
         g_cloud_tunables = cloud_tunables;
@@ -1276,6 +1326,73 @@ void reload(device *dev)
           (graphics ? "; " + std::to_string(graphics) +
                       " graphics pipeline(s) keep their shader (new tunables apply, a shader change needs a restart)"
                     : ""));
+}
+
+// The full set's pipelines (g_full_files) for the pipelines bound while a rare feature was on (g_full_needed), made in
+// a background thread: switching C36 or the tilt view on doesn't stall a frame, it shows once they're made (the lean
+// replacements run meanwhile). The present thread starts it (on_present).
+void make_full_pipelines()
+{
+    const std::lock_guard thread_lock(g_full_thread_mutex);
+    if (g_full_thread.joinable())
+        g_full_thread.join();  // (the last one, done: g_full_busy was false)
+    g_full_busy = true;
+    std::unordered_set<uint64_t> needed;
+    {
+        const std::lock_guard lock(g_full_needed_mutex);
+        needed.swap(g_full_needed);
+        g_full_stale = false;
+    }
+    g_full_thread = std::thread([needed = std::move(needed)] {
+        struct Job
+        {
+            uint64_t handle;
+            uint32_t crc;
+            pipeline_layout layout;
+            device *dev;
+            fs::path file;
+        };
+        std::vector<Job> jobs;
+        {
+            const std::shared_lock lock(g_mutex);
+            for (const uint64_t handle : needed)
+                if (const auto it = g_pipelines.find(handle); it != g_pipelines.end())
+                {
+                    const TrackedPipeline &info = it->second;
+                    if (const auto file = g_full_files.find(info.crc);
+                        !info.graphics && info.replacement.handle != 0 && info.full.handle == 0 &&
+                        info.dev != nullptr && file != g_full_files.end() && g_layouts.contains(info.layout.handle))
+                        jobs.push_back({handle, info.crc, info.layout, info.dev, file->second});
+                }
+        }
+        size_t made = 0;
+        for (const Job &job : jobs)
+        {
+            const std::vector<uint8_t> code = read_file(job.file);
+            const pipeline full = code.empty() ? pipeline{} : create_replacement(job.dev, job.layout, code, job.crc);
+            const std::unique_lock lock(g_mutex);
+            const auto it = g_pipelines.find(job.handle);
+            if (it == g_pipelines.end() || full.handle == 0 || it->second.full.handle != 0)
+            {
+                retire(job.dev, full);
+                continue;
+            }
+            it->second.full = full;
+            ++made;
+        }
+        if (!jobs.empty())
+            event(made == jobs.size() ? reshade::log::level::info : reshade::log::level::warning,
+                  "the cloud shaders' full set (C36 or the tilt view on): " + std::to_string(made) + " of " +
+                      std::to_string(jobs.size()) + " pipeline(s) made");
+        g_full_busy = false;
+    });
+}
+
+void join_full_thread()
+{
+    const std::lock_guard thread_lock(g_full_thread_mutex);
+    if (g_full_thread.joinable())
+        g_full_thread.join();
 }
 
 void collect_garbage(uint64_t frame)
@@ -2756,6 +2873,7 @@ void create_debug_resources(device *dev)
 // F10 afterwards hung the GPU (the replacements' debug UAV was gone).
 void on_destroy_device(device *dev)
 {
+    join_full_thread();  // (it may be making pipelines on this device)
     std::vector<pipeline> pipes;
     {
         const std::unique_lock lock(g_mutex);
@@ -2771,7 +2889,7 @@ void on_destroy_device(device *dev)
                 ++it;
                 continue;
             }
-            for (const pipeline p : {it->second.replacement, it->second.ab[0], it->second.ab[1]})
+            for (const pipeline p : {it->second.replacement, it->second.full, it->second.ab[0], it->second.ab[1]})
                 if (p.handle != 0)
                     pipes.push_back(p);
             it = g_pipelines.erase(it);  // (the game's pipeline goes with its device)
@@ -3055,6 +3173,7 @@ void on_init_pipeline(device *dev, pipeline_layout layout, uint32_t count, const
             code = it->second;
         else if (const auto lazy = g_lazy_replacements.find(info.crc); lazy != g_lazy_replacements.end())
             lazy_file = lazy->second;
+        info.has_full = !info.graphics && g_full_files.contains(info.crc);
     }
     info.watched = kWatchedEntries.contains(info.entry);
     info.radar = info.entry == "ph_rain_radar_horz";
@@ -3107,7 +3226,7 @@ void on_init_pipeline(device *dev, pipeline_layout layout, uint32_t count, const
 
 void on_destroy_pipeline(device *dev, pipeline pipe)
 {
-    pipeline replacement = {};
+    pipeline replacement = {}, full = {};
     std::array<pipeline, 2> ab_pipes = {};
     {
         const std::unique_lock lock(g_mutex);
@@ -3116,12 +3235,13 @@ void on_destroy_pipeline(device *dev, pipeline pipe)
         if (it == g_pipelines.end())
             return;
         replacement = it->second.replacement;
+        full = it->second.full;
         ab_pipes = it->second.ab;
         g_pipelines.erase(it);
     }
     // The game only destroys a pipeline once the GPU is done with it, and the
-    // replacement (and an A/B test's) was only ever used in its place.
-    for (const pipeline p : {replacement, ab_pipes[0], ab_pipes[1]})
+    // replacement (and the full set's, an A/B test's) was only ever used in its place.
+    for (const pipeline p : {replacement, full, ab_pipes[0], ab_pipes[1]})
         if (p.handle != 0)
             dev->destroy_pipeline(p);
 }
@@ -3166,11 +3286,11 @@ bool ab_timed_dispatch(command_list *cmd_list, uint32_t x, uint32_t y, uint32_t 
 void on_bind_pipeline(command_list *cmd_list, pipeline_stage stages, pipeline pipe)
 {
     start_frame_timing(cmd_list);
-    pipeline replacement = {};
+    pipeline replacement = {}, full = {};
     std::array<pipeline, 2> ab_pipes = {};
     uint32_t shader_index = UINT32_MAX, crc = 0;
     bool graphics = true;  // every compute pipeline is tracked, so an unknown one is graphics
-    bool tracked = false, shaded = false, cloud = false;
+    bool tracked = false, shaded = false, cloud = false, has_full = false;
     {
         const std::shared_lock lock(g_mutex);
         if (const auto it = g_pipelines.find(pipe.handle); it != g_pipelines.end())
@@ -3178,6 +3298,8 @@ void on_bind_pipeline(command_list *cmd_list, pipeline_stage stages, pipeline pi
             tracked = true;
             graphics = it->second.graphics;
             replacement = it->second.replacement;
+            full = it->second.full;
+            has_full = it->second.has_full;
             ab_pipes = it->second.ab;
             shader_index = it->second.shader_index;
             crc = it->second.crc;
@@ -3209,6 +3331,20 @@ void on_bind_pipeline(command_list *cmd_list, pipeline_stage stages, pipeline pi
     if (replacement.handle != 0 && g_enabled.load(std::memory_order_relaxed) &&
         (graphics || (cloud && g_cloud_settings_va.load(std::memory_order_acquire) != 0)))
     {
+        // (the full set's while a rare feature is on: C36, the tilt view; made in the background the first time)
+        if (has_full && full_wanted())
+        {
+            if (full.handle != 0)
+            {
+                replacement = full;
+            }
+            else
+            {
+                const std::lock_guard lock(g_full_needed_mutex);
+                g_full_needed.insert(pipe.handle);
+                g_full_stale = true;
+            }
+        }
         // (an A/B test: this frame's side)
         if (!graphics && ab_pipes[1].handle != 0 && g_ab_on.load(std::memory_order_relaxed))
         {
@@ -4189,6 +4325,8 @@ std::array<bool, hotkeys::kActions> poll_hotkeys(effect_runtime *runtime)
 void on_present(effect_runtime *runtime)
 {
     const uint64_t frame = ++g_frame;
+    if (g_full_stale.load(std::memory_order_relaxed) && !g_full_busy.load(std::memory_order_acquire))
+        make_full_pipelines();
     // (once the GPU has run the logged frames: their GPU times)
     if (const uint64_t first = g_draw_log_frame.load();
         first != UINT64_MAX && frame == first + kDrawLogFrames + kGpuTimerDelayFrames)
@@ -4285,6 +4423,7 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE re
         event(reshade::log::level::info, "root parameters in register space " + std::to_string(g_mod_space) + " (installed with --renodx)");
     load_names();
     g_replacements = load_replacements(g_lazy_replacements);
+    g_full_files = load_full_files();
     g_tunables = load_tunables();
     g_ozone_setting = load_tunables<kTunableCount + 1>()[kTunableCount];  // T14
     weather::set_haze_field(load_tunable('T', 15, 1.0f) > 0.0f);
@@ -4349,5 +4488,6 @@ extern "C" __declspec(dllexport) bool AddonInit(HMODULE addon_module, HMODULE re
 extern "C" __declspec(dllexport) void AddonUninit(HMODULE addon_module, HMODULE reshade_module)
 {
     weather::stop();
+    join_full_thread();
     reshade::unregister_addon(addon_module, reshade_module);
 }

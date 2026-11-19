@@ -4962,15 +4962,24 @@ CLOUD_FEATURES = ("haze", "optical", "untile", "detail", "shape", "types", "ms",
                   "dump")
 
 
-def patch_clouds(text: str) -> tuple[str, str]:
+# The lean set (2026-11-19): the cloud renderer without the features few use that slow it by their mere presence, the
+# shaders the add-on runs while all of them are off (build/shaders/<crc>.cso); the full set, with them, goes to
+# shaders/full/, for while any is on (atmosphere_mod.cpp, full_wanted). Now the tilt patch: the app's Sun-facing cloud
+# sides (C36) and the developers' tilt view (T17): their sums in the sun march made the cloud pass about 2.7 % slower
+# even with both off, when they never run (their branch at every step, five values carried through the march; RTX
+# 5080, the add-on's switch checked against both sets with C36 0 and on, 19 Nov).
+LEAN_LEAVE_OUT = ("tilt",)
+
+
+def patch_clouds(text: str, lean: bool = False) -> tuple[str, str]:
     """ch_volumetric_clouds_render: the haze colour (T11), the build-up of
     bounced light, crisper edges and the glory (C6-C11), multiple scattering
     (C3-C5) and the forward lobe (C0-C2). The order matters: each step finds the stock
-    patterns the next one rewrites."""
+    patterns the next one rewrites. lean: the lean set, without LEAN_LEAVE_OUT."""
     ir = Ir(text)
     inside_site = find_inside_site(ir)  # (in the stock IR; applied last)
     march = find_sun_march(ir, find_cloud_ms(ir))  # (likewise)
-    leave_out = set(PROFILE_LEAVE_OUT)
+    leave_out = set(PROFILE_LEAVE_OUT) | (set(LEAN_LEAVE_OUT) if lean else set())
     need(leave_out <= set(CLOUD_FEATURES), f"unknown cloud features: {sorted(leave_out - set(CLOUD_FEATURES))}")
 
     def step(feature, apply, *args):
@@ -8062,7 +8071,8 @@ def patch_all(keep_ir: bool = False, root: Path | None = None, dxc: Path | None 
         for (target, _), (crc, status, message, code, ir_text) in zip(jobs, results):
             entry = target["entry"]
             if status == "skip":
-                skipped[entry] = skipped.get(entry, 0) + 1
+                key = entry + (f" ({target['out']})" if target.get("out") else "")
+                skipped[key] = skipped.get(key, 0) + 1
                 continue
             if status == "error" and strict:
                 raise RuntimeError(f"{entry} {crc}:\n{message}")
@@ -8070,7 +8080,7 @@ def patch_all(keep_ir: bool = False, root: Path | None = None, dxc: Path | None 
                 print(f"{entry} {crc}: {message.strip()}")
                 failures += 1
                 continue
-            out_dir = root / "build" / ("patched" if target.get("lab_only") else "shaders")
+            out_dir = root / "build" / ("patched" if target.get("lab_only") else "shaders") / target.get("out", "")
             out_dir.mkdir(parents=True, exist_ok=True)
             if keep_ir:
                 ir_dir = root / "build" / "patched" / "ir"
