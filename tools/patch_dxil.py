@@ -4955,6 +4955,13 @@ def apply_cloud_tilt_view(ir: Ir, march: dict | None, site: dict) -> str:
             f"{len(channels)} channel(s); skipped while off")
 
 
+# Developers, the cost profile (tools/build_ab.py --leave-out): cloud renderer features left out of patch_clouds, so
+# that the A/B mode measures what each one costs. Empty in every build.
+PROFILE_LEAVE_OUT: set[str] = set()
+CLOUD_FEATURES = ("haze", "optical", "untile", "detail", "shape", "types", "ms", "phase", "inside", "fogrec", "tilt",
+                  "dump")
+
+
 def patch_clouds(text: str) -> tuple[str, str]:
     """ch_volumetric_clouds_render: the haze colour (T11), the build-up of
     bounced light, crisper edges and the glory (C6-C11), multiple scattering
@@ -4963,34 +4970,44 @@ def patch_clouds(text: str) -> tuple[str, str]:
     ir = Ir(text)
     inside_site = find_inside_site(ir)  # (in the stock IR; applied last)
     march = find_sun_march(ir, find_cloud_ms(ir))  # (likewise)
-    colour = apply_cloud_ap(ir)
-    ir.reindex()
-    optical = apply_cloud_optical(ir)  # (before apply_cloud_shape renames the edge ramps)
-    ir.reindex()
-    untile = apply_cloud_untile(ir)  # (its offset coordinates keep their names; the finer octave inherits them)
-    ir.reindex()
+    leave_out = set(PROFILE_LEAVE_OUT)
+    need(leave_out <= set(CLOUD_FEATURES), f"unknown cloud features: {sorted(leave_out - set(CLOUD_FEATURES))}")
+
+    def step(feature, apply, *args):
+        if feature in leave_out:
+            return f"{feature} left out (cost profile)"
+        out = apply(ir, *args)
+        ir.reindex()
+        return out
+    colour = step("haze", apply_cloud_ap)
+    optical = step("optical", apply_cloud_optical)  # (before apply_cloud_shape renames the edge ramps)
+    untile = step("untile", apply_cloud_untile)  # (its offset coordinates keep their names; the finer octave inherits them)
     optical += "; " + untile
-    detail = apply_cloud_detail(ir)
-    ir.reindex()
-    shape = apply_cloud_shape(ir)
-    ir.reindex()
-    types = apply_cloud_types(ir)
-    ir.reindex()
-    ms = apply_cloud_ms(ir)
-    ir.reindex()
-    phase = apply_cloud_phase(ir)
-    ir.reindex()
-    inside = apply_cloud_inside(ir, inside_site)
-    ir.reindex()
-    inside += "; " + apply_cloud_fog_record(ir, inside_site)
-    ir.reindex()
-    inside += "; " + apply_cloud_tilt_view(ir, march, inside_site)
-    types += "; " + guard_cloud_storms(ir)
-    types += "; " + guard_cloud_types_noise(ir)
-    types += "; " + guard_cloud_types(ir)
-    shape += "; " + guard_cloud_shadow(ir)
-    detail += "; " + guard_cloud_detail(ir)
-    user = append_user_dump(ir)
+    detail = step("detail", apply_cloud_detail)
+    shape = step("shape", apply_cloud_shape)
+    types = step("types", apply_cloud_types)
+    ms = step("ms", apply_cloud_ms)
+    phase = step("phase", apply_cloud_phase)
+    inside = step("inside", apply_cloud_inside, inside_site)
+    inside += "; " + step("fogrec", apply_cloud_fog_record, inside_site)
+    inside += "; " + step("tilt", apply_cloud_tilt_view, march, inside_site)
+    if "types" not in leave_out:
+        types += "; " + guard_cloud_storms(ir)
+        types += "; " + guard_cloud_types_noise(ir)
+        types += "; " + guard_cloud_types(ir)
+    if "shape" not in leave_out:
+        shape += "; " + guard_cloud_shadow(ir)
+    if "detail" not in leave_out:
+        detail += "; " + guard_cloud_detail(ir)
+    if "shape" in leave_out:
+        # (the plane light reads the glory's and the shadow's terms: as without them, 0 and 1)
+        body = "\n".join(ir.lines)
+        entry = next(i for i, l in enumerate(ir.lines) if l.startswith("define void @")) + 1
+        ir.lines[entry:entry] = [f"  {n} = fadd fast float {f32(v)}, 0.000000e+00"
+                                 for n, v in [(f"%mod.gl.t{k}", 0.0) for k in range(3)] + [("%mod.sh.f", 1.0)]
+                                 if re.search(rf"{re.escape(n)}(?![\w.])", body) and n not in ir.defs]
+        ir.reindex()
+    user = step("dump", append_user_dump)
     return finish(ir, cloud=True, debug_uav=True), (f"{colour}; {optical}; {detail}; {shape}; {types}; {ms}; {phase}; "
                                                     f"{inside}; {user}")
 
