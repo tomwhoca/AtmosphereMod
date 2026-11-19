@@ -3950,6 +3950,38 @@ def guard_cloud_types(ir: Ir) -> str:
     return "cloud types skipped in empty air"
 
 
+def guard_cloud_storms(ir: Ir) -> str:
+    """The storm cells' data in the view march behind the thunderstorms on (DebugCapture bit 8 clear, C32 > 0;
+    off in the shipped defaults) and the types on (%mod.st.on), as the generator writes their anvils' cover and
+    towers' marks as 0 without storms (apply_cb_towers: %mod.cb.ccov, %mod.cb.mark) (2026-11-19):
+      - the anvils (apply_cloud_types: two buffer reads at every step, in empty air too): %mod.ci.cov and
+        %mod.ci.alt come out 0 (%mod.ci.on, outside, is then false);
+      - the towers' marks (tyt: two buffer reads per step in cloud): %mod.sa.lf comes out 0.
+    Before guard_cloud_types; the anvils' run ends before %mod.ci.on (an i1, which the join can't give)."""
+    ir.reindex()
+    adds = [i for i, l in enumerate(ir.lines) if re.match(rf"\s+%mod\.tys\d+ = add i32 %mod\.tys\d+, {ANVIL_REGION}$", l)]
+    need(len(adds) == 1, f"{len(adds)} anvil addresses in the view march")
+    start = adds[0] - 1
+    need(re.match(r"\s+%mod\.tys\d+ = shl i32 \S+, 3$", ir.lines[start]), "the anvils' address doesn't start the run")
+    alt = [i for i, l in enumerate(ir.lines) if l.startswith("  %mod.ci.alt = ")]
+    need(len(alt) == 1 and alt[0] > start and ir.lines[alt[0] + 1].startswith("  %mod.ci.on = "),
+         "the anvils' run doesn't end in %mod.ci.alt, %mod.ci.on")
+    cond = [f"  %mod.st.b = and i32 %mod.ty.flags, {DEBUG_STORMS_OFF}",
+            "  %mod.st.off = icmp ne i32 %mod.st.b, 0",
+            "  %mod.st.on0 = xor i1 %mod.st.off, true",
+            "  %mod.st.on = and i1 %mod.ty.on, %mod.st.on0"]
+    ir.lines[start:start] = cond
+    guard_run(ir, start + len(cond), alt[0] + len(cond) + 1, "%mod.st.on", "an", keep=True)
+    ir.reindex()
+    run = [i for i, l in enumerate(ir.lines) if re.match(r"\s+%mod\.(?:tyt\d+|sa\.lf) = ", l)]
+    if not run:  # (variants without the light volume's sums: no towers' sky light)
+        return "the storm cells' anvils read only with thunderstorms on"
+    need(run[-1] - run[0] + 1 == len(run) and ir.lines[run[-1]].startswith("  %mod.sa.lf = "),
+         "the towers' marks aren't one run ending in %mod.sa.lf")
+    guard_run(ir, run[0], run[-1] + 1, "%mod.st.on", "tyt", keep=True)
+    return "the storm cells' anvils and towers read only with thunderstorms on"
+
+
 def guard_cloud_types_noise(ir: Ir) -> str:
     """The 8 km octave's lookups by type (apply_cloud_types' %mod.tn. run: TYPES_NOISE, two texture reads per step
     of the view march's erosion octaves) behind the types on and some of those types in the cell (%mod.ty.nw > 0):
@@ -4783,6 +4815,7 @@ def patch_clouds(text: str) -> tuple[str, str]:
     inside += "; " + apply_cloud_fog_record(ir, inside_site)
     ir.reindex()
     inside += "; " + apply_cloud_tilt_view(ir, march, inside_site)
+    types += "; " + guard_cloud_storms(ir)
     types += "; " + guard_cloud_types_noise(ir)
     types += "; " + guard_cloud_types(ir)
     shape += "; " + guard_cloud_shadow(ir)

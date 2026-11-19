@@ -488,12 +488,14 @@ def check_light_volume(stock, patched, failures):
     return err
 
 
-def types_buffer(rng, magic=P.TYPES_MAGIC, noise_types=True):
+def types_buffer(rng, magic=P.TYPES_MAGIC, noise_types=True, storms=True):
     """The debug buffer (float32 words) with the generator's header and a
     random grid of type weights (sum <= 1; some cells all cumulus), and the
     grid as bytes [slice, y, x, type], the anvils' (level, cover) and the
     towers' (mark, base) per cell. noise_types=False: no cell has any of the
-    types with a noise of their own (P.TYPES_NOISE)."""
+    types with a noise of their own (P.TYPES_NOISE); storms=False: as the
+    generator writes it without thunderstorms, every anvil's cover and
+    tower's mark 0."""
     n, k = P.TYPES_N, P.TYPES_SLICES
     raw = rng.dirichlet(np.ones(5), size=(k, n, n))[..., :4]
     raw[rng.uniform(size=(k, n, n)) < 0.2] = 0.0
@@ -507,10 +509,14 @@ def types_buffer(rng, magic=P.TYPES_MAGIC, noise_types=True):
     # the storm cells' anvils: (level, cover) per cell, some cells without
     anvil = np.stack([rng.uniform(8000, 13000, (n, n)), rng.uniform(0, 1, (n, n))], -1).astype(np.float32)
     anvil[..., 1][rng.uniform(size=(n, n)) < 0.4] = 0.0
+    if not storms:
+        anvil[..., 1] = 0.0
     words[P.ANVIL_REGION // 4:P.TOWER_REGION // 4] = anvil.reshape(-1).view(np.uint32)
     # the storm towers' marks: (mark, base) per cell, most cells without
     tower = np.stack([rng.uniform(0, 1, (n, n)), rng.uniform(300, 2500, (n, n))], -1).astype(np.float32)
     tower[..., 0][rng.uniform(size=(n, n)) < 0.4] = 0.0
+    if not storms:
+        tower[..., 0] = 0.0
     words[P.TOWER_REGION // 4:] = tower.reshape(-1).view(np.uint32)
     return words.view(np.float32), (grid, anvil, tower)
 
@@ -1202,6 +1208,13 @@ def check(crc: str, stock: str) -> list[str]:
     no_noise_types, _ = types_buffer(np.random.default_rng(5), noise_types=False)
     if octave and "  br i1 %mod.tng.on, label %mod.tn.go, " not in patched:
         failures.append("types: the 8 km octave's lookups by type aren't behind their gate")
+    # the storm cells' anvils and towers behind the thunderstorms on (guard_cloud_storms): without storms the
+    # generator writes their cover and marks as 0 (stormless, below), and skipping them changes nothing
+    stormless, _ = types_buffer(np.random.default_rng(6), storms=False)
+    if "  br i1 %mod.st.on, label %mod.an.go, " not in patched:
+        failures.append("types: the anvils' reads aren't behind the thunderstorms on")
+    if lv_sums and "  br i1 %mod.st.on, label %mod.tyt.go, " not in patched:
+        failures.append("types: the towers' marks aren't behind the thunderstorms on")
     ramp0 = edges["ramps"][0][1]
     # the weights behind their gate (guard_cloud_types): S > -max(-lo, c step) or near the cirrus band. Off it the
     # view ramp is 0 for any step, and the types reach the density only through the ramp's product (prod)
@@ -1303,6 +1316,19 @@ def check(crc: str, stock: str) -> list[str]:
                 failures.append(f"{tag}: without the types with a noise, their lookups still run")
             if not np.array_equal(bare("%mod.tn.n"), bare(octave["n1"])):
                 failures.append(f"{tag}: without the types with a noise, the 8 km octave isn't its own noise")
+        # thunderstorms off (bit 8): the anvils' and towers' reads skipped, all as with the stormless grid read
+        m8 = mod.copy()
+        m8[0, 0] = np.uint32(P.DEBUG_BUFFER_TYPES | P.DEBUG_STORMS_OFF).view(np.float32)
+        read = Evaluator(patched, {"b1 space50": cloud, "b0 space50": mod}, seeds, sampler=fine_sampler,
+                         buffer=stormless)
+        skip = Evaluator(patched, {"b1 space50": cloud, "b0 space50": m8}, seeds, sampler=fine_sampler,
+                         buffer=stormless)
+        if np.asarray(skip("%mod.st.on")).astype(bool).any() or not np.asarray(read("%mod.st.on")).astype(bool).all():
+            failures.append(f"{tag}: the storm cells' gate doesn't follow the thunderstorms bit")
+        outs = [opt["prod"], ramp0, "%mod.ci.cov"] + (["%mod.sa.lf"] if lv_sums else [])
+        diff = [o for o in outs if not np.array_equal(read(o), skip(o))]
+        if diff:
+            failures.append(f"{tag}: thunderstorms off, skipping the storm cells changes {diff}")
         # the towers' sky light: the floor n CB_SIDE_AMBIENT mark sat((h - base) / ramp), and the
         # light volume's sums raised to it exactly
         if lv_sums:
