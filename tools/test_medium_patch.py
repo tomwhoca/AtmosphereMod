@@ -239,6 +239,12 @@ class Evaluator:
                 out = {"6": np.abs, "7": lambda x: np.clip(x, 0, 1), "12": np.cos, "13": np.sin, "21": np.exp2, "23": np.log2,
                        "24": np.sqrt, "25": lambda x: 1 / np.sqrt(x), "27": np.floor, "22": lambda x: x - np.floor(x),
                        "26": np.rint, "28": np.ceil, "29": np.trunc}[m[1]](a)
+        elif m := re.match(r"call float @dx\.op\.waveReadLaneFirst\.f32\(i32 118, float (\S+)\)", rhs):
+            # (patch_dxil's Emitter.uniform: only for values the same in every thread, which the GPU's first lane
+            # then gives every thread; here every lane must agree)
+            out = np.asarray(v(m[1]))
+            if out.ndim and np.unique(out[~np.isnan(out)]).size > 1:
+                raise ValueError(f"{name}: WaveReadLaneFirst of a value that varies across lanes")
         elif m := re.match(r"call float @dx\.op\.binary\.f32\(i32 (35|36), float (\S+), float (\S+)\)", rhs):
             out = (np.maximum if m[1] == "35" else np.minimum)(v(m[2]), v(m[3]))
         elif m := re.match(r"call float @dx\.op\.tertiary\.f32\(i32 46, float (\S+), float (\S+), float (\S+)\)", rhs):

@@ -531,6 +531,40 @@ def cloud_cbuffer(c):
     return out
 
 
+UNIFORM_CALL = re.compile(r"call \S+ @dx\.op\.(?:unary|binary|tertiary|dot[234]|cbufferLoadLegacy|createHandleFromBinding"
+                          r"|createHandle|annotateHandle|waveReadLaneFirst)\.?")
+TYPE_TOKEN = re.compile(r"%(?:dx\.types|struct|CBuffer|\"class)")
+
+
+def check_uniform_reads(text: str) -> None:
+    """Every WaveReadLaneFirst (Emitter.uniform) must read a value that is the same in every thread: computed only
+    from cbuffers and literals. Elsewhere it would give every thread its wave's first one."""
+    defs = {m[1]: m[2] for m in re.finditer(r"^\s+(%[\w.$-]+) = (.*?)(?:\s+;.*)?$", text, re.M)}
+    memo = {}
+
+    def uniform(v):
+        todo = [v]
+        while todo:  # (iterative: chains run deep)
+            n = todo.pop()
+            if n in memo:
+                continue
+            rhs = defs.get(n)
+            if rhs is None or rhs.startswith("phi ") or rhs.startswith("call ") and not UNIFORM_CALL.match(rhs):
+                memo[n] = False
+                continue
+            uses = [u for u in re.findall(r"%[\w.$-]+", rhs) if not TYPE_TOKEN.match(u)]
+            if rhs.startswith("call float @dx.op.waveReadLaneFirst"):
+                uses = []
+            pending = [u for u in uses if u not in memo]
+            if pending:
+                todo += [n] + pending
+                continue
+            memo[n] = all(memo[u] for u in uses)
+        return memo[v]
+    for m in re.finditer(r"@dx\.op\.waveReadLaneFirst\.f32\(i32 118, float (%[\w.$-]+)\)", text):
+        need(uniform(m[1]), f"WaveReadLaneFirst of {m[1]}, which isn't the same in every thread")
+
+
 def finish(ir: Ir, cloud: bool = False, debug_uav: bool = False) -> str:
     """Insert the tunables prologue, the declarations we use and our cbuffer
     metadata; with cloud, also the cloud tunables (b1 space50); with
@@ -592,6 +626,13 @@ def finish(ir: Ir, cloud: bool = False, debug_uav: bool = False) -> str:
     if "@dx.op.textureLoad.f32(" in text and "dx.op.textureLoad.f32" not in attrs:
         extra.append("declare %dx.types.ResRet.f32 @dx.op.textureLoad.f32(i32, %dx.types.Handle, i32, i32, i32, i32, "
                      f"i32, i32, i32) {readonly}")
+    wave_ops = "@dx.op.waveReadLaneFirst.f32(" in text and "dx.op.waveReadLaneFirst.f32" not in attrs
+    if wave_ops:  # (Emitter.uniform)
+        check_uniform_reads(text)
+        if "nounwind" not in groups:
+            groups["nounwind"] = f"#{max(int(g[1:]) for g in groups.values()) + 1}"
+            text += f"\nattributes {groups['nounwind']} = {{ nounwind }}\n"
+        extra.append(f"declare float @dx.op.waveReadLaneFirst.f32(i32, float) {groups['nounwind']}")
     if "@dx.op.getDimensions(" in text and "dx.op.getDimensions" not in attrs:
         extra.append(f"declare %dx.types.Dimensions @dx.op.getDimensions(i32, %dx.types.Handle, i32) {readonly}")
     if "@dx.op.rawBufferLoad.f32(" in text and "dx.op.rawBufferLoad.f32" not in attrs:
@@ -697,6 +738,13 @@ def finish(ir: Ir, cloud: bool = False, debug_uav: bool = False) -> str:
         need(len(flags) == 1, f"{len(flags)} shader-flag entries")
         f = flags[0]
         text = text[:f.start(1)] + str(int(f[1]) | 0x2000000) + text[f.end(1):]
+
+    if wave_ops:
+        # ... and wave intrinsics (WaveOps)
+        flags = list(re.finditer(r"!\{i32 0, i64 (\d+)", text))
+        need(len(flags) == 1, f"{len(flags)} shader-flag entries")
+        f = flags[0]
+        text = text[:f.start(1)] + str(int(f[1]) | 0x80000) + text[f.end(1):]
 
     return text
 
@@ -1633,6 +1681,13 @@ class Emitter:
 
     def select(self, cond, a, b):
         return self.new(f"select i1 {cond}, float {self.lit(a)}, float {self.lit(b)}")
+
+    def uniform(self, a):
+        """a, a value that is the same in every thread (from cbuffers and literals only), through WaveReadLaneFirst:
+        AMD's compiler then holds it in a scalar register (v_readfirstlane) instead of one vector register per value,
+        through a loop that uses it (RDNA has no scalar float maths, so whatever the shader computes from cbuffer
+        values lands in vector registers otherwise). Exact for a uniform a, wrong for any other."""
+        return self.new(f"call float @dx.op.waveReadLaneFirst.f32(i32 118, float {self.lit(a)})")
 
     def handle(self, binding, size):
         return self.new(f"call %dx.types.Handle @dx.op.annotateHandle(i32 216, %dx.types.Handle {binding}, "
@@ -4300,6 +4355,9 @@ def shadow_pixel_lines(em: Emitter, dirs, light) -> dict:
         B = point(a1, b1, sweep[0] if sweep else 0.0)
         D = (em.sub(B[0], A[0]), em.sub(B[1], A[1]))
         inv = em.div(1.0, em.max(em.mad(D[1], D[1], em.mul(D[0], D[0])), 1e-6))
+        # (from the sun's direction and the cloud constants only: the same in every thread. The march uses them at
+        # every step, so as scalars on AMD; 2026-11-19 RGA, RDNA 3: 6-17 vector registers fewer)
+        A, D, inv = tuple(map(em.uniform, A)), tuple(map(em.uniform, D)), em.uniform(inv)
         caps.append((A, D, inv, f"%mod.cshr{i}"))  # (r in lengths or spans: a cloud constant)
     return {"e1": e1, "e2": e2, "caps": caps}
 
@@ -4537,7 +4595,7 @@ def shadow_reach_pixel_lines(em: Emitter, pix: dict, cos: str, dirs, light) -> d
         far = em.sqrt(em.max(em.mad(A[1], A[1], em.mul(A[0], A[0])), em.mad(B[1], B[1], em.mul(B[0], B[0]))))
         r = em.add(far, radius)
         reach = r if reach is None else em.max(reach, r)
-    return {"wn": wn, "R": em.mad(reach, SHADOW_REACH_PAD[0], SHADOW_REACH_PAD[1]),
+    return {"wn": wn, "R": em.uniform(em.mad(reach, SHADOW_REACH_PAD[0], SHADOW_REACH_PAD[1])),  # (as the capsules')
             "pen": em.mul(cos, -0.5 * SUN_DIAMETER_TAN),
             "sa": em.mul(sin_off, 0.5 * CLOUD_STEP_PER_M), "sb": em.mul(sin_off, 0.5 * CLOUD_STEP_MIN_M)}
 
