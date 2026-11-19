@@ -61,8 +61,8 @@ def load(capture: str) -> dict:
     d["volsub"] = np.frombuffer(raw, np.uint8, v * v * K * 4, P.CG_VOLSUB).reshape(v, v, K, 4) / 255.0
     d["precip"] = [np.frombuffer(raw, np.float32, m * m, P.CG_PRECIP + 4 * m * m * j).reshape(m, m) for j in range(2)]
     d["g4"] = np.frombuffer(raw, np.float32, m * m * 4, P.CG_MAP[0]).reshape(m, m, 4)
-    d["cloud"] = np.frombuffer(raw, np.float32, P.CLOUD_PARAMS_SIZE // 4, P.CG_CLOUD)
-    d["cloud_u"] = np.frombuffer(raw, np.uint32, P.CLOUD_PARAMS_SIZE // 4, P.CG_CLOUD)
+    d["cloud"] = np.frombuffer(raw, np.float32, P.CLOUD_TUNABLES_SIZE // 4, P.CG_CLOUD)
+    d["cloud_u"] = np.frombuffer(raw, np.uint32, P.CLOUD_TUNABLES_SIZE // 4, P.CG_CLOUD)
     d["columns"] = np.frombuffer(raw, np.float32, v * v * 4, P.CG_COLUMNS).reshape(v, v, 4)
     # the METAR anchoring's station table (the add-on writes it; patch_dxil.py ANCHOR_TABLE)
     magic, count, ns = struct.unpack_from("<3I", raw, P.CG_ANCHOR)

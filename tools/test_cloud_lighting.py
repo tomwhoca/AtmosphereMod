@@ -210,8 +210,7 @@ def check_shadow(patched, dir_names, light_names, t_name, s_name, failures):
     worst = 0.0
     for c in [(1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1.0, 0.7, 0.25, 35.0),
               (1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.6, -2.5, -0.5, 11.0)]:
-        cloud = np.zeros((4, 4))
-        cloud.flat[:16] = c
+        cloud = P.cloud_cbuffer(c)
         for dist in (150.0, 700.0, 2500.0):
             sv = np.linspace(0.3, 1.0, len(view)).astype(F)  # the direct-sunlight weight, and 1
             sv[: len(view) // 2] = 1.0
@@ -332,8 +331,7 @@ def check_shadow_map(patched, dir_names, light_names, t_name, s_name, failures):
     a2 = np.cross(sun, a1)
     worst = 0.0
     c0 = 0.33
-    glory_cloud = np.zeros((4, 4))
-    glory_cloud.flat[:16] = (1, 0, 0, 0, 0, 0, 0, 0, 0, 1.0, 8.0, 0.2, 0.8, 0.7, 0.25, 35.0)
+    glory_cloud = P.cloud_cbuffer((1, 0, 0, 0, 0, 0, 0, 0, 0, 1.0, 8.0, 0.2, 0.8, 0.7, 0.25, 35.0))
     gview = -sun + np.linspace(-0.1, 0.1, 64)[:, None] * a1
     gview /= np.linalg.norm(gview, axis=1, keepdims=True)
     glory_seeds = {t_name: np.full(len(gview), 400.0, dtype=F), s_name: np.ones(len(gview), F)}
@@ -355,8 +353,7 @@ def check_shadow_map(patched, dir_names, light_names, t_name, s_name, failures):
         mod[0, 0] = np.array([(frame & 0xFFFF) << 16 | 16 | 12], np.uint32).view(np.float32)[0]
         for c15 in (35.0, -35.0):
             c = (1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.8, 0.7, 0.25, c15)
-            cloud = np.zeros((4, 4))
-            cloud.flat[:16] = c
+            cloud = P.cloud_cbuffer(c)
             for dist, extent in ((60.0, 0.6), (400.0, 0.12), (2500.0, 0.03)):
                 u, v = np.meshgrid(np.linspace(-extent, extent, n), np.linspace(-extent, extent, n))
                 view = -sun + u.ravel()[:, None] * a1 + v.ravel()[:, None] * a2
@@ -426,8 +423,7 @@ def check_shadow_reach(patched, dir_names, light_names, t_name, s_name, failures
              ("capsules, span 80 m", (1.0, 2.0, 0.1, 80.0), np.zeros((4, 4)), None),
              ("live window", (0.8, 0.7, 0.25, 35.0), window_mod, words)]
     for what, c12, mod, buffer in cases:
-        cloud = np.zeros((4, 4))
-        cloud.flat[:16] = (1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, *c12)
+        cloud = P.cloud_cbuffer((1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, *c12))
         seeds = {t_name: dist.astype(F), s_name: np.ones(len(dist), F), LV: np.ones(len(dist), F)}
         for k3 in range(3):
             seeds[dir_names[k3]] = view[:, k3].astype(F)
@@ -458,8 +454,8 @@ def check_light_volume(stock, patched, failures):
     cbs = {}
     for _, (_, size) in ir.cbs.items():
         cbs[size] = rng.normal(0, 0.3, size=(size // 16, 4))
-    for key in ("b0 space50", "b1 space50"):
-        cbs[key] = np.zeros((4, 4))
+    cbs["b0 space50"] = np.zeros((4, 4))
+    cbs["b1 space50"] = P.cloud_cbuffer([])
 
     def sampler(u, v, w=None):
         u, v = np.asarray(u, np.float64), np.asarray(v, np.float64)
@@ -600,8 +596,7 @@ def check_untile(stock: str, patched: str, failures: list) -> float:
         pos[g["w"]] = xyz.astype(F).astype(np.float64)
     worst = 0.0
     for c0 in (0.0, 1.0):
-        cloud = np.zeros((P.CLOUD_PARAMS_SIZE // 16, 4))
-        cloud.flat[0] = c0
+        cloud = P.cloud_cbuffer([c0])
         cbs = {4800: G.astype(F), "b1 space50": cloud, "b0 space50": np.zeros((4, 4))}
         got, want = Evaluator(patched, cbs, seeds), Evaluator(stock, cbs, seeds)
         for g in groups:
@@ -644,7 +639,7 @@ def check_tilt_view(stock: str, patched: str, failures: list) -> None:
     f = rng.uniform(0, 1, n).astype(F)
     seeds = {march["index"]: index.astype(np.int64), march["index_f"]: index.astype(F), march["scale"]: f,
              march["depth"]: dep, march["depth_q"]: q, "%mod.tv.mu0": np.zeros(n, F), "%mod.tv.raw0": np.zeros(n, F)}
-    cbs = {"b1 space50": np.zeros((P.CLOUD_PARAMS_SIZE // 16, 4)), "b0 space50": np.zeros((4, 4))}
+    cbs = {"b1 space50": P.cloud_cbuffer([]), "b0 space50": np.zeros((4, 4))}
     # (the march's sums run only with the tilt view's bit or the plane light on: guard_run)
     tilt = np.zeros((4, 4))
     tilt[0, 0] = np.uint32(P.DEBUG_CLOUD_TILT).view(np.float32)
@@ -742,10 +737,11 @@ def check_plane_light(stock: str, patched: str, failures: list) -> None:
         parts.append((u(0, 2), visibility, u(0.5, 20)))
         seeds[ep], seeds[sprime], seeds[march["sun"][c]] = parts[-1]
     for strength, glory_on in ((0.0, False), (0.0, True), (0.6, False), (0.6, True), (1.0, True)):
-        cloud = np.zeros((P.CLOUD_PARAMS_SIZE // 16, 4))
-        cloud[0, 0] = 1.0
-        cloud[2, 1] = 0.5 if glory_on else 0.0  # C9
-        cloud[8, 3] = strength  # C35's slot
+        cc = [0.0] * (P.CLOUD_TUNABLES_SIZE // 4)
+        cc[0] = 1.0
+        cc[9] = 0.5 if glory_on else 0.0
+        cc[35] = strength  # C35's slot
+        cloud = P.cloud_cbuffer(cc)
         got = Evaluator(patched, {"b1 space50": cloud, "b0 space50": np.zeros((4, 4))}, seeds)
         fm = np.maximum(f.astype(np.float64), P.PLANE_F_MIN)
         mu = P.PLANE_MU
@@ -873,9 +869,8 @@ def check(crc: str, stock: str) -> list[str]:
     if detail and "  br i1 %mod.fo.on, label %mod.fo.go, " not in patched:
         failures.append("detail: the finer octave's lookup isn't behind C30")
     for c in SETS:
-        c = tuple(c) + (0.0,) * (P.CLOUD_PARAMS_SIZE // 4 - len(c))
-        cloud = np.zeros((P.CLOUD_PARAMS_SIZE // 16, 4))
-        cloud.flat[:len(c)] = c
+        c = tuple(c) + (0.0,) * (P.CLOUD_TUNABLES_SIZE // 4 - len(c))
+        cloud = P.cloud_cbuffer(c)
         cbs = {"b1 space50": cloud, "b0 space50": np.zeros((4, 4))}
         seeds = {ms["s"]: s, **rain, opt["sigma"]: sigma, opt["height"]: height, **dseeds, step_name: step,
                  **inside_seeds}
@@ -1035,8 +1030,7 @@ def check(crc: str, stock: str) -> list[str]:
     near_t = np.concatenate([[0.0, 1.5, 2.25, 3.0, 50.0, 100.0, 200.0, 300.0, 400.0],
                              rng.uniform(0, 400, N - 9)]).astype(F)
     for ci, c in enumerate(NEAR_SETS):
-        cloud = np.zeros((P.CLOUD_PARAMS_SIZE // 16, 4))
-        cloud.flat[:len(c)] = c
+        cloud = P.cloud_cbuffer(c)
         seeds = {ms["s"]: s, **rain, opt["sigma"]: sigma, opt["height"]: height, **dseeds, LV: np.ones(N, F),
                  edges["depth"]: depth, t_name: near_t, step_name: step, **radiance, inside["ext"]: ext_seed}
         for _, cosname, *_ in blends:
@@ -1258,14 +1252,12 @@ def check(crc: str, stock: str) -> list[str]:
     x64 = ramp_x.astype(np.float64)
     stock_ramp = np.clip(1.5 - np.exp2(x64 * P.literal_value(P.EDGE_SLOPE)), 0, 1)
     for c in TYPE_SETS:
-        cloud = np.zeros((P.CLOUD_PARAMS_SIZE // 16, 4))
-        cloud.flat[:len(c)] = c
+        cloud = P.cloud_cbuffer(c)
         mod = np.zeros((4, 4))
         mod[0, 0] = np.uint32(P.DEBUG_BUFFER_TYPES).view(np.float32)
         untyped = list(c)
         untyped[23] = 0.0
-        plain = np.zeros((P.CLOUD_PARAMS_SIZE // 16, 4))
-        plain.flat[:len(c)] = untyped
+        plain = P.cloud_cbuffer(untyped)
         seeds = {ms["s"]: s, **rain, opt["sigma"]: sigma, opt["height"]: height, **dseeds, LV: np.ones(N, F),
                  edges["depth"]: depth, t_name: dist.astype(F), step_name: step, **inside_seeds}
         for _, cosname, *_ in blends:

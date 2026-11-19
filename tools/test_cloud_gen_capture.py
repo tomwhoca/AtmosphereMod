@@ -296,9 +296,9 @@ def constants(flags, disc=2.0, cloud=None):
     mod = np.zeros((4, 4))
     mod[0, 0] = struct.unpack("<f", struct.pack("<I", flags))[0]
     mod[0, 1] = struct.unpack("<f", struct.pack("<I", STAMP))[0]
-    clouds = np.zeros((P.CLOUD_PARAMS_SIZE // 16, 4))
+    # (the cloud cbuffer as the add-on writes it: C0..C35, then the cloud constants from them)
+    clouds = P.cloud_cbuffer(cloud if cloud is not None else [])
     if cloud is not None:
-        clouds.flat[:len(cloud)] = cloud
         # a planet frame from a capture near EKCH (G110..G112)
         G[110] = (1.308447e-07, 8.637934e-08, -5.639204e-12, 0.5522037)
         G[111] = (-1.279492e-08, 1.937121e-08, -1.550573e-07, 0.1238358)
@@ -360,7 +360,7 @@ class FlatTex(Tex):
 
 
 def anchor_cloud(strength=STRENGTH, types=0.0):
-    c = [0.0] * (P.CLOUD_PARAMS_SIZE // 4)
+    c = [0.0] * (P.CLOUD_TUNABLES_SIZE // 4)
     c[20], c[21], c[23] = strength, RADIUS_KM, types
     return c
 
@@ -617,7 +617,7 @@ def check_specks(stock_p, patched_p, values, noise, t1_name, h_name, lut, tex, c
         profile[k] = 0.5
     dims = tex[5].dims
     tex_s = {**tex, 5: ProfileTex(5, dims, profile), 6: ProfileTex(6, dims, profile)}
-    on = [0.0] * (P.CLOUD_PARAMS_SIZE // 4)
+    on = [0.0] * (P.CLOUD_TUNABLES_SIZE // 4)
     on[0], on[16], on[17] = 1.0, 2.0, 0.33
     off = list(on)
     off[16] = 0.0
@@ -672,7 +672,7 @@ def check_type_decks(stock_p, patched_p, values, noise, t1_name, h_name, lut, te
             profile[k0:k1] = [cv] * (k1 - k0)
         tex_l = {**tex, 0: FlatTex(0, (64, 64, 0, 1), 50.0 / 65535), 5: ProfileTex(5, dims, profile),
                  6: ProfileTex(6, dims, profile)}
-        off = [0.0] * (P.CLOUD_PARAMS_SIZE // 4)
+        off = [0.0] * (P.CLOUD_TUNABLES_SIZE // 4)
         on = list(off)
         on[23] = 1.0
         changed[what] = 0
@@ -962,7 +962,7 @@ def check_towers(stock, patched_p, tex, check):
         if m:
             orig[int(m[1])] = (m[2], m[3])
     tex_r = {**tex, 2: RainTex(2, tex[2].dims), 3: RainTex(3, tex[3].dims)}
-    on = [0.0] * (P.CLOUD_PARAMS_SIZE // 4)
+    on = [0.0] * (P.CLOUD_TUNABLES_SIZE // 4)
     on[0], on[16], on[17] = 1.0, 2.0, 0.33
     cb = constants(0, cloud=on)
     G = cb[(0, 1)]
@@ -1403,7 +1403,7 @@ def main():
     # the cloud constants as the shader saw them, in the header
     cap = Machine(patched_p, constants(1 | P.DEBUG_BUFFER_16MB, cloud=anchor_cloud()), TEX, bytearray(table))
     cap.run((0, 0))
-    got_c = struct.unpack_from(f"<{P.CLOUD_PARAMS_SIZE // 4}I", cap.buf, P.CLOUD_GEN_REGION + P.CG_CLOUD)
+    got_c = struct.unpack_from(f"<{P.CLOUD_TUNABLES_SIZE // 4}I", cap.buf, P.CLOUD_GEN_REGION + P.CG_CLOUD)
     want_c = tuple(struct.unpack("<I", struct.pack("<f", x))[0] for x in anchor_cloud())
     check(got_c == want_c, "cloud constants in the capture header")
     print("all checks passed" if bad == 0 else f"{bad} check(s) failed")

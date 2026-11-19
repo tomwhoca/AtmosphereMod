@@ -83,8 +83,7 @@ def run(rng, c15, cam_uv, frame=FRAME, rt_on=False, rt_bound=False):
     mod = np.zeros((4, 4))
     flags = (frame & 0xFFFF) << 16 | 16 | 4 | 8 | (32 if rt_bound else 0)
     mod[0, 0] = np.array([flags], np.uint32).view(np.float32)[0]
-    cloud = np.zeros((4, 4))
-    cloud[3, 3] = c15
+    cloud = P.cloud_cbuffer([0.0] * 15 + [c15])
     cbs = {"b0 space50": mod, "b1 space50": cloud, 720: rows, 4800: glob}
 
     def texture(x, y, k):
@@ -280,8 +279,7 @@ def check_camera_sun(rng, failures):
                 return np.stack(np.broadcast_arrays(lo, hi, 0.0, 0.0), -1)
             mod = np.zeros((4, 4))
             mod[0, 0] = np.array([(FRAME & 0xFFFF) << 16 | 28], np.uint32).view(np.float32)[0]
-            cloud = np.zeros((4, 4))
-            cloud[3, 3] = 34.5
+            cloud = P.cloud_cbuffer([0.0] * 15 + [34.5])
             cbs = {"b0 space50": mod, "b1 space50": cloud, 720: scene(rng, [(0.45, 0.43)] * 4)[2], 4800: glob}
             ev = Evaluator(text, cbs, {}, sampler=sampler)
             got = float(np.asarray(ev("%mod.vc.v")).ravel()[0])

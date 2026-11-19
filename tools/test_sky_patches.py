@@ -64,8 +64,7 @@ def constants(flags=0, t0=0.0, t12=0.0, c22=0.0, layout="transmittance", haze=No
         for index, value in zip((1, 3, 4, 5, 6, 10), haze):
             tun[index] = value
     mod[1:4] = np.array(tun).reshape(3, 4)
-    cloud = np.zeros((P.CLOUD_PARAMS_SIZE // 16, 4))
-    cloud.flat[22] = c22
+    cloud = P.cloud_cbuffer([0.0] * 22 + [c22])
     atmo = np.array(ATMO, dtype=np.float64)
     if layout == "transmittance":
         return {(0, 0): atmo, (50, 0): mod, (50, 1): cloud}

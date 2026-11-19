@@ -72,10 +72,11 @@ MOD_SPACE = 50  # the register space of the mod's bindings; the installer's --re
 MOD_PARAMS_SIZE = 64
 # C0..C35 at b1 space50, compute only (C32 also reaches the shaders as a ModParams bit; C35 too, to the
 # forward pass: FOG_TINT_BIT). A root CBV: a slot of the add-on's ring (kCloudSettingsSlotBytes), so it can grow
-# to a slot's 256 bytes (64 values) with the add-on's kCloudTunableCount, without touching the root signature.
-CLOUD_PARAMS_SIZE = 144
-CLOUD_SETTINGS_SLOT_BYTES = 256
-assert CLOUD_PARAMS_SIZE % 16 == 0 and CLOUD_PARAMS_SIZE <= CLOUD_SETTINGS_SLOT_BYTES
+# with the add-on's slot without touching the root signature. After C0..C35 (CLOUD_TUNABLES_SIZE) the cloud
+# constants the add-on computes from them (cloud_constant_lines, CLOUD_CONSTANTS); CLOUD_PARAMS_SIZE, the whole,
+# is set at the end of this file, from them.
+CLOUD_TUNABLES_SIZE = 144
+CLOUD_SETTINGS_SLOT_BYTES = 1024
 
 LOG2E = "0x3FF7154760000000"
 NEG_LOG2E = "0xBFF7154760000000"
@@ -244,10 +245,9 @@ def prologue_lines() -> list[str]:
 
 
 def cloud_prologue_lines() -> list[str]:
-    """Load the cloud tunables (CloudParams, b1 space50: the add-on's root CBV, compute only) and derive
-    the forward lobe's constants (weight = C0 * C2 in 0..0.5, g = C1 in 0..0.99),
-    the multiple-scattering ones (C3-C5, apply_cloud_ms) and the shape, glory
-    and aircraft-shadow ones (C6-C15, apply_cloud_shape)."""
+    """Load the cloud tunables (CloudParams, b1 space50: the add-on's root CBV, compute only): C0..C35, and the
+    cloud constants the add-on computed from them (cloud_constant_lines' float values, CLOUD_CONSTANTS); then the
+    rest of those lines (the switches: i1 values) from them, and the tilt view's bit (ModParams)."""
     t = "%dx.types.CBufRet.f32"
     lines = [
         f"  %mod.ch = call %dx.types.Handle @dx.op.createHandleFromBinding(i32 217, %dx.types.ResBind "
@@ -257,9 +257,34 @@ def cloud_prologue_lines() -> list[str]:
     ]
     for r in range(CLOUD_PARAMS_SIZE // 16):
         lines.append(f"  %mod.cr{r} = call {t} @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %mod.cah, i32 {r})")
-    for n in range(CLOUD_PARAMS_SIZE // 4):
+    for n in range(CLOUD_TUNABLES_SIZE // 4):
         lines.append(f"  %mod.C{n} = extractvalue {t} %mod.cr{n // 4}, {n % 4}")
+    base = CLOUD_TUNABLES_SIZE // 4
+    for k, name in enumerate(CLOUD_CONSTANTS):
+        lines.append(f"  {name} = extractvalue {t} %mod.cr{(base + k) // 4}, {(base + k) % 4}")
+    lines += [l for l in cloud_constant_lines() if constant_name(l) not in CLOUD_CONSTANTS]
     lines += [
+        f"  %mod.tvf = extractvalue {t} %mod.oz.r, 0",
+        "  %mod.tvb = bitcast float %mod.tvf to i32",
+        f"  %mod.tvt = and i32 %mod.tvb, {DEBUG_CLOUD_TILT}",
+        "  %mod.tilton = icmp ne i32 %mod.tvt, 0",
+        "  %mod.tvon = or i1 %mod.cplon, %mod.tilton",
+    ]
+    return lines
+
+
+# ---- The cloud constants: what the cloud shaders derive from C0..C35 alone, computed by the add-on on the CPU
+# (addon/src/cloud_constants.h, generated from these lines by tools/gen_cloud_constants.py) and read from the cloud
+# cbuffer after C0..C35, instead of computed in every thread. On RDNA 3, which has no scalar float maths, every such
+# value the view march uses held a vector register through the whole march (2026-11-19, RGA: 37 of them; 162 -> 140
+# registers simulated, 4 -> 5 waves per SIMD). The float values are the constants (CLOUD_CONSTANTS, in this order);
+# the shaders compute the rest (the switches) from them. Only C0..C35, literals and earlier lines in here.
+def cloud_constant_lines() -> list[str]:
+    """The forward lobe's constants (weight = C0 * C2 in 0..0.5, g = C1 in 0..0.99), the multiple-scattering ones
+    (C3-C5, apply_cloud_ms), the shape, glory and aircraft-shadow ones (C6-C15, apply_cloud_shape; the shadow's
+    capsule radii, shadow_pixel_lines), the optical thickness and in-cloud fog (C16-C19, C33, C34), the surface
+    detail (C28-C31) and the cloud types' (C23-C27, apply_cloud_types)."""
+    lines = [
         "  %mod.cmix = call float @dx.op.unary.f32(i32 7, float %mod.C0)",
         "  %mod.cw0 = call float @dx.op.binary.f32(i32 35, float %mod.C2, float 0.000000e+00)",
         "  %mod.cw1 = call float @dx.op.binary.f32(i32 36, float %mod.cw0, float 5.000000e-01)",
@@ -302,12 +327,8 @@ def cloud_prologue_lines() -> list[str]:
         "  %mod.cpl = fmul fast float %mod.cmix, %mod.cpl0",
         "  %mod.cploff = fcmp fast ole float %mod.cpl, 0.000000e+00",
         # ... its code runs only while it's on (guard_run): cplon; its march sums also with the tilt view's bit
+        # (cloud_prologue_lines: tvon)
         "  %mod.cplon = xor i1 %mod.cploff, true",
-        f"  %mod.tvf = extractvalue {t} %mod.oz.r, 0",
-        "  %mod.tvb = bitcast float %mod.tvf to i32",
-        f"  %mod.tvt = and i32 %mod.tvb, {DEBUG_CLOUD_TILT}",
-        "  %mod.tilton = icmp ne i32 %mod.tvt, 0",
-        "  %mod.tvon = or i1 %mod.cplon, %mod.tilton",
         # build-up of bounced light (apply_cloud_shape): strength C0 * C6, depth C7 (m, 100 if <= 0)
         "  %mod.cpw0 = call float @dx.op.unary.f32(i32 7, float %mod.C6)",
         "  %mod.cpw = fmul fast float %mod.cmix, %mod.cpw0",
@@ -403,7 +424,111 @@ def cloud_prologue_lines() -> list[str]:
         "  %mod.cff = fdiv fast float 1.000000e+03, %mod.cfp",
         "  %mod.cfol = call float @dx.op.unary.f32(i32 23, float %mod.cff)",
     ]
+    # the aircraft shadow's capsule radii (shadow_pixel_lines): the body's in lengths, the rest in spans
+    for i, (_, _, r, unit, *_) in enumerate(SHADOW_CAPSULES):
+        lines.append(f"  %mod.cshr{i} = fmul fast float {'%mod.cshlf' if unit == 'L' else '%mod.cshspan'}, {f32(r)}")
+    # the cloud types (apply_cloud_types): their strength S = C0 C23, the view ramp's sharpening without them
+    # (ce0) and with them for cumulus (ce1), the optical profile's exponent to blend toward (gk), and per type
+    # (stratocumulus, stratus, altocumulus, altostratus: C24-C27) the thinning (k{c}na) and the base (k{c}b)
+    lines += [
+        "  %mod.ty.s0 = call float @dx.op.unary.f32(i32 7, float %mod.C23)",
+        "  %mod.ty.S = fmul fast float %mod.cmix, %mod.ty.s0",
+        "  %mod.ty.son = fcmp fast ogt float %mod.ty.S, 0.000000e+00",
+        "  %mod.ty.nS = fsub fast float 1.000000e+00, %mod.ty.S",
+        "  %mod.ty.ce0 = fmul fast float %mod.ce, %mod.ty.nS",
+        f"  %mod.ty.cm0 = fmul fast float %mod.cmix, {f32(TYPES_CU_EDGE_MIN)}",
+        "  %mod.ty.cm = call float @dx.op.binary.f32(i32 35, float %mod.ce, float %mod.ty.cm0)",
+        "  %mod.ty.ce1 = fmul fast float %mod.ty.S, %mod.ty.cm",
+        "  %mod.ty.gk = fsub fast float 1.000000e+00, %mod.cog",
+    ]
+    for c in range(4):
+        p = f"%mod.ty.k{c}"
+        lines += [
+            f"  {p}t = call float @dx.op.unary.f32(i32 7, float %mod.C{24 + c})",
+            f"  {p}n = fsub fast float 1.000000e+00, {p}t",
+            f"  {p}a = fmul fast float %mod.ty.S, {p}n",
+            f"  {p}na = fmul fast float {p}a, {f32(-TYPES_SCALE[c])}",  # thickness
+            f"  {p}b = fmul fast float %mod.ty.S, {f32(TYPES_BASE_MIX[c] * TYPES_SCALE[c])}",  # base
+        ]
     return lines
+
+
+CONSTANT_DEF = re.compile(r"^\s*(%[\w.]+) = (.*)$")
+
+
+def constant_name(line: str) -> str:
+    return CONSTANT_DEF.match(line)[1]
+
+
+def cloud_constant_names() -> list[str]:
+    """The float values of cloud_constant_lines (the constants the add-on computes), in order; checks that the lines
+    use only C0..C35, literals and earlier lines, and only the operations gen_cloud_constants.py knows."""
+    names, defined = [], set()
+    for line in cloud_constant_lines():
+        m = CONSTANT_DEF.match(line)
+        need(m and m[1] not in defined, f"cloud constants: {line.strip()}")
+        rhs = re.sub(r"@dx\.op\.\w+\.f32\(i32 \d+, ", "(", m[2])
+        for v in re.findall(r"%[\w.]+", rhs):
+            need(re.fullmatch(r"%mod\.C\d+", v) and int(v[6:]) < CLOUD_TUNABLES_SIZE // 4 or v in defined,
+                 f"cloud constants: {m[1]} uses {v}")
+        need(re.match(r"(call float @dx\.op\.(unary|binary|tertiary)\.f32\(i32 (7|12|13|21|23|24|35|36|46), |"
+                      r"f(mul|add|sub|div) fast float |select i1 \S+, float |fcmp fast (ole|olt|ogt|oge) float |"
+                      r"(and|or|xor) i1 )", m[2]), f"cloud constants: {m[1]}: an operation the generator can't do")
+        defined.add(m[1])
+        if re.match(r"(call float|f(mul|add|sub|div) fast float|select i1 \S+, float)", m[2]):
+            names.append(m[1])
+    return names
+
+
+def eval_cloud_constants(c) -> dict:
+    """cloud_constant_lines evaluated in float32 for the tunables c (C0..C35; missing ones 0): every value by name
+    (the tests' reference, and gen_cloud_constants.py's check of the add-on's C++)."""
+    import numpy as np
+    f = np.float32
+    env = {f"%mod.C{n}": f(c[n] if n < len(c) else 0.0) for n in range(CLOUD_TUNABLES_SIZE // 4)}
+
+    def val(tok):
+        tok = tok.strip()
+        return env[tok] if tok.startswith("%") else f(literal_value(tok))
+    unary = {7: lambda a: f(min(max(a, 0.0), 1.0)), 12: lambda a: f(np.cos(a)), 13: lambda a: f(np.sin(a)),
+             21: lambda a: f(np.exp2(a)), 23: lambda a: f(np.log2(a)) if a > 0 else f(-np.inf),
+             24: lambda a: f(np.sqrt(a))}
+    with np.errstate(all="ignore"):
+        for line in cloud_constant_lines():
+            name, rhs = CONSTANT_DEF.match(line).groups()
+            if m := re.match(r"call float @dx\.op\.(unary|binary|tertiary)\.f32\(i32 (\d+), (.*)\)$", rhs):
+                op, a = int(m[2]), [val(x) for x in re.findall(r"float ([^,)]+)", m[3])]
+                env[name] = (unary[op](a[0]) if m[1] == "unary" else
+                             f(max(a[0], a[1])) if op == 35 else f(min(a[0], a[1])) if op == 36 else
+                             f(f(a[0] * a[1]) + a[2]))
+            elif m := re.match(r"f(mul|add|sub|div) fast float (\S+), (\S+)$", rhs):
+                a, b = val(m[2].rstrip(",")), val(m[3])
+                env[name] = f({"mul": a * b, "add": a + b, "sub": a - b, "div": a / b}[m[1]])
+            elif m := re.match(r"select i1 (\S+), float (\S+), float (\S+)$", rhs):
+                env[name] = val(m[2].rstrip(",")) if env[m[1].rstrip(",")] else val(m[3])
+            elif m := re.match(r"fcmp fast (\w+) float (\S+), (\S+)$", rhs):
+                a, b = val(m[2].rstrip(",")), val(m[3])
+                env[name] = {"ole": a <= b, "olt": a < b, "ogt": a > b, "oge": a >= b}[m[1]]
+            elif m := re.match(r"(and|or|xor) i1 (\S+), (\S+)$", rhs):
+                a = bool(env[m[2].rstrip(",")])
+                b = True if m[3] == "true" else False if m[3] == "false" else bool(env[m[3]])
+                env[name] = {"and": a and b, "or": a or b, "xor": a != b}[m[1]]
+            else:
+                raise PatchError(f"cloud constants: can't evaluate {line.strip()}")
+    return env
+
+
+def cloud_cbuffer(c):
+    """The cloud cbuffer (b1 space50) as the add-on writes it for the tunables c: C0..C35, then the constants
+    (CLOUD_CONSTANTS), as rows of 4 (a numpy array, for the tests' evaluator)."""
+    import numpy as np
+    out = np.zeros((CLOUD_PARAMS_SIZE // 16, 4))
+    flat = out.reshape(-1)
+    flat[:min(len(c), CLOUD_TUNABLES_SIZE // 4)] = list(c)[:CLOUD_TUNABLES_SIZE // 4]
+    env = eval_cloud_constants(c)
+    for k, name in enumerate(CLOUD_CONSTANTS):
+        flat[CLOUD_TUNABLES_SIZE // 4 + k] = env[name]
+    return out
 
 
 def finish(ir: Ir, cloud: bool = False, debug_uav: bool = False) -> str:
@@ -3444,13 +3569,14 @@ def apply_cloud_shape(ir: Ir) -> str:
             den, step = view_march_step(ir, x)
             slope = [f"  {p}q = fdiv fast float {den}, {step}",
                      f"  {p}kq = call float @dx.op.binary.f32(i32 36, float %mod.cek, float {p}q)"]
-        else:
-            slope = [f"  {p}kq = fadd fast float %mod.cek, 0.000000e+00"]
+        else:  # (the cloud constant itself: a copy here held a register through the march on AMD)
+            slope = []
+        kq = f"{p}kq" if k == 0 else "%mod.cek"
         edits.append((j, [
             ir.lines[j].replace(f"{ramp} = ", f"{p}r = ", 1),
             f"  {p}c = fsub fast float {p}r, 5.000000e-01",
             *slope,
-            f"  {p}k = call float @dx.op.tertiary.f32(i32 46, float {p}c, float {p}kq, float 5.000000e-01)",
+            f"  {p}k = call float @dx.op.tertiary.f32(i32 46, float {p}c, float {kq}, float 5.000000e-01)",
             f"  {p}s = call float @dx.op.unary.f32(i32 7, float {p}k)",
             f"  {ramp} = select i1 %mod.ceoff, float {p}r, float {p}s",
         ]))
@@ -3467,6 +3593,9 @@ def apply_cloud_shape(ir: Ir) -> str:
 # all of it is base, and 0.7 / 0.5 there left it nearly transparent (captures
 # 132, 134: optical depth 9.3 -> 1.9 and 1.9 -> 0.14; real decks 5-20).
 TYPES_BASE_MIX = (0.0, 0.0, 0.5, 1.0)
+# (the grid's weights as the view march reads them, per channel: bytes 0..3 of a word, the last one shifted
+# down; a weight's scale to 0..1)
+TYPES_SCALE = (1.0 / 255.0, 1.0 / (255.0 * 256.0), 1.0 / (255.0 * 65536.0), 1.0 / 255.0)
 TYPES_CU_EDGE_MIN = 1.0
 # ... and how much of MSFS's erosion puffs (its 8 km and 1 km noise octaves, in the view march)
 # each keeps: altostratus and stratus are featureless sheets, stratocumulus has rolls,
@@ -3585,7 +3714,7 @@ def apply_cloud_types(ir: Ir) -> str:
     at, u, v, w = find_volume_sample(ir, h, j)
     t = "%dx.types.Handle"
     rr = "%dx.types.ResRet.f32"
-    scale = [1.0 / 255.0, 1.0 / (255.0 * 256.0), 1.0 / (255.0 * 65536.0), 1.0 / 255.0]  # of each channel as read
+    scale = TYPES_SCALE
     # ---- once per thread, at the entry: the grid's header and the coefficients
     entry = [
         "  %mod.ty.r0 = call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %mod.ah, "
@@ -3606,27 +3735,11 @@ def apply_cloud_types(ir: Ir) -> str:
         "  %mod.ty.hm = bitcast float %mod.ty.h0 to i32",
         f"  %mod.ty.ok = icmp eq i32 %mod.ty.hm, {TYPES_MAGIC}",
         "  %mod.ty.nc = fsub fast float -0.000000e+00, %mod.ty.h3",
-        "  %mod.ty.s0 = call float @dx.op.unary.f32(i32 7, float %mod.C23)",
-        "  %mod.ty.S = fmul fast float %mod.cmix, %mod.ty.s0",
-        "  %mod.ty.son = fcmp fast ogt float %mod.ty.S, 0.000000e+00",
+        # (the types' constants from the settings, %mod.ty.S, ce0, ce1, gk, k{c}..., are cloud constants:
+        # cloud_constant_lines)
         "  %mod.ty.on0 = and i1 %mod.ty.fon, %mod.ty.ok",
         "  %mod.ty.on = and i1 %mod.ty.on0, %mod.ty.son",
-        "  %mod.ty.nS = fsub fast float 1.000000e+00, %mod.ty.S",
-        "  %mod.ty.ce0 = fmul fast float %mod.ce, %mod.ty.nS",
-        f"  %mod.ty.cm0 = fmul fast float %mod.cmix, {f32(TYPES_CU_EDGE_MIN)}",
-        "  %mod.ty.cm = call float @dx.op.binary.f32(i32 35, float %mod.ce, float %mod.ty.cm0)",
-        "  %mod.ty.ce1 = fmul fast float %mod.ty.S, %mod.ty.cm",
-        "  %mod.ty.gk = fsub fast float 1.000000e+00, %mod.cog",
     ]
-    for c in range(4):
-        p = f"%mod.ty.k{c}"
-        entry += [
-            f"  {p}t = call float @dx.op.unary.f32(i32 7, float %mod.C{24 + c})",
-            f"  {p}n = fsub fast float 1.000000e+00, {p}t",
-            f"  {p}a = fmul fast float %mod.ty.S, {p}n",
-            f"  {p}na = fmul fast float {p}a, {f32(-scale[c])}",  # thickness
-            f"  {p}b = fmul fast float %mod.ty.S, {f32(TYPES_BASE_MIX[c] * scale[c])}",  # base
-        ]
     # ---- per view sample, after the volume lookup: the grid cell around it, bilinearly (every step: the
     # anvils' cirrus band below needs it)
     em = Emitter("tys")
@@ -4175,7 +4288,7 @@ def shadow_pixel_lines(em: Emitter, dirs, light) -> dict:
     F2 = (em.mad(f2, e1[2], em.mul(f0, e1[0])), em.mad(f2, e2[2], em.mul(f0, e2[0])))
     R2 = (dot(right, e1), dot(right, e2))
     caps = []
-    for (a0, b0), (a1, b1), r, unit, *sweep in SHADOW_CAPSULES:
+    for i, ((a0, b0), (a1, b1), r, unit, *sweep) in enumerate(SHADOW_CAPSULES):
         def point(a, b, sw=0.0):
             # (a - eye) Lf + sw span along, b span across, in body axes -> plane
             along = em.mul("%mod.cshlf", a - SHADOW_EYE_AHEAD)
@@ -4187,8 +4300,7 @@ def shadow_pixel_lines(em: Emitter, dirs, light) -> dict:
         B = point(a1, b1, sweep[0] if sweep else 0.0)
         D = (em.sub(B[0], A[0]), em.sub(B[1], A[1]))
         inv = em.div(1.0, em.max(em.mad(D[1], D[1], em.mul(D[0], D[0])), 1e-6))
-        radius = em.mul("%mod.cshlf" if unit == "L" else "%mod.cshspan", r)
-        caps.append((A, D, inv, radius))
+        caps.append((A, D, inv, f"%mod.cshr{i}"))  # (r in lengths or spans: a cloud constant)
     return {"e1": e1, "e2": e2, "caps": caps}
 
 
@@ -7623,7 +7735,7 @@ def patch_cloud_gen_capture(text: str) -> tuple[str, str]:
                 dims.append(f"%mod.cg.d{reg}.{k}")
             store_words("%mod.cg.u", str(base + CG_DIMS + 16 * j), dims, hdr, f"cg.dd{reg}")
     store_cbuffer("%mod.cg.u", "%mod.cg.user", CG_USER_REGS, base + CG_USER, hdr, "cg.ur")
-    store_cbuffer("%mod.cg.u", "%mod.cah", CLOUD_PARAMS_SIZE // 16, base + CG_CLOUD, hdr, "cg.cr")
+    store_cbuffer("%mod.cg.u", "%mod.cah", CLOUD_TUNABLES_SIZE // 16, base + CG_CLOUD, hdr, "cg.cr")
     if post:
         store_cbuffer("%mod.cg.u", "%mod.cg.post", CG_POST_REGS, base + CG_POST, hdr, "cg.pr")
     r += [
@@ -7924,6 +8036,13 @@ def _patch_job(job: tuple) -> tuple:
     except AssemblyError as e:
         return crc, "fail", str(e), None, None
     return crc, "ok", summary, code, patched if keep_ir else None
+
+
+# The cloud cbuffer's layout (cloud_prologue_lines): C0..C35, then the cloud constants the add-on computes from them
+# (addon/src/cloud_constants.h, generated by tools/gen_cloud_constants.py from cloud_constant_lines).
+CLOUD_CONSTANTS = cloud_constant_names()
+CLOUD_PARAMS_SIZE = CLOUD_TUNABLES_SIZE + 16 * -(-len(CLOUD_CONSTANTS) // 4)
+assert CLOUD_PARAMS_SIZE % 16 == 0 and CLOUD_PARAMS_SIZE <= CLOUD_SETTINGS_SLOT_BYTES
 
 
 def main() -> None:

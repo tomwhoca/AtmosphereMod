@@ -89,3 +89,11 @@ target_compile_definitions(ab_test_test PRIVATE NOMINMAX)
 target_compile_options(ab_test_test PRIVATE /W4 /permissive- /utf-8)
 target_include_directories(ab_test_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../addon/src)
 set_target_properties(ab_test_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/../../build/lab)
+
+# The cloud constants the add-on computes (tools/test_cloud_constants.py).
+add_executable(cloud_constants_test cloud_constants_test.cpp)
+target_compile_features(cloud_constants_test PRIVATE cxx_std_20)
+target_compile_definitions(cloud_constants_test PRIVATE NOMINMAX)
+target_compile_options(cloud_constants_test PRIVATE /W4 /permissive- /utf-8)
+target_include_directories(cloud_constants_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../addon/src)
+set_target_properties(cloud_constants_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_CURRENT_SOURCE_DIR}/../../build/lab)

@@ -37,6 +37,7 @@
 #include <d3d12.h>
 
 #include "ab_test.h"
+#include "cloud_constants.h"
 #include "cloud_stations.h"
 #include "file_dialog.h"
 #include "hotkeys.h"
@@ -127,12 +128,16 @@ static_assert(sizeof(ModParams) == 64);
 // (push_mod_args); C35 (developers: > 0 tints what the forward pass fogs, as
 // the graphics DebugCapture bit 13; < 0 turns that fog off) likewise.
 constexpr uint32_t kCloudTunableCount = 36;
-constexpr uint32_t kCloudSettingsSlotBytes = 256;  // D3D12's constant buffer alignment; room for 64 values
+// A slot: C0..C35, then the cloud constants computed from them (cloud_constants.h: what the cloud shaders read
+// instead of computing in every thread), patch_dxil.py's CLOUD_PARAMS_SIZE in all; a multiple of D3D12's 256-byte
+// constant buffer alignment, with room to grow.
+constexpr uint32_t kCloudSettingsSlotBytes = 1024;
 constexpr uint32_t kCloudSettingsSlots = 256;
-// (patch_dxil.py's CLOUD_PARAMS_SIZE, what the shaders read, is at most a slot; one spare slot at the end keeps
-// even a longer read inside the buffer)
+// (one spare slot at the end keeps even a longer read inside the buffer)
 constexpr uint64_t kCloudSettingsBytes = uint64_t(kCloudSettingsSlots + 1) * kCloudSettingsSlotBytes;
-static_assert(kCloudTunableCount * 4 <= kCloudSettingsSlotBytes);
+static_assert(cloud_constants::kTunables == kCloudTunableCount);
+static_assert(cloud_constants::kCbufferBytes <= kCloudSettingsSlotBytes &&
+              (kCloudTunableCount + cloud_constants::kCount) * 4 <= cloud_constants::kCbufferBytes);
 constexpr uint32_t kDebugMagic = 0x4F4D5441;  // 'ATMO'
 constexpr uint32_t kDebugBufferSize = 20 * 1024 * 1024;  // bits 6 and 7 below: the weather volume, cloud types
 // Regions: uint4(stamp, register count, 0, 0) then float4 registers.
@@ -2655,6 +2660,10 @@ void write_cloud_settings()
     const uint64_t offset = (g_cloud_settings_writes % kCloudSettingsSlots) * kCloudSettingsSlotBytes;
     std::array<uint8_t, kCloudSettingsSlotBytes> slot = {};  // (the spare values 0)
     std::memcpy(slot.data(), cloud.data(), sizeof(cloud));
+    // ... and the cloud constants from them, after C0..C35
+    std::array<float, cloud_constants::kCount> constants;
+    cloud_constants::compute(cloud.data(), constants.data());
+    std::memcpy(slot.data() + sizeof(cloud), constants.data(), sizeof(constants));
     std::memcpy(g_cloud_settings_mapped + offset, slot.data(), slot.size());  // (write-combined memory: written once)
     g_cloud_settings_written = cloud;
     ++g_cloud_settings_writes;

@@ -2,12 +2,14 @@
 
     python tools/build_addon.py [--config Debug]
 
-Output: build/AtmosphereMod.addon64
+Output: build/AtmosphereMod.addon64. First regenerates addon/src/cloud_constants.h (tools/gen_cloud_constants.py),
+so the add-on computes the cloud constants exactly as the shaders patch_dxil.py builds expect them.
 """
 
 import argparse
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -30,6 +32,7 @@ def main() -> None:
     ap.add_argument("--config", default="Release", choices=["Release", "Debug", "RelWithDebInfo"])
     args = ap.parse_args()
 
+    subprocess.run([sys.executable, str(ROOT / "tools" / "gen_cloud_constants.py")], check=True)
     cmake = find_cmake()
     build_dir = ROOT / "build" / "addon"
     subprocess.run([str(cmake), "-S", str(ROOT / "addon"), "-B", str(build_dir),
