@@ -31,6 +31,10 @@ CSS_RULES = [
     (r"place-(items|content|self)\s*:", "place-* shorthands: assumed missing, use align-/justify-"),
     (r"display\s*:\s*flow-root", "display: flow-root: assumed missing"),
 ]
+# The tablet styles these class names globally (measured 2026-11-20 in the stock EFB: hidden display:none, disabled a
+# greyscale filter, slider display:flex, button and title colours and fonts): ours must not use them.
+EFB_CLASSES = ("hidden", "disabled", "slider", "button", "title")
+
 JS_RULES = [
     (r"\bResizeObserver\b", "ResizeObserver is undefined (measured): the host's onPanel tells the size"),
     (r"\bPointerEvent\b|['\"]pointer(down|move|up|enter|leave|cancel)['\"]|\.onpointer", "no pointer events (measured): mouse events only"),
@@ -65,6 +69,16 @@ def main() -> None:
                 for m in re.finditer(pattern, part):
                     findings.append(f"{rel}:{line_of(text, start + m.start())}: {m[0].strip()}: {why}")
         code = re.sub(r"//[^\n]*", "", text)  # (not in comments)
+        # class names the tablet styles itself: in class strings, className, classList and selectors
+        for m in re.finditer(r"""(class:\s*|className\s*=\s*|classList\.\w+\(\s*)(["'`])((?:\\.|(?!\2).)*)\2""", code, re.S):
+            for name in EFB_CLASSES:
+                if re.search(rf"(?<![-\w]){name}(?![-\w])", m[3]):
+                    findings.append(f"{rel}:{line_of(code, m.start())}: class {name}: the tablet styles .{name} itself "
+                                    "(measured): use another name")
+        if f.name.startswith("styles") or f.name.startswith("theme"):
+            for name in EFB_CLASSES:
+                for m in re.finditer(rf"\.{name}(?![-\w])", text):
+                    findings.append(f"{rel}:{line_of(text, m.start())}: .{name}: the tablet styles it itself (measured)")
         for pattern, why in JS_RULES:
             for m in re.finditer(pattern, code):
                 findings.append(f"{rel}:{line_of(code, m.start())}: {m[0]}: {why}")

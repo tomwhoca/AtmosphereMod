@@ -34,6 +34,12 @@ export class Value<T> {
   }
 }
 
+/** "16u" -> calc(16px * var(--u)) (and "-4u", "0.5u"): u is the tablet's scale (theme.ts), in stylesheets and in
+ * the inline styles h() sets. */
+export function units(css: string): string {
+  return css.replace(/(-?\d*\.?\d+)u\b/g, "calc($1px * var(--u))");
+}
+
 type Child = Node | string | number | null | undefined | false;
 interface Props {
   class?: string;
@@ -56,7 +62,7 @@ export function h<K extends keyof HTMLElementTagNameMap>(tag: K, props?: Props |
       if (key === "class") {
         el.className = String(value);
       } else if (key === "style") {
-        el.setAttribute("style", String(value));
+        el.setAttribute("style", units(String(value)));
       } else if (key === "text") {
         el.textContent = String(value);
       } else if (key === "title") {

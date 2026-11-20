@@ -51,6 +51,21 @@ TABLET_SET = ("(function(){var m=EFB_API.efbSettingsManager;m.getSetting('efbSiz
               "m.getSetting('orientationMode').set(%d);return 'ok';})()")
 
 # What's wrong with the layout, measured in the engine itself (ES5: the page's own dialect).
+# ... on every page: each navigation tab clicked in turn (the render is synchronous), then the one open before.
+AUDIT_PAGES = r"""(function () {
+  var tabs = document.querySelectorAll('.atmo-ui .tab'), before = -1, out = { pages: [] };
+  if (tabs.length === 0) { return JSON.stringify({ pages: [JSON.parse(AUDIT_ONE)] }); }
+  for (var i = 0; i < tabs.length; i++) { if (/\bon\b/.test(tabs[i].className)) { before = i; } }
+  for (var j = 0; j < tabs.length; j++) {
+    tabs[j].click();
+    var res = JSON.parse(AUDIT_ONE);
+    res.page = tabs[j].getAttribute('title') || String(j);
+    out.pages.push(res);
+  }
+  if (before >= 0) { document.querySelectorAll('.atmo-ui .tab')[before].click(); }
+  return JSON.stringify(out);
+})()"""
+
 AUDIT = r"""(function () {
   function rect(el) { var b = el.getBoundingClientRect(); return { l: b.left, t: b.top, r: b.right, b: b.bottom, w: b.width, h: b.height }; }
   function name(el) {
@@ -124,16 +139,17 @@ def audit() -> int:
         for size, orientation, name in LAYOUTS:
             coherent.evaluate(coherent.TABLET, TABLET_SET % (size, orientation))
             time.sleep(1.5)  # (the EFB lays out; the UI measures again 250 ms after)
-            res = json.loads(coherent.evaluate(coherent.TABLET, AUDIT))
-            if "error" in res:
-                print(f"{name}: {res['error']}")
+            pages = json.loads(coherent.evaluate(coherent.TABLET, AUDIT_PAGES.replace("AUDIT_ONE", AUDIT.strip())))["pages"]
+            if pages and "error" in pages[0]:
+                print(f"{name}: {pages[0]['error']}")
                 return 1
-            problems = res["problems"]
-            worst = max(worst, len(problems))
-            print(f"{name:20s} {res['area'][0]} x {res['area'][1]}, u {res['u']}, status bar {res['status']}, dock "
-                  f"{res['dock']}: {'OK' if not problems else f'{len(problems)} problem(s)'}")
-            for p in problems[:12]:
-                print(f"    {p}")
+            first = pages[0]
+            bad = [(p.get("page", "?"), x) for p in pages for x in p["problems"]]
+            worst = max(worst, len(bad))
+            print(f"{name:20s} {first['area'][0]} x {first['area'][1]}, u {first['u']}, status bar {first['status']}, "
+                  f"dock {first['dock']}, {len(pages)} page(s): {'OK' if not bad else f'{len(bad)} problem(s)'}")
+            for page, p in bad[:12]:
+                print(f"    {page}: {p}")
     finally:
         coherent.evaluate(coherent.TABLET, TABLET_SET % tuple(before))
     return 1 if worst else 0

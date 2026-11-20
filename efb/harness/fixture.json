@@ -76,7 +76,7 @@
    1,
    1
   ],
-  "weather": "EDDK: haze from the METAR (visibility 9999, BKN015): 70 % of the sim's",
+  "weather": "EDDK (+2): continental haze, visibility ~25 km, humidity 87%",
   "version": "0.7.3",
   "presets": [
    "Default",

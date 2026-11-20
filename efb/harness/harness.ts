@@ -294,17 +294,43 @@ async function loadUi(): Promise<UiModule> {
   return (window as unknown as { AtmoUI: UiModule }).AtmoUI;
 }
 
+/** GitHub's API as the harness's selector says (src/ui/update.ts asks it for the latest release). */
+function fakeGitHub(): void {
+  const real = window.fetch.bind(window);
+  window.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input instanceof Request ? input.url : input);
+    if (url.indexOf("api.github.com/repos/tomwhoca/AtmosphereMod/releases/latest") < 0) {
+      return real(input, init);
+    }
+    const tag = ($("latest") as HTMLSelectElement).value;
+    log(`GitHub asked for the latest release: ${tag || "unreachable"}`);
+    return tag ? Promise.resolve(new Response(JSON.stringify({ tag_name: tag }), { status: 200 }))
+      : Promise.reject(new TypeError("network error (the harness's unreachable)"));
+  }) as typeof window.fetch;
+}
+
 async function main(): Promise<void> {
+  fakeGitHub();
+  try {
+    localStorage.removeItem("atmo-harness-data-atmo-ui-latest");  // (the UI keeps a day's answer: the selector's, now)
+  } catch {
+    // (private window)
+  }
   const addon = new FakeAddon();
   const fixture = await addon.load();
   const host = new HarnessHost(addon, fixture, current);
-  const mountUi = async () => {
-    const ui = await loadUi();
-    if (unmount) {
-      unmount();
-    }
-    unmount = ui.mount(appEl, host);
-    log(`mounted AtmoUI ${ui.build}`);
+  // (one mount at a time: a size and a variant changed at once mounted twice, the second racing the first)
+  let mounting: Promise<void> = Promise.resolve();
+  const mountUi = (): Promise<void> => {
+    mounting = mounting.then(async () => {
+      const ui = await loadUi();
+      if (unmount) {
+        unmount();
+      }
+      unmount = ui.mount(appEl, host);
+      log(`mounted AtmoUI ${ui.build}`);
+    }).catch((e) => log(`mount failed: ${e}`));
+    return mounting;
   };
 
   const sizes = $("sizes");
@@ -327,6 +353,25 @@ async function main(): Promise<void> {
     windowScale = parseFloat(win.value) || 1;
     store("window", String(windowScale));
     drawTablet();
+    void mountUi();
+  };
+  // (the UI keeps its variant in its stored data, Host.save "atmo-ui-theme": set it, mount anew)
+  const themeSel = $("theme") as HTMLSelectElement;
+  themeSel.value = stored("data-atmo-ui-theme", "dark");
+  themeSel.onchange = () => {
+    store("data-atmo-ui-theme", themeSel.value);
+    void mountUi();
+  };
+  // (the UI keeps the latest release a day: a new choice clears that, then mounts anew)
+  const latestSel = $("latest") as HTMLSelectElement;
+  latestSel.value = stored("latest", "v0.8.0");
+  latestSel.onchange = () => {
+    store("latest", latestSel.value);
+    try {
+      localStorage.removeItem("atmo-harness-data-atmo-ui-latest");
+    } catch {
+      // (private window)
+    }
     void mountUi();
   };
   $("fit").onchange = fit;

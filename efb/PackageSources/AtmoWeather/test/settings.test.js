@@ -608,6 +608,50 @@ check(model.value("T3").get() === 4 && model.effectiveValue("T3").get() === 7.5,
           m.otherHotkeys.get().length === 0, "model: an older add-on: no hotkeys to change, the last keys kept");
   }
 
+  {
+    // The redesign's METAR in plain words (src/ui/metar.ts)
+    const outMetar = path.join(os.tmpdir(), "atmo-metar-test.js");
+    esbuild.buildSync({ entryPoints: [path.join(__dirname, "..", "src", "ui", "metar.ts")], bundle: true,
+                        platform: "node", format: "cjs", outfile: outMetar, logLevel: "error" });
+    const { decode, layersText, feet } = require(outMetar);
+    const d = decode("METAR EDDK 201250Z AUTO 22003KT 170V270 9999 -SHRA BKN015 BKN019 BKN034 FEW///TCU 09/08 Q1001 "
+                     + "BECMG 34006KT BKN008");
+    check(d.station === "EDDK" && d.time === "20th, 12:50 UTC" && d.auto && d.wind === "220° 3 kt (varying 170-270°)"
+          && d.visibility === "10 km or more" && d.weather.join() === "light rain showers"
+          && layersText(d) === "broken 1,500 ft, broken 1,900 ft, broken 3,400 ft"
+          && d.temperature === "9 °C, dew point 8 °C" && d.pressure === "1001 hPa",
+          `metar: a European report, its trend left out (${JSON.stringify(d)})`);
+    const us = decode("KSUA 201347Z 23006G18KT 1 1/2SM BR OVC003CB 22/22 A2991 RMK AO2 SLP127");
+    check(us.wind === "230° 6 kt, gusts 18 kt" && us.visibility === "1.5 mi" && us.weather.join() === "mist"
+          && layersText(us) === "overcast 300 ft (CB)" && us.pressure === "29.91 inHg",
+          `metar: a US report, miles and inches, remarks left out (${JSON.stringify(us)})`);
+    const ok = decode("LIRF 090920Z 00000KT CAVOK M02/M05 Q1025 NOSIG");
+    check(ok.wind === "calm" && ok.visibility === "10 km or more" && layersText(ok) === "no cloud below 5,000 ft"
+          && ok.temperature === "-2 °C, dew point -5 °C", "metar: CAVOK, calm, below zero");
+    const fog = decode("EGLL 201320Z VRB02KT 0200 R27L/0350N FG VV001 05/05 Q1012");
+    check(fog.wind === "variable 2 kt" && fog.visibility === "200 m" && fog.weather.join() === "fog"
+          && layersText(fog) === "sky obscured, vertical visibility 100 ft", "metar: fog, runway range left out");
+    const ts = decode("KMIA 201853Z 11012KT 10SM +TSRA VCSH SCT020CB 26/23 A2993");
+    check(ts.weather.join(" | ") === "heavy thunderstorm with rain | showers nearby",
+          `metar: thunderstorm and showers nearby (${ts.weather.join(" | ")})`);
+    const more = decode("ENGM 201320Z 03012KT 3000 FZRA BCFG BLSN VCTS -SHSN BKN008 M01/M02 Q0998");
+    check(more.weather.join(" | ") === "freezing rain | patches of fog | blowing snow | thunderstorm nearby | light snow showers",
+          `metar: descriptors in plain word order (${more.weather.join(" | ")})`);
+    check(feet(12500) === "12,500 ft" && decode("garbage").weather.length === 0, "metar: thousands, and nonsense ignored");
+    fs.rmSync(outMetar, { force: true });
+
+    // ... and whether GitHub has a newer release (src/ui/update.ts)
+    const outUpdate = path.join(os.tmpdir(), "atmo-update-test.js");
+    esbuild.buildSync({ entryPoints: [path.join(__dirname, "..", "src", "ui", "update.ts")], bundle: true,
+                        platform: "node", format: "cjs", outfile: outUpdate, logLevel: "error" });
+    const up = require(outUpdate);
+    check(up.newer("v0.8.0", "0.7.3") && up.newer("v0.7.10", "0.7.9") && up.newer("1.0.0", "0.9.9")
+          && !up.newer("v0.7.3", "0.7.3") && !up.newer("v0.7.2", "0.7.3") && !up.newer("v0.8.0", "dev (harness)")
+          && !up.newer(undefined, "0.7.3") && !up.newer("latest", "0.7.3") && up.newer("v.0.8.0", "v.0.7.3"),
+          "update: newer only when the release's version is higher (10 > 9; not a version: no)");
+    fs.rmSync(outUpdate, { force: true });
+  }
+
   fs.rmSync(out, { force: true });
   fs.rmSync(outHotkeys, { force: true });
   fs.rmSync(outDefaults, { force: true });
