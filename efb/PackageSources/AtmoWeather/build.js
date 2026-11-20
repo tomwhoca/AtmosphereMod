@@ -19,11 +19,16 @@ esbuild
     outdir: "dist",
     sourcemap: false,
     minify: false,
+    // (drops the branches the defines below turn off: the developers' reload hook isn't in a release build at all)
+    minifySyntax: true,
     logLevel: "info",
     target: "es2017",
     // VERSION: the mod's (tools/build_efb.py passes it from addon/CMakeLists.txt)
     define: { BASE_URL: `"coui://html_ui/efb_ui/efb_apps/AtmoWeather"`,
-              VERSION: JSON.stringify(process.env.ATMO_VERSION || "dev") },
+              VERSION: JSON.stringify(process.env.ATMO_VERSION || "dev"),
+              // the redesign's UI (src/ui) instead of the old one, and the developers' reload hook
+              NEW_UI: process.env.ATMO_NEW_UI === "1" ? "true" : "false",
+              DEV: process.env.ATMO_DEV === "1" ? "true" : "false" },
     plugins: [
       // The EFB provides the MSFS SDK as a global; bundling our own copy would
       // create a second, disconnected instance.
@@ -31,5 +36,20 @@ esbuild
         "@microsoft/msfs-sdk": { varName: "msfssdk", type: "cjs" },
       }),
     ],
+  })
+  .catch(() => process.exit(1));
+
+// The redesign's UI module, its own bundle (window.AtmoUI): the app loads it, the harness and the developers'
+// in-sim reload (tools/efb_reload.py) evaluate it again.
+esbuild
+  .build({
+    entryPoints: ["src/ui/main.ts"],
+    bundle: true,
+    outfile: "dist/AtmoUI.js",
+    format: "iife",
+    minify: false,
+    logLevel: "info",
+    target: "es2017",
+    define: { UI_BUILD: JSON.stringify(new Date().toISOString()) },
   })
   .catch(() => process.exit(1));

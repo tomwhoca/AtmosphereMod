@@ -1,0 +1,233 @@
+{
+ "_comment": "The add-on's state message (AtmosphereMod.State) for the harness: captured in the sim 2026-11-20 (add-on 0.7.3), preset names and PC details made up.",
+ "state": {
+  "enabled": true,
+  "T": [
+   1,
+   1.5,
+   0.15,
+   1,
+   0,
+   2.5,
+   0.05,
+   0.1,
+   1,
+   0.605,
+   1.3,
+   1,
+   1,
+   1,
+   0,
+   1,
+   0.75
+  ],
+  "C": [
+   1,
+   0.9592,
+   0.5,
+   0.45,
+   0.4,
+   0.0825,
+   0,
+   150,
+   2,
+   0.4,
+   4,
+   0.08,
+   0.6,
+   0,
+   0,
+   0,
+   2,
+   0.33,
+   0,
+   1.5,
+   1,
+   60,
+   1,
+   1,
+   0.6,
+   0.5,
+   0.4,
+   0.3,
+   1,
+   300,
+   0,
+   600,
+   1,
+   10,
+   0.1,
+   0,
+   0
+  ],
+  "TE": [
+   1,
+   1.5,
+   0.15,
+   1,
+   0,
+   2.5,
+   0.05,
+   0.1,
+   1,
+   0.605,
+   1.3,
+   1,
+   1,
+   1
+  ],
+  "weather": "EDDK: haze from the METAR (visibility 9999, BKN015): 70 % of the sim's",
+  "version": "0.7.3",
+  "presets": [
+   "Default",
+   "Older preset",
+   "Release install 2026-11-11",
+   "My settings",
+   "Evening haze"
+  ],
+  "preset": "My settings",
+  "presetSaved": false,
+  "presetsMissing": {
+   "Older preset": [
+    "C36",
+    "C37",
+    "T16"
+   ]
+  },
+  "presetNote": "",
+  "report": {
+   "phase": "done",
+   "progress": 1.0,
+   "result": {
+    "fpsOn": 59.94,
+    "fpsOff": 59.88,
+    "msOn": 16.68,
+    "msOff": 16.7,
+    "p99On": 48.75,
+    "p99Off": 48.68,
+    "fpsOn1": 60.0,
+    "fpsOn2": 59.88,
+    "drift": 0.002,
+    "framesOn": 959,
+    "framesOff": 479,
+    "modShaders": 19,
+    "modShaderRuns": 7.0,
+    "gpuOn": 3.28,
+    "gpuOff": 3.33,
+    "gpuOn1": 3.28,
+    "gpuOn2": 3.28,
+    "gpuFramesOn": 953,
+    "gpuFramesOff": 480,
+    "passes": {
+     "clouds": [
+      0.423,
+      0.517
+     ],
+     "cloudGen": [
+      0.001,
+      0.001
+     ],
+     "sky": [
+      0.229,
+      0.219
+     ],
+     "haze": [
+      0.077,
+      0.061
+     ],
+     "shadows": [
+      0.06,
+      0.049
+     ]
+    }
+   },
+   "system": {
+    "pc": {
+     "gpu": "NVIDIA GeForce RTX 4070",
+     "gpuVendor": "NVIDIA",
+     "vramGB": 11.7,
+     "driver": "600.00",
+     "cpu": "A CPU with 16 threads",
+     "threads": 16,
+     "ramGB": 32,
+     "windows": "Windows 11 (build 26200)"
+    },
+    "sim": {
+     "store": "Microsoft Store",
+     "version": "1.9.24.0",
+     "output": "2560x1440",
+     "cfg": {
+      "Video.Windowed": "1",
+      "Video.FullscreenBorderless": "0",
+      "Video.FullScreenResolution": "2560 1440",
+      "Video.AntiAliasing": "DLSS",
+      "Video.DLSSMode": "AUTO",
+      "Video.FSRMode": "BALANCED",
+      "Video.FrameGeneration": "DLSSG",
+      "Video.NBFramesToGenerate": "2",
+      "Video.PrimaryScaling": "1.000000",
+      "Video.SecondaryScaling": "1.000000",
+      "Video.DynamicSettings": "0",
+      "Video.TargetFrameRate": "30",
+      "Video.VSync": "0",
+      "Video.FrameLimiter": "20",
+      "Video.Reflex": "ON",
+      "Video.HDR10": "0",
+      "Video.AntiAliasingVR": "TAA",
+      "Video.DLSSModeVR": "AUTO",
+      "Video.FSRModeVR": "BALANCED",
+      "Video.FrameGenerationVR": "NONE",
+      "Video.PrimaryScalingVR": "1.000000",
+      "Video.DynamicSettingsVR": "1",
+      "Graphics.Preset": "Custom",
+      "Graphics.VolumetricClouds.Enabled": "1",
+      "Graphics.VolumetricClouds.Quality": "3",
+      "Graphics.RaytracedShadows.Enabled": "1",
+      "Graphics.Terrain.LoDFactor": "0.500000",
+      "Graphics.ObjectsLoD.LoDFactor": "1.000000",
+      "GraphicsVR.Preset": "VRMedium",
+      "GraphicsVR.VolumetricClouds.Quality": "1",
+      "GraphicsVR.RaytracedShadows.Enabled": "0"
+     },
+     "packages": [
+      "some-community-package"
+     ]
+    },
+    "reshade": {
+     "loader": "ReShade64.dll",
+     "version": "6.8.0.1240",
+     "effectsOn": 0,
+     "addons": [
+      "glass-cockpit-dlss-fix.addon64"
+     ],
+     "registerSpace": 50
+    }
+   }
+  },
+  "hotkeys": {
+   "toggle": "Shift+Alt+F9",
+   "reload": "Shift+Alt+F10",
+   "capture": "Shift+Alt+F11",
+   "gpuTimes": "Shift+Alt+F12",
+   "cloudFog": "",
+   "pause": "Shift+Alt+F8"
+  },
+  "learning": "",
+  "hotkeyNote": "",
+  "cloudFogOff": false,
+  "otherHotkeys": [
+   {
+    "addon": "Glass Cockpit DLSS Fix",
+    "what": "its overlay on/off",
+    "keys": "Ctrl+Shift+F9"
+   },
+   {
+    "addon": "Glass Cockpit DLSS Fix",
+    "what": "its green tint",
+    "keys": "Ctrl+Shift+F11"
+   }
+  ]
+ },
+ "metar": "METAR EDDK 201250Z AUTO 22003KT 170V270 9999 -SHRA BKN015 BKN019 BKN034 09/08 Q1001",
+ "link": "running, last poll 2026-11-20T12:50:00.000Z"
+}

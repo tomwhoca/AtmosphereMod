@@ -4,6 +4,7 @@ __pycache__/
 tools/node/
 node_modules/
 efb/PackageSources/*/dist/
+efb/harness/build/
 third_party/msfs_efb_sample/
 # Never publish game-derived data: extracted or patched shaders, disassembly,
 # captures and logs (they hold Asobo's shaders and constants), wherever they end up.

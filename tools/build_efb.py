@@ -35,8 +35,13 @@ VERSION = re.search(r"project\(AtmosphereMod VERSION (\d+\.\d+\.\d+)",
 FILETIME_UNIX_OFFSET = 116444736000000000
 
 
+# The redesign (efb/.../src/ui): --new-ui builds the app with the new UI instead of the old one; --dev adds the
+# developers' in-sim reload hook (tools/efb_reload.py). Neither is for a release (tools/make_release.py builds without).
+BUILD_FLAGS = {"ATMO_NEW_UI": "0", "ATMO_DEV": "0"}
+
+
 def npm(*args: str, cwd: Path) -> None:
-    env = {**os.environ, "PATH": f"{NODE.parent};{os.environ['PATH']}", "ATMO_VERSION": VERSION}
+    env = {**os.environ, "PATH": f"{NODE.parent};{os.environ['PATH']}", "ATMO_VERSION": VERSION, **BUILD_FLAGS}
     subprocess.run([str(NODE), str(NPM_CLI), *args], cwd=cwd, check=True, env=env)
 
 
@@ -55,6 +60,13 @@ def write_defaults() -> None:
 
 
 def main() -> None:
+    import argparse
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--new-ui", action="store_true", help="the redesign's UI (src/ui) instead of the old one")
+    ap.add_argument("--dev", action="store_true", help="the developers' in-sim reload hook (tools/efb_reload.py)")
+    args = ap.parse_args()
+    BUILD_FLAGS["ATMO_NEW_UI"] = "1" if args.new_ui else "0"
+    BUILD_FLAGS["ATMO_DEV"] = "1" if args.dev else "0"
     if not NODE.exists():
         raise SystemExit("tools/node missing: unpack a Node.js LTS zip there (the Windows x64 zip from nodejs.org)")
     efb_api = ROOT / "third_party" / "msfs_efb_sample" / "PackageSources" / "efb_api"
