@@ -322,6 +322,29 @@ double Result::gpu_on() const
     return n > 0 ? (on1.gpu_ms_sum + on2.gpu_ms_sum) / n : 0.0;
 }
 
+const char *const kPassKeys[kPasses] = {"clouds", "cloudGen", "sky", "haze", "shadows"};
+
+int pass_of(const std::string &entry)
+{
+    static const std::pair<const char *, int> kEntries[] = {
+        {"ch_volumetric_clouds_render", 0},                                           // clouds
+        {"ch_cloudDensity", 1},                                                       // their generator
+        {"ch_sky", 2}, {"ch_sky_view", 2}, {"ch_transmittance_lut", 2}, {"ch_multi_scatt", 2},  // sky
+        {"ch_camera_volume", 3}, {"ph_globalCloudAtmospherics", 3},                   // haze: the camera volume, far clouds'
+        {"ch_deferred_shadows", 4}, {"ch_raymarched_shadows", 4}, {"ch_raymarched_shadows_accumulate", 4},  // shadows
+    };
+    for (const auto &[name, pass] : kEntries)
+        if (entry == name)
+            return pass;
+    return -1;
+}
+
+double Result::pass_on(size_t k) const
+{
+    const uint32_t n = on1.gpu_frames + on2.gpu_frames;
+    return n > 0 ? (on1.pass_ms_sum[k] + on2.pass_ms_sum[k]) / n : 0.0;
+}
+
 double Result::mod_shader_runs_per_frame() const
 {
     const uint32_t n = on1.frames + on2.frames;
@@ -350,7 +373,7 @@ double busy_ms(std::vector<std::pair<double, double>> spans_ms)
     return total + (end - start);
 }
 
-void Measurement::gpu_frame(Phase measured_in, double ms)
+void Measurement::gpu_frame(Phase measured_in, double ms, const PassTimes &passes)
 {
     if (!running() || !(ms > 0.0))
         return;
@@ -360,6 +383,8 @@ void Measurement::gpu_frame(Phase measured_in, double ms)
     {
         p->gpu_frames += 1;
         p->gpu_ms_sum += ms;
+        for (size_t k = 0; k < kPasses; ++k)
+            p->pass_ms_sum[k] += passes[k] > 0.0 ? passes[k] : 0.0;
     }
 }
 
@@ -614,6 +639,15 @@ std::string state_json(const Measurement &m, Clock::time_point now, const std::s
                  ",\"gpuOn1\":" + number(r.on1.gpu_ms(), 2) + ",\"gpuOn2\":" + number(r.on2.gpu_ms(), 2) +
                  ",\"gpuFramesOn\":" + std::to_string(r.on1.gpu_frames + r.on2.gpu_frames) +
                  ",\"gpuFramesOff\":" + std::to_string(r.off.gpu_frames);
+        if (r.has_gpu())
+        {
+            // the passes' GPU ms per frame, [with, without]
+            s += ",\"passes\":{";
+            for (size_t k = 0; k < kPasses; ++k)
+                s += std::string(k ? "," : "") + "\"" + kPassKeys[k] + "\":[" + number(r.pass_on(k), 3) + "," +
+                     number(r.pass_off(k), 3) + "]";
+            s += "}";
+        }
         s += "}";
     }
     if (!system.empty())

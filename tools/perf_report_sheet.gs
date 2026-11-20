@@ -107,11 +107,26 @@ const COLUMNS = [
   // (new columns go here, after the ones the sheet's rows already have)
   ["modShaders", "Mod shaders that ran"],
   ["modShaderRuns", "Mod shader runs per frame"],
+  // the mod's compute passes, GPU ms per frame (the add-on times each on its own), and the rest of the frame
+  ["gpuMsCloudsOn", "GPU ms clouds, with"],
+  ["gpuMsCloudsOff", "GPU ms clouds, without"],
+  ["gpuMsCloudGenOn", "GPU ms cloud generator, with"],
+  ["gpuMsCloudGenOff", "GPU ms cloud generator, without"],
+  ["gpuMsSkyOn", "GPU ms sky, with"],
+  ["gpuMsSkyOff", "GPU ms sky, without"],
+  ["gpuMsHazeOn", "GPU ms haze, with"],
+  ["gpuMsHazeOff", "GPU ms haze, without"],
+  ["gpuMsShadowsOn", "GPU ms cloud shadows, with"],
+  ["gpuMsShadowsOff", "GPU ms cloud shadows, without"],
+  ["gpuMsRestOn", "GPU ms rest of the frame, with"],
+  ["gpuMsRestOff", "GPU ms rest of the frame, without"],
 ];
 const NUMBERS = ["fpsOn", "fpsOff", "p99On", "p99Off", "fpsOn1", "fpsOn2", "driftPct", "framesOn", "framesOff",
                  "gpuMsOn", "gpuMsOff", "gpuChangePct", "gpuMsOn1", "gpuMsOn2", "gpuFramesOn", "gpuFramesOff",
                  "vramGB", "threads", "ramGB", "renderScaling", "reshadeEffects", "registerSpace", "altitudeFt", "aglFt",
-                 "modShaders", "modShaderRuns"];
+                 "modShaders", "modShaderRuns", "gpuMsCloudsOn", "gpuMsCloudsOff", "gpuMsCloudGenOn",
+                 "gpuMsCloudGenOff", "gpuMsSkyOn", "gpuMsSkyOff", "gpuMsHazeOn", "gpuMsHazeOff", "gpuMsShadowsOn",
+                 "gpuMsShadowsOff", "gpuMsRestOn", "gpuMsRestOff"];
 
 /** The answer as JSON, or as JSONP when the request names a callback (a plain identifier only). */
 function answer(object, callback) {

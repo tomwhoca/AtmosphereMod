@@ -186,6 +186,55 @@ int main()
             none.frame(t += std::chrono::milliseconds(10));
         check(perf::state_json(none, t, "").find("gpuOn") == std::string::npos,
               "without GPU times the result has none");
+        check(perf::state_json(none, t, "").find("passes") == std::string::npos,
+              "... and no passes' times");
+    }
+    {
+        // The mod's compute passes: which shaders belong to which, by entry point
+        check(perf::pass_of("ch_volumetric_clouds_render") == 0 && perf::pass_of("ch_cloudDensity") == 1 &&
+                  perf::pass_of("ch_sky") == 2 && perf::pass_of("ch_sky_view") == 2 &&
+                  perf::pass_of("ch_transmittance_lut") == 2 && perf::pass_of("ch_multi_scatt") == 2 &&
+                  perf::pass_of("ch_camera_volume") == 3 && perf::pass_of("ph_globalCloudAtmospherics") == 3 &&
+                  perf::pass_of("ch_deferred_shadows") == 4 && perf::pass_of("ch_raymarched_shadows") == 4 &&
+                  perf::pass_of("ch_raymarched_shadows_accumulate") == 4,
+              "the mod's compute passes by their shaders' entry points");
+        check(perf::pass_of("ch_volumetric_clouds_frustrum_pass1") == -1 && perf::pass_of("ch_bloom") == -1 &&
+                  perf::pass_of("") == -1 && perf::pass_of("ch_sky_views") == -1,
+              "other shaders: no pass (they're the rest of the frame)");
+        check(std::string(perf::kPassKeys[0]) == "clouds" && std::string(perf::kPassKeys[4]) == "shadows",
+              "the passes' keys");
+
+        // ... their times per frame, to the frame's part, averaged over the part's GPU-timed frames
+        const auto t0 = perf::Clock::now();
+        perf::Measurement m(perf::Timing{0.5, 1.0});
+        m.start(t0, true);
+        m.gpu_frame(perf::Phase::on, 10.0, {1.5, 0.0, 0.6, 0.2, 0.1});
+        m.gpu_frame(perf::Phase::on, 12.0, {1.7, 0.4, 0.6, 0.2, 0.1});
+        m.gpu_frame(perf::Phase::on2, 11.0, {1.6, 0.0, 0.6, 0.2, 0.1});
+        m.gpu_frame(perf::Phase::off, 6.0, {1.2, 0.0, 0.5, 0.1, 0.1});
+        m.gpu_frame(perf::Phase::off, 7.0);  // (a frame without the passes: 0 for each)
+        m.gpu_frame(perf::Phase::off, -1.0, {9.0, 9.0, 9.0, 9.0, 9.0});  // (no GPU time: none of it counts)
+        const perf::Result &r = m.result();
+        check(close_to(r.pass_on(0), 1.6, 1e-9) && close_to(r.pass_on(1), 0.4 / 3, 1e-9) &&
+                  close_to(r.pass_off(0), 0.6, 1e-9) && close_to(r.pass_off(2), 0.25, 1e-9),
+              "the passes' times per GPU-timed frame, a pass that didn't run in a frame counting 0");
+
+        // ... and in the JSON, [with, without]
+        perf::Measurement done(perf::Timing{0.05, 0.1});
+        auto t = perf::Clock::now();
+        done.start(t, true);
+        int guard = 0;
+        while (done.phase() != perf::Phase::done && guard++ < 1000)
+        {
+            t += std::chrono::milliseconds(10);
+            done.frame(t);
+            const bool off = done.phase() == perf::Phase::off;
+            done.gpu_frame(done.phase(), off ? 4.0 : 5.0, {off ? 1.0 : 1.25, 0.0, 0.5, 0.25, off ? 0.1 : 0.125});
+        }
+        const std::string json = perf::state_json(done, t, "");
+        check(json.find("\"passes\":{\"clouds\":[1.250,1.000],\"cloudGen\":[0.000,0.000],\"sky\":[0.500,0.500],"
+                        "\"haze\":[0.250,0.250],\"shadows\":[0.125,0.100]}") != std::string::npos,
+              "the result has each pass's GPU time per frame with and without the mod");
     }
     {
         // The mod's shaders that ran with the mod on, as the add-on counts them: only in the parts with the mod

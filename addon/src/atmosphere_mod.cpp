@@ -358,6 +358,7 @@ struct TrackedPipeline
     // The full set's (make_full_pipelines): bound instead of the replacement while a rare feature is on.
     pipeline full = {};
     bool has_full = false;  // the full set has a shader for it (g_full_files)
+    int pass = -1;  // the performance report's pass (perf::pass_of), timed on its own while measuring
 };
 
 struct LayoutParam
@@ -365,6 +366,14 @@ struct LayoutParam
     pipeline_layout_param_type type = pipeline_layout_param_type::push_descriptors;
     constant_range constants = {};
     std::vector<descriptor_range> ranges;
+};
+
+// A dispatch of one of the performance report's passes on a list: its pass and its timestamps (g_frame_timer_next
+// counts), right before and after it (pass_timed_dispatch).
+struct PassStamp
+{
+    int pass;
+    uint64_t begin, end;
 };
 
 struct __declspec(uuid("7c1f3d52-9a4e-4f0b-8e2d-5b6a1c9d0e47")) CommandListState
@@ -380,6 +389,9 @@ struct __declspec(uuid("7c1f3d52-9a4e-4f0b-8e2d-5b6a1c9d0e47")) CommandListState
     // pending: reset while measuring, the start comes with its first command (start_frame_timing)
     uint64_t frame_begin = UINT64_MAX, frame_end = UINT64_MAX;
     bool frame_pending = false;
+    // ... and around its dispatches of the report's passes: the bound compute pipeline's pass (-1: none)
+    int pass = -1;
+    std::vector<PassStamp> passes;
     // the A/B test's: the side of the compute pipeline bound (-1: not in the test), the test's frame it was
     // bound in, its shader; and the list's A/B timestamps, resolved at its close
     int ab_side = -1;
@@ -588,6 +600,7 @@ struct TimedList
 {
     uint64_t begin, end;          // g_frame_timer_next counts: slot = count % kFrameTimers
     ID3D12CommandQueue *queue;    // where it ran: its timestamps are on that queue's clock
+    std::vector<PassStamp> passes;  // its dispatches of the report's passes
 };
 std::map<uint64_t, std::vector<TimedList>> g_frame_lists;  // frame -> the lists executed in it
 std::map<uint64_t, perf::Phase> g_frame_phase;  // frame -> the part of the measurement it was rendered in
@@ -3008,10 +3021,18 @@ void on_close_command_list(command_list *cmd_list)
     {
         state->frame_end = frame_timestamp(cmd_list);
         auto *native = reinterpret_cast<ID3D12GraphicsCommandList *>(cmd_list->get_native());
-        for (const uint64_t n : {state->frame_begin, state->frame_end})
+        const auto resolve = [&](uint64_t n) {
             native->ResolveQueryData(g_frame_timer_heap, D3D12_QUERY_TYPE_TIMESTAMP, UINT(n % kFrameTimers), 1,
                                      reinterpret_cast<ID3D12Resource *>(g_frame_timer_readback.handle),
                                      (n % kFrameTimers) * 8);
+        };
+        resolve(state->frame_begin);
+        resolve(state->frame_end);
+        for (const PassStamp &s : state->passes)
+        {
+            resolve(s.begin);
+            resolve(s.end);
+        }
     }
     if (state != nullptr && !state->ab_timers.empty() && g_ab_heap != nullptr)
     {
@@ -3175,6 +3196,7 @@ void on_init_pipeline(device *dev, pipeline_layout layout, uint32_t count, const
             lazy_file = lazy->second;
         info.has_full = !info.graphics && g_full_files.contains(info.crc);
     }
+    info.pass = info.graphics ? -1 : perf::pass_of(info.entry);
     info.watched = kWatchedEntries.contains(info.entry);
     info.radar = info.entry == "ph_rain_radar_horz";
     // The forward pass, particles and light points: replaced only where they
@@ -3283,6 +3305,21 @@ bool ab_timed_dispatch(command_list *cmd_list, uint32_t x, uint32_t y, uint32_t 
     return true;
 }
 
+// While the performance report measures, a dispatch of one of its passes (perf::pass_of): timestamps right before
+// and after it in the report's ring, so its time is its own. As the A/B test's, the add-on dispatches it here (on the
+// native list) and tells ReShade to skip the game's call.
+bool pass_timed_dispatch(command_list *cmd_list, uint32_t x, uint32_t y, uint32_t z)
+{
+    auto *state = cmd_list->get_private_data<CommandListState>();
+    if (state == nullptr || state->pass < 0 || state->frame_begin == UINT64_MAX || g_frame_timer_heap == nullptr ||
+        !g_frame_timing.load(std::memory_order_relaxed))
+        return false;
+    const uint64_t begin = frame_timestamp(cmd_list);
+    reinterpret_cast<ID3D12GraphicsCommandList *>(cmd_list->get_native())->Dispatch(x, y, z);
+    state->passes.push_back({state->pass, begin, frame_timestamp(cmd_list)});
+    return true;
+}
+
 void on_bind_pipeline(command_list *cmd_list, pipeline_stage stages, pipeline pipe)
 {
     start_frame_timing(cmd_list);
@@ -3291,6 +3328,7 @@ void on_bind_pipeline(command_list *cmd_list, pipeline_stage stages, pipeline pi
     uint32_t shader_index = UINT32_MAX, crc = 0;
     bool graphics = true;  // every compute pipeline is tracked, so an unknown one is graphics
     bool tracked = false, shaded = false, cloud = false, has_full = false;
+    int pass = -1;
     {
         const std::shared_lock lock(g_mutex);
         if (const auto it = g_pipelines.find(pipe.handle); it != g_pipelines.end())
@@ -3300,6 +3338,7 @@ void on_bind_pipeline(command_list *cmd_list, pipeline_stage stages, pipeline pi
             replacement = it->second.replacement;
             full = it->second.full;
             has_full = it->second.has_full;
+            pass = it->second.pass;
             ab_pipes = it->second.ab;
             shader_index = it->second.shader_index;
             crc = it->second.crc;
@@ -3319,6 +3358,7 @@ void on_bind_pipeline(command_list *cmd_list, pipeline_stage stages, pipeline pi
         {
             state->compute = pipe;
             state->ab_side = -1;
+            state->pass = pass;
         }
     }
     if (!graphics && replacement.handle != 0 && g_ab_scouting.load(std::memory_order_relaxed))
@@ -3546,7 +3586,7 @@ bool on_dispatch(command_list *cmd_list, uint32_t x, uint32_t y, uint32_t z)
     log_dispatch_draw_log(cmd_list, std::to_string(x) + " x " + std::to_string(y) + " x " + std::to_string(z) +
                                         " groups");
     before_dispatch(cmd_list, std::to_string(x) + '\t' + std::to_string(y) + '\t' + std::to_string(z));
-    return ab_timed_dispatch(cmd_list, x, y, z);
+    return ab_timed_dispatch(cmd_list, x, y, z) || pass_timed_dispatch(cmd_list, x, y, z);
 }
 
 // Draws with a tracked graphics pipeline bound are logged, and replacements
@@ -3647,7 +3687,8 @@ void on_execute_command_list(command_queue *queue, command_list *cmd_list)
         {
             const std::lock_guard lock(g_frame_timer_mutex);
             g_frame_lists[g_frame.load(std::memory_order_relaxed)].push_back(
-                {state->frame_begin, state->frame_end, reinterpret_cast<ID3D12CommandQueue *>(queue->get_native())});
+                {state->frame_begin, state->frame_end, reinterpret_cast<ID3D12CommandQueue *>(queue->get_native()),
+                 state->passes});
             g_gpu_counts.lists += 1;
         }
     if (!draw_log_on())
@@ -4150,12 +4191,19 @@ void time_gpu_frames(uint64_t frame)
         return it->second.frequency > 0 ? &it->second : nullptr;
     };
     const double qpc_ms = 1000.0 / double(qpc_frequency.QuadPart);
-    std::vector<std::pair<perf::Phase, double>> timed;
+    struct TimedFrame
+    {
+        perf::Phase measured_in;
+        double ms;
+        perf::PassTimes passes;
+    };
+    std::vector<TimedFrame> timed;
     {
         const std::lock_guard lock(g_frame_timer_mutex);
         for (auto &[measured_in, lists] : ready)
         {
             std::vector<std::pair<double, double>> spans;
+            perf::PassTimes passes = {};
             bool fresh = true, run = true, valid = true, clocked = true;
             for (const TimedList &l : lists)
             {
@@ -4172,6 +4220,15 @@ void time_gpu_frames(uint64_t frame)
                 const double per_tick = 1000.0 / double(c->frequency);
                 spans.emplace_back(at + double(int64_t(b - c->gpu)) * per_tick,
                                    at + double(int64_t(e - c->gpu)) * per_tick);
+                // (its passes' dispatches: between its start and its end, on its queue's clock)
+                for (const PassStamp &s : l.passes)
+                {
+                    const uint64_t pb = ticks[s.begin % kFrameTimers], pe = ticks[s.end % kFrameTimers];
+                    run = run && pb != 0 && pe != 0;
+                    valid = valid && pe >= pb;
+                    if (s.pass >= 0 && size_t(s.pass) < perf::kPasses && pe >= pb)
+                        passes[size_t(s.pass)] += double(pe - pb) * per_tick;
+                }
             }
             if (g_gpu_counts.first.empty() && !lists.empty())
             {
@@ -4196,12 +4253,12 @@ void time_gpu_frames(uint64_t frame)
                               : g_gpu_counts.timed;
             count += 1;
             if (ms > 0.0)
-                timed.emplace_back(measured_in, ms);
+                timed.push_back({measured_in, ms, passes});
         }
     }
     g_debug_device->unmap_buffer_region(g_frame_timer_readback);
-    for (const auto &[measured_in, ms] : timed)
-        g_measurement.gpu_frame(measured_in, ms);
+    for (const TimedFrame &f : timed)
+        g_measurement.gpu_frame(f.measured_in, f.ms, f.passes);
 }
 
 // The GPU timing's counts, for the log line at the end of a measurement.
@@ -4282,6 +4339,23 @@ void measure_performance(effect_runtime *runtime)
                 snprintf(buf + n, sizeof(buf) - n, "; no GPU times");
         }
         event(reshade::log::level::info, buf);
+        if (r.has_gpu())
+        {
+            std::string passes = "performance report: GPU ms per frame by pass, with / without the mod:";
+            double on = 0.0, off = 0.0;
+            for (size_t k = 0; k < perf::kPasses; ++k)
+            {
+                char part[64];
+                snprintf(part, sizeof(part), "%s %s %.3f / %.3f", k ? "," : "", perf::kPassKeys[k], r.pass_on(k),
+                         r.pass_off(k));
+                passes += part;
+                on += r.pass_on(k);
+                off += r.pass_off(k);
+            }
+            char rest[64];
+            snprintf(rest, sizeof(rest), ", the rest %.3f / %.3f", r.gpu_on() - on, r.gpu_off() - off);
+            event(reshade::log::level::info, passes + rest);
+        }
         event(reshade::log::level::info, "performance report: " + std::to_string(r.mod_shaders) +
               " of the mod's shaders ran with the mod on, " + std::to_string(r.mod_shader_runs) + " times");
         event(reshade::log::level::info, "performance report: " + gpu_timing_counts());

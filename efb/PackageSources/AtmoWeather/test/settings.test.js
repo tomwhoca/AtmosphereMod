@@ -303,6 +303,21 @@ check(model.value("T3").get() === 4 && model.effectiveValue("T3").get() === 7.5,
         "report: the view changing is pointed out too, after the shaders");
   const noGpu = perf.reportFields({ ...done, result: { ...result, gpuOn: undefined, gpuOff: undefined } }, ctx, answers);
   check(noGpu.gpuMsOn === undefined && noGpu.fpsOn === 61.2, "report: without GPU times, the frame rate only");
+  // the mod's compute passes, with and without the mod, and the rest of the frame
+  const passes = { clouds: [1.494, 1.412], cloudGen: [0.02, 0.0], sky: [0.66, 0.6], haze: [0.212, 0.15],
+    shadows: [0.19, 0.18] };
+  const withPasses = perf.reportFields({ ...done, result: { ...result, passes } }, ctx, answers);
+  check(withPasses.gpuMsCloudsOn === 1.49 && withPasses.gpuMsCloudsOff === 1.41 && withPasses.gpuMsCloudGenOn === 0.02
+        && withPasses.gpuMsSkyOff === 0.6 && withPasses.gpuMsHazeOn === 0.21 && withPasses.gpuMsShadowsOff === 0.18
+        && withPasses.gpuMsRestOn === 7.29 && withPasses.gpuMsRestOff === 4.78,
+        `report: each pass's GPU time and the rest (${withPasses.gpuMsRestOn}, ${withPasses.gpuMsRestOff})`);
+  check(perf.detailsText({ ...done, result: { ...result, passes } }, ctx, answers).includes("GPU time by pass, ms per "
+          + "frame with / without the mod: clouds 1.49 / 1.41, cloud generator 0.02 / 0.00, sky 0.66 / 0.60, haze 0.21 "
+          + "/ 0.15, cloud shadows 0.19 / 0.18, the rest 7.29 / 4.78"),
+        "report: the passes in what will be sent");
+  check(!("gpuMsCloudsOn" in f) && !perf.detailsText(done, ctx, answers).includes("by pass")
+        && !("gpuMsCloudsOn" in perf.reportFields({ ...done, result: { ...result, passes, gpuOn: undefined } }, ctx,
+          answers)), "report: an add-on without the passes, or without GPU times: no pass fields");
   check(perf.summaryText(result).includes("9.9 ms per frame with the mod, 7.1 ms without (+2.7 ms, +39 %)")
         && !perf.summaryText(result).includes("held at"), `report: the summary has the GPU time (${perf.summaryText(result)})`);
   const capped = { ...result, fpsOn: 60, fpsOff: 60, fpsOn1: 60, fpsOn2: 60 };

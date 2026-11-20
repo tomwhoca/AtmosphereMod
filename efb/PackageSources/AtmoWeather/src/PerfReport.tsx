@@ -29,6 +29,8 @@ export interface AddonReport {
     gpuOn?: number; gpuOff?: number; gpuOn1?: number; gpuOn2?: number; gpuFramesOn?: number; gpuFramesOff?: number;
     /** How many of the mod's shaders ran with the mod on, and their runs per frame (none: the mod did nothing). */
     modShaders?: number; modShaderRuns?: number;
+    /** The mod's compute passes' GPU time per frame, ms, [with, without] (perf_report.h kPassKeys). */
+    passes?: Record<string, [number, number]>;
   };
   system?: {
     pc: { gpu: string; gpuVendor: string; vramGB: number; driver: string; cpu: string; threads: number; ramGB: number;
@@ -119,6 +121,30 @@ const round1 = (x: number): string => (Math.round(x * 10) / 10).toString();
 /** A report as the sheet's script takes it (tools/perf_report_sheet.gs: its COLUMNS name these keys). */
 export type ReportFields = Record<string, string | number | boolean>;
 
+/** The mod's compute passes (the add-on's keys), as the report's fields gpuMs<Field>On/Off and in words. */
+export const PASSES: [key: string, field: string, words: string][] = [
+  ["clouds", "Clouds", "clouds"],
+  ["cloudGen", "CloudGen", "cloud generator"],
+  ["sky", "Sky", "sky"],
+  ["haze", "Haze", "haze"],
+  ["shadows", "Shadows", "cloud shadows"],
+];
+
+/** Each pass's GPU ms with and without the mod, and the rest of the frame (its GPU time less the passes'). */
+function passTimes(r: NonNullable<AddonReport["result"]>): [field: string, words: string, on: number, off: number][] {
+  if (!r.passes || r.gpuOn === undefined || r.gpuOff === undefined) return [];
+  const out: [string, string, number, number][] = [];
+  let on = 0, off = 0;
+  for (const [key, field, words] of PASSES) {
+    const [a, b] = r.passes[key] ?? [0, 0];
+    out.push([field, words, a, b]);
+    on += a;
+    off += b;
+  }
+  out.push(["Rest", "the rest", r.gpuOn - on, r.gpuOff - off]);
+  return out;
+}
+
 /** The report for the sheet: the measurement, the PC, the sim's settings (the VR ones in VR), and the answers. */
 export function reportFields(report: AddonReport, ctx: Context, answers: Answers): ReportFields {
   const pc = report.system?.pc;
@@ -160,6 +186,10 @@ export function reportFields(report: AddonReport, ctx: Context, answers: Answers
     }
     if (r.modShaders !== undefined) {
       Object.assign(f, { modShaders: r.modShaders, modShaderRuns: num1(r.modShaderRuns ?? 0) });
+    }
+    for (const [field, , on, off] of passTimes(r)) {
+      f[`gpuMs${field}On`] = num2(on);
+      f[`gpuMs${field}Off`] = num2(off);
     }
   }
   if (pc) {
@@ -221,6 +251,11 @@ export function detailsText(report: AddonReport, ctx: Context, answers: Answers)
     if (r.modShaders !== undefined) {
       lines.push(`The mod's shaders: ${r.modShaders} different ones ran with the mod on, `
         + `${Math.round(r.modShaderRuns ?? 0)} times a frame`);
+    }
+    const passes = passTimes(r);
+    if (passes.length > 0) {
+      lines.push("GPU time by pass, ms per frame with / without the mod: "
+        + passes.map(([, words, on, off]) => `${words} ${on.toFixed(2)} / ${off.toFixed(2)}`).join(", "));
     }
   }
   if (pc) {

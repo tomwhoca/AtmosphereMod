@@ -17,6 +17,12 @@
 // frame (timestamps at the start and end of each of the sim's command lists,
 // overlaps merged: busy_ms), which a cap only pads with idle time.
 //
+// And the passes the mod changes that are compute dispatches (kPassKeys: the
+// clouds, their generator, the sky, the haze, the cloud shadows), each timed on
+// its own (timestamps right before and after each of its dispatches), with and
+// without the mod: what each costs. The rest of the frame (the GPU time less the
+// passes) is everything else, the forward pass's fog and the lighting among it.
+//
 // With it, the PC (GPU, driver, CPU, memory, Windows), how ReShade is loaded,
 // and the sim's own graphics settings (its UserCfg.opt: anti-aliasing and
 // upscaling, frame generation, render scaling, cloud quality, ray-traced
@@ -25,6 +31,7 @@
 
 #pragma once
 
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <map>
@@ -51,6 +58,13 @@ enum class Phase
     stopped,  // by the user (or the switch was used meanwhile)
 };
 
+// The mod's compute passes, as the report's keys (the app's fields gpuMs<Key>On/Off).
+constexpr size_t kPasses = 5;
+extern const char *const kPassKeys[kPasses];  // clouds, cloudGen, sky, haze, shadows
+using PassTimes = std::array<double, kPasses>;
+// The pass a compute shader belongs to, by its entry point (shader_names.tsv), or -1 for none.
+int pass_of(const std::string &entry);
+
 struct Timing
 {
     double settle_s = 4.0;   // before each part: the picture and its temporal filters settle
@@ -68,6 +82,9 @@ struct Part
     uint32_t gpu_frames = 0;
     double gpu_ms_sum = 0.0;
     double gpu_ms() const { return gpu_frames > 0 ? gpu_ms_sum / gpu_frames : 0.0; }
+    // ... and the passes' in those frames (0 in a frame where a pass didn't run)
+    PassTimes pass_ms_sum = {};
+    double pass_ms(size_t k) const { return gpu_frames > 0 ? pass_ms_sum[k] / gpu_frames : 0.0; }
 };
 
 struct Result
@@ -79,6 +96,8 @@ struct Result
     double drift() const;
     double gpu_on() const;  // both "on" parts together
     double gpu_off() const { return off.gpu_ms(); }
+    double pass_on(size_t k) const;  // both "on" parts together
+    double pass_off(size_t k) const { return off.pass_ms(k); }
     bool has_gpu() const { return (on1.gpu_frames + on2.gpu_frames) > 0 && off.gpu_frames > 0; }
     // The mod's shaders that ran in the parts with the mod (mod_shaders): how many different ones, and how often.
     // None means the mod changed nothing in this view, or isn't working on this PC. (Without the mod none run.)
@@ -107,8 +126,8 @@ public:
     // Each frame (present): the switch the mod should have now, while measuring.
     std::optional<bool> frame(Clock::time_point now);
     // A frame's GPU time, once it's known (some frames later): to the part it was rendered in
-    // (`measured_in`, the phase() it was in), while the measurement runs.
-    void gpu_frame(Phase measured_in, double ms);
+    // (`measured_in`, the phase() it was in), while the measurement runs; with its passes' times.
+    void gpu_frame(Phase measured_in, double ms, const PassTimes &passes = {});
     // The mod's shaders that have run in the parts with the mod so far (different ones, and their runs), counted by
     // the add-on while counts_mod_shaders(); kept while the measurement runs.
     void mod_shaders(uint32_t shaders, uint64_t runs);
