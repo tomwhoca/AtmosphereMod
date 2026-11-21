@@ -18,7 +18,9 @@ export function toolsPage(scope: Scope, store: Store, theme: Value<string>, open
     scope.add(theme.watch((t) => { b.className = `btn${t === name ? " chosen" : ""}`; }));
     return b;
   };
-  const appearance = card("Appearance", h("div", { class: "actions" }, look("dark", "Dark"), look("light", "Light")));
+  const appearance = card("Appearance",
+    h("div", { class: "actions" }, look("auto", "Auto"), look("dark", "Dark"), look("light", "Light")),
+    h("div", { class: "note", text: "Auto: light by day in the sim, dark at dawn, dusk and night." }));
 
   const report = card("Performance report",
     h("div", { class: "muted", text: "Measures what the mod costs on your PC, with it and without, and if you like "

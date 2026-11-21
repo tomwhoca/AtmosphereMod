@@ -262,6 +262,9 @@ class HarnessHost implements Host {
   }
 
   public simvar(name: string): number {
+    if (name === "E:TIME OF DAY") {
+      return parseInt(($("daytime") as HTMLSelectElement).value, 10);  // (the UI's auto theme reads it)
+    }
     return name === "PLANE ALTITUDE" ? 5012 : name === "PLANE ALT ABOVE GROUND" ? 4890 : 0;
   }
 
@@ -414,9 +417,16 @@ async function main(): Promise<void> {
   };
   // (the UI keeps its variant in its stored data, Host.save "atmo-ui-theme": set it, mount anew)
   const themeSel = $("theme") as HTMLSelectElement;
-  themeSel.value = stored("data-atmo-ui-theme", "dark");
+  themeSel.value = stored("data-atmo-ui-theme", "auto");
   themeSel.onchange = () => {
     store("data-atmo-ui-theme", themeSel.value);
+    void mountUi();
+  };
+  // (the sim's time of day, for the auto theme: a change mounts anew, so it shows at once)
+  const daySel = $("daytime") as HTMLSelectElement;
+  daySel.value = stored("daytime", "1");
+  daySel.onchange = () => {
+    store("daytime", daySel.value);
     void mountUi();
   };
   // (the UI keeps the latest release a day: a new choice clears that, then mounts anew)

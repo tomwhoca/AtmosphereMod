@@ -15,7 +15,7 @@ import { PRESET_DEFAULT, sameName, Store } from "./model";
 import { CLOUD_TABS, overviewPage, settingsPage, SKY_TABS } from "./pages";
 import { presetsPage } from "./presetsPage";
 import { reportSheet, Sheet, whatsNewSheet } from "./sheets";
-import { THEMES, UI_CSS } from "./theme";
+import { THEME_CHOICES, UI_CSS } from "./theme";
 import { SheetName, toolsPage } from "./toolsPage";
 import { latestRelease } from "./update";
 
@@ -25,6 +25,8 @@ declare const DEV: boolean;
 const STYLE_ID = "atmo-ui-style";
 const PAGE_KEY = "atmo-ui-page";
 const THEME_KEY = "atmo-ui-theme";
+/** With the theme on auto, the sim's time of day is read this often. */
+const AUTO_THEME_MS = 30000;
 /** The small tablet's short side (px) at the first measured window: --u scales every length against it. */
 const BASE_PX = 624;
 
@@ -137,9 +139,17 @@ export function mount(root: HTMLElement, host: Host): () => void {
   const focusName = new Value(0);
   const latest = latestRelease(host);
   // (the light or the dark variant: the user compares them, Tools > Appearance)
+  // (dark, light, or auto: light by day in the sim, dark at dawn, dusk and night, when a bright tablet dazzles in a
+  // dim cockpit; the sim's E:TIME OF DAY is 0 dawn, 1 day, 2 dusk, 3 night)
   const storedTheme = host.load(THEME_KEY);
-  const theme = new Value(storedTheme && THEMES.indexOf(storedTheme) >= 0 ? storedTheme : "dark");
+  const theme = new Value(storedTheme && THEME_CHOICES.indexOf(storedTheme) >= 0 ? storedTheme : "auto");
   scope.add(theme.watch((t) => host.save(THEME_KEY, t)));
+  const variant = new Value("dark");
+  const pickVariant = () => variant.set(theme.get() !== "auto" ? theme.get()
+    : Number(host.simvar("E:TIME OF DAY", "enum")) === 1 ? "light" : "dark");
+  scope.add(theme.watch(pickVariant));
+  const dayTimer = setInterval(() => theme.get() === "auto" && pickVariant(), AUTO_THEME_MS);
+  scope.add(() => clearInterval(dayTimer));
   const go = (id: string) => page.set(id);
 
   // ---- the sheets: What's new when this release's is new to the user; the performance report from Tools
@@ -276,9 +286,9 @@ export function mount(root: HTMLElement, host: Host): () => void {
   // ---- the tablet: orientation and scale
   const classes = () => {
     const p = store.panel.get();
-    ui.className = `atmo-ui ${p.vertical ? "v" : "h"} s${p.size} ${theme.get()}`;
+    ui.className = `atmo-ui ${p.vertical ? "v" : "h"} s${p.size} ${variant.get()}`;
   };
-  scope.add(theme.watch(classes));
+  scope.add(variant.watch(classes));
   scope.add(store.panel.watch((p) => {
     const u = p.width > 0 ? Math.min(p.width, p.height) / BASE_PX : 1;
     ui.style.setProperty("--u", u.toFixed(4));

@@ -14,6 +14,8 @@
 import { units } from "./dom";
 
 export const THEMES = ["dark", "light"];
+/** What the user can choose (Tools > Appearance): a variant, or auto (by the time of day in the sim). */
+export const THEME_CHOICES = ["auto", "dark", "light"];
 
 export const UI_CSS = units(`
 /* the two variants' colours (accent, dawn, rose, ok and exp as r, g, b for rgba()) */
