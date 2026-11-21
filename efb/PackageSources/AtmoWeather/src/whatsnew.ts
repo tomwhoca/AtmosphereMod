@@ -5,29 +5,37 @@
 /** The release the popup is for, and what it says: change it with every release that has news for the
  * tablet (a release without news leaves it, so nothing shows again). */
 export const WHATS_NEW = {
-  release: "0.7.3",
-  title: "New in AtmosphereMod 0.7.3",
+  release: "0.8.0",
+  title: "New in AtmosphereMod 0.8.0",
   items: [
-    ["Hotkeys",
-      "The new Hotkeys tab changes the mod's keys: tap Change, then press the new keys in the sim. Glass Cockpit "
-      + "DLSS Fix, one of OptiShade's components, uses Ctrl+Shift+F9 and F11 by default: while it's loaded, the "
-      + "tab tells you if its keys are the same as the mod's."],
-    ["In-cloud fog on/off",
-      "A key of your choice switches the fog inside clouds off for now, and on again: for when it shows just "
-      + "below a cloud. It has no key until you give it one in the Hotkeys tab."],
-    ["Historical weather",
-      "The haze and the clouds now follow historical weather, and switching between live and historical "
-      + "weather in flight brings the other weather at once. The haze could also stay with a faraway station "
-      + "for the rest of a flight: fixed."],
-    ["Installer",
-      "Updating and uninstalling no longer stop at a read-only folder in Community (\"Access is denied\"), "
-      + "and the installer also runs under Wine on Linux."],
+    ["A new app",
+      "As the mod grew, the first app became crowded and hard to find your way around in, so I redesigned it "
+      + "from scratch: a page each for the sky and haze, the clouds, presets, keys and tools, and a Home page "
+      + "that shows the weather as the mod draws it. The i next to a setting tells you what it does."],
+    ["Community Presets",
+      "Sharing presets is now much easier. You can share yours with other pilots straight from the app, and add "
+      + "theirs to yours: you'll find the new section at the end of the Presets page."],
+    ["Performance",
+      "Careful adjustments to the cloud rendering, some of them for AMD graphics cards in particular. I've "
+      + "measured them on my PC; now they need testing on yours. The performance report on the Tools page "
+      + "measures what the mod costs and, if you like, sends me the result. Reports from AMD users help most."],
+    ["Under the hood",
+      "Many changes that prepare the mod for features to come."],
   ] as [string, string][],
 };
 
 /** Earlier releases' changes, newest first, folded away under "Changes in previous versions", for those who
  * skipped a release or two. When WHATS_NEW gets a new release, its items so far go on top here. */
 export const PREVIOUS: { release: string; items: [string, string][] }[] = [
+  {
+    release: "0.7.3",
+    items: [
+      ["Hotkeys", "The mod's keys can be changed in the app."],
+      ["In-cloud fog on/off", "A key of your choice switches the fog inside clouds off for now, and on again."],
+      ["Historical weather", "The haze and the clouds follow historical weather too."],
+      ["Installer", "No more stops at a read-only folder in Community, and it runs under Wine on Linux."],
+    ],
+  },
   {
     release: "0.7.2",
     items: [

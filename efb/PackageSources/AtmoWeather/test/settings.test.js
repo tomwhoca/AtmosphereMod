@@ -294,7 +294,7 @@ check(spec("T16").metarOnly && !spec("T3").metarOnly && spec("T16").toDisplay(1)
   {
     const v = (r) => r.split(".").map(Number).reduce((a, n) => a * 1000 + n, 0);
     const order = [WHATS_NEW.release, ...PREVIOUS.map((p) => p.release)];
-    check(PREVIOUS.length > 0 && PREVIOUS[0].release === "0.7.2"
+    check(PREVIOUS.length > 0 && PREVIOUS[0].release === "0.7.3"
           && order.every((r, i) => /^\d+\.\d+\.\d+$/.test(r) && (i === 0 || v(r) < v(order[i - 1])))
           && PREVIOUS[PREVIOUS.length - 1].release === "0.1.0",
           `what's new: the previous versions, newest first, ${PREVIOUS[0].release} down to 0.1.0`);
