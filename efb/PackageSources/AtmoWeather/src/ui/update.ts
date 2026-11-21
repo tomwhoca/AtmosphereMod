@@ -6,6 +6,8 @@ import { Value } from "./dom";
 import { Host } from "./host";
 
 const LATEST = "https://api.github.com/repos/tomwhoca/AtmosphereMod/releases/latest";
+/** The latest release's page on GitHub (the notice links there). */
+export const RELEASE_PAGE = "https://github.com/tomwhoca/AtmosphereMod/releases/latest";
 const KEY = "atmo-ui-latest";
 const DAY_MS = 24 * 3600 * 1000;
 const TIMEOUT_MS = 10000;

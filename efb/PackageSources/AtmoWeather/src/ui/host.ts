@@ -49,6 +49,8 @@ export interface Host {
   onPanel(callback: (panel: Panel) => void): () => void;
   /** A SimVar (the performance report's altitude). */
   simvar(name: string, unit: string): number;
+  /** A web page in the PC's browser (the newer release's page). */
+  openUrl(url: string): void;
   /** Small values kept across flights (What's new: the version last seen). */
   load(key: string): string | undefined;
   save(key: string, value: string): void;

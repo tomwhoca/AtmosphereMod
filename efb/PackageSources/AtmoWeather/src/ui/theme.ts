@@ -1,7 +1,8 @@
 // The redesign's look (2026-11-20, after the user's first look in the sim): minimal and compact, in pastel sky and
 // cloud colours, in two variants to compare: dark (a dusk-blue ground) and light (a pale sky, deeper overhead, where
 // the sim's status bar draws its own dark gradient and white clock). One accent, sky blue; a dawn peach for unsaved
-// changes only; a rose for a delete about to happen. Thin borders and a restrained drop shadow, no glow; nearly
+// changes and for waiting; a rose for a delete about to happen; a sage green for what works (connected, the METARs
+// coming in); a dusk lilac for the experimental mark. Thin borders and a restrained drop shadow, no glow; nearly
 // square corners, rounded only where it marks the design (the switch, the slider's thumb, the status dot, the
 // brand). Lengths are written as "16u": u is the tablet's scale against the small one at the first measured window
 // (624 px short side), so one design holds at every size and window.
@@ -15,21 +16,21 @@ import { units } from "./dom";
 export const THEMES = ["dark", "light"];
 
 export const UI_CSS = units(`
-/* the two variants' colours (accent, dawn and rose as r, g, b for rgba()) */
+/* the two variants' colours (accent, dawn, rose, ok and exp as r, g, b for rgba()) */
 .atmo-ui {
   --text: #eef2f7; --text-2: #c3ccd8; --muted: #8d99aa; --icon-dim: #66738a;
   --ground: linear-gradient(180deg, #1b2433 0%, #182030 50%, #151b26 100%);
   --b1: rgba(220, 230, 245, 0.07); --b2: rgba(220, 230, 245, 0.1); --b3: rgba(220, 230, 245, 0.15); --b4: rgba(220, 230, 245, 0.24);
   --card: #1f2938; --card-shadow: 0 2u 6u rgba(8, 12, 20, 0.3); --soft: rgba(255, 255, 255, 0.025);
   --track: #33405a; --bar: #182030; --switch-off: #2e3a4d; --knob-off: #8d99aa; --on-acc: #1b2433; --field: #182030;
-  --acc: 167, 200, 234; --dawn: 240, 196, 160; --rose: 233, 161, 170; }
+  --acc: 167, 200, 234; --dawn: 240, 196, 160; --rose: 233, 161, 170; --ok: 150, 210, 168; --exp: 196, 176, 232; }
 .atmo-ui.light {
   --text: #22324a; --text-2: #46566e; --muted: #73829a; --icon-dim: #98a6b8;
   --ground: linear-gradient(180deg, #86a3c4 0u, #b8cfe6 45u, #dce8f4 160u, #edf2f8 420u, #f3f6fa 100%);
   --b1: rgba(60, 85, 120, 0.08); --b2: rgba(60, 85, 120, 0.12); --b3: rgba(60, 85, 120, 0.17); --b4: rgba(60, 85, 120, 0.28);
   --card: #fbfcfe; --card-shadow: 0 2u 6u rgba(60, 85, 120, 0.12); --soft: rgba(255, 255, 255, 0.6);
   --track: #c9d6e4; --bar: #e9eff6; --switch-off: #cbd6e3; --knob-off: #ffffff; --on-acc: #ffffff; --field: #ffffff;
-  --acc: 94, 144, 198; --dawn: 196, 128, 70; --rose: 192, 88, 104; }
+  --acc: 94, 144, 198; --dawn: 196, 128, 70; --rose: 192, 88, 104; --ok: 56, 140, 92; --exp: 124, 98, 178; }
 
 .atmo-ui { position: absolute; left: 0; top: 0; right: 0; bottom: 0; overflow: hidden; color: var(--text);
   --f-light: Roboto-Light, Arial, sans-serif; --f-reg: Roboto-Regular, Arial, sans-serif;
@@ -166,7 +167,7 @@ export const UI_CSS = units(`
 .atmo-ui .control .icon-btn.reset { margin-left: 6u; }
 /* an experimental setting's mark */
 .atmo-ui .named { display: inline-flex; align-items: center; }
-.atmo-ui .exp { display: inline-flex; margin-left: 6u; color: var(--text-2); }
+.atmo-ui .exp { display: inline-flex; margin-left: 6u; color: rgb(var(--exp)); }
 .atmo-ui .exp svg { width: 14u; height: 14u; }
 .atmo-ui.h .control { width: 310u; }
 .atmo-ui .btn { display: inline-flex; align-items: center; justify-content: center; height: 30u; padding: 0 12u;
@@ -183,7 +184,7 @@ export const UI_CSS = units(`
   border: 1px solid var(--b3); border-radius: 2u; white-space: nowrap; }
 .atmo-ui .tag.unsaved { color: rgb(var(--dawn)); border-color: rgba(var(--dawn), 0.55); }
 .atmo-ui .dot { display: inline-block; width: 7u; height: 7u; border-radius: 4u; margin-right: 7u; flex: 0 0 auto; }
-.atmo-ui .dot.ok { background: rgb(var(--acc)); }
+.atmo-ui .dot.ok { background: rgb(var(--ok)); }
 .atmo-ui .dot.wait { background: rgb(var(--dawn)); }
 .atmo-ui .field { width: 100%; height: 30u; padding: 0 10u; border-radius: 3u; font-family: var(--f-reg); font-size: 14u;
   color: var(--text); background: var(--field); border: 1px solid var(--b3); outline: none; }
@@ -203,13 +204,19 @@ export const UI_CSS = units(`
 .atmo-ui .chip.armed { border-color: rgb(var(--dawn)); color: rgb(var(--dawn)); }
 
 /* the overview's status line: the add-on's connection at the left, the METAR link (pulsing while it polls) at the right */
-.atmo-ui .update { margin-left: 10u; color: rgb(var(--acc)); font-size: 13u; white-space: nowrap; overflow: hidden;
-  text-overflow: ellipsis; }
+.atmo-ui .update { display: flex; align-items: center; min-width: 0; margin-left: 10u; color: rgb(var(--acc));
+  font-size: 13u; cursor: pointer; }
+.atmo-ui .update span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.atmo-ui .update svg { width: 13u; height: 13u; margin-left: 5u; flex: 0 0 auto; }
+.atmo-ui .update:hover span { text-decoration: underline; }
 .atmo-ui .statusline .body { display: flex; align-items: center; justify-content: space-between; padding: 9u 14u; }
+/* (a vertical tablet hasn't room for the newer release's notice beside the link: the link goes below) */
+.atmo-ui.v .statusline .body.ahead { flex-direction: column; align-items: flex-start; }
+.atmo-ui.v .statusline .body.ahead .linkrow { margin-left: 0; margin-top: 6u; }
 .atmo-ui .linkrow { display: flex; align-items: center; color: var(--text-2); font-size: 13u; min-width: 0; margin-left: 12u; }
 .atmo-ui .linkrow svg { width: 15u; height: 15u; margin-right: 7u; color: var(--muted); flex: 0 0 auto; }
 .atmo-ui .linkrow .live { width: 7u; height: 7u; border-radius: 4u; margin-right: 7u; flex: 0 0 auto;
-  background: rgb(var(--acc)); -webkit-animation: atmo-pulse 1.6s ease-in-out infinite; animation: atmo-pulse 1.6s ease-in-out infinite; }
+  background: rgb(var(--ok)); -webkit-animation: atmo-pulse 1.6s ease-in-out infinite; animation: atmo-pulse 1.6s ease-in-out infinite; }
 .atmo-ui .linkrow.fail .live { background: rgb(var(--dawn)); -webkit-animation: none; animation: none; }
 @-webkit-keyframes atmo-pulse { 0% { opacity: 1; } 50% { opacity: 0.2; } 100% { opacity: 1; } }
 @keyframes atmo-pulse { 0% { opacity: 1; } 50% { opacity: 0.2; } 100% { opacity: 1; } }

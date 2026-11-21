@@ -24,6 +24,8 @@ export const ICONS: Record<string, string> = {
   info: svg('<circle cx="12" cy="12" r="8.5"/><path d="M12 11v5M12 8h.01"/>'),
   down: svg('<path d="M6 9.5l6 6 6-6"/>'),
   up: svg('<path d="M6 14.5l6-6 6 6"/>'),
+  out: svg('<path d="M14 4.5h5.5V10M19.5 4.5L11 13"/>'
+    + '<path d="M17.5 14v4.5a1.5 1.5 0 0 1-1.5 1.5H6a1.5 1.5 0 0 1-1.5-1.5V8.5A1.5 1.5 0 0 1 6 7h4.5"/>'),
 };
 
 /** An icon as an element. */

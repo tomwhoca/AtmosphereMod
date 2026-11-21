@@ -7,7 +7,7 @@ import { h, Scope, Value } from "./dom";
 import { icon } from "./icons";
 import { decode, Decoded, layersText } from "./metar";
 import { PRESET_DEFAULT, sameName, Store } from "./model";
-import { newer } from "./update";
+import { newer, RELEASE_PAGE } from "./update";
 
 export type Go = (page: string) => void;
 
@@ -63,10 +63,17 @@ const QUICK: [key: string, label: string, section: string][] = [
 ];
 const SECTION_NAMES: Record<string, string> = { sky: "SKY & HAZE", light: "CLOUD LIGHT", clouds: "CLOUDS" };
 
+/** Where the METARs come from (the sim's weather now; other sources, as ActiveSky or StrataWx, may follow). */
+const METAR_SOURCE = "the sim";
+
 export function overviewPage(scope: Scope, store: Store, go: Go, latest: Value<string | undefined>): HTMLElement {
   const dot = h("span", { class: "dot wait" });
   const conn = h("span");
-  const update = h("span", { class: "update" });
+  const updateText = h("span");
+  const update = h("span", { class: "update", title: "The release on GitHub" }, updateText, icon("out"));
+  scope.listen(update, "click", () => store.host.openUrl(RELEASE_PAGE));
+  // (one slim line: the add-on's connection, the METAR link; with a newer release, in a vertical tablet, two)
+  const statusBody = h("div", { class: "body" });
   const showConn = () => {
     const s = store.state.get();
     dot.className = `dot ${s ? "ok" : "wait"}`;
@@ -74,8 +81,9 @@ export function overviewPage(scope: Scope, store: Store, go: Go, latest: Value<s
     // (a newer release on GitHub than the add-on: update.ts)
     const tag = latest.get();
     const ahead = !!s && newer(tag, s.version);
-    update.textContent = ahead ? `Newer version available (v.${(tag || "").replace(/^v\.?/, "")})` : "";
+    updateText.textContent = ahead ? `Newer version available (v.${(tag || "").replace(/^v\.?/, "")})` : "";
     update.style.display = ahead ? "" : "none";
+    statusBody.className = `body${ahead ? " ahead" : ""}`;
   };
   scope.add(store.state.watch(showConn));
   scope.add(latest.watch(showConn));
@@ -89,11 +97,12 @@ export function overviewPage(scope: Scope, store: Store, go: Go, latest: Value<s
     const failed = /failed: (.*)$/.exec(l);
     linkRow.className = `linkrow${polling ? "" : " fail"}`;
     live.style.display = polling || failed ? "" : "none";
-    linkText.textContent = polling ? "Polling METARs" : failed ? `Last poll failed: ${failed[1]}` : l || "Not started";
+    linkText.textContent = polling ? `Pulling METARs from ${METAR_SOURCE}` : failed ? `Last poll failed: ${failed[1]}` : l || "Not started";
   }));
-  // (one slim line: the add-on's connection, the METAR link)
-  const status = h("div", { class: "card statusline" }, h("div", { class: "body" },
-    h("div", { class: "label", style: "display: flex; align-items: center; min-width: 0" }, dot, conn, update), linkRow));
+  statusBody.appendChild(h("div", { class: "label", style: "display: flex; align-items: center; min-width: 0" },
+                           dot, conn, update));
+  statusBody.appendChild(linkRow);
+  const status = h("div", { class: "card statusline" }, statusBody);
 
   // the METAR, decoded, and what the mod draws of it against the sim's own
   const raw = h("div", { class: "metar-raw" });

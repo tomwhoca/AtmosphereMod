@@ -293,6 +293,15 @@ class SimHost implements Host {
     return SimVar.GetSimVarValue(name, unit) as number;
   }
 
+  public openUrl(url: string): void {
+    // (the PC's default browser. The sim's own OpenBrowser(url), in every UI view, is Coherent.trigger of this:
+    // the tablet ignores that; as a call it opens (measured 2026-11-21))
+    const w = window as unknown as { Coherent?: { call?: (name: string, ...args: unknown[]) => unknown } };
+    if (w.Coherent && typeof w.Coherent.call === "function") {
+      w.Coherent.call("OPEN_WEB_BROWSER", url);
+    }
+  }
+
   public load(key: string): string | undefined {
     const v = GetStoredData(key);
     return typeof v === "string" && v !== "" ? v : undefined;

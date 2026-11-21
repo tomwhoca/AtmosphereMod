@@ -217,6 +217,11 @@ class HarnessHost implements Host {
     return name === "PLANE ALTITUDE" ? 5012 : name === "PLANE ALT ABOVE GROUND" ? 4890 : 0;
   }
 
+  public openUrl(url: string): void {
+    log(`open in the browser: ${url}`);
+    window.open(url, "_blank", "noopener");
+  }
+
   public load(key: string): string | undefined {
     return stored(`data-${key}`, "") || undefined;
   }
