@@ -6,6 +6,7 @@ import { changesFromDefault, CommunityApi } from "../community";
 import { NAME_RULE, PRESET_NAME_MAX, presetChar, presetName } from "../presets";
 import { IMPRESSION, LIMITED_BY, PHASE_TEXT, PerfReportModel, Step, STUTTERS, WEATHER } from "../report";
 import { PREVIOUS, WHATS_NEW } from "../whatsnew";
+import { aboutTile } from "./about";
 import { button, choice, sheet, switchEl, textField } from "./controls";
 import { h, Scope, Value } from "./dom";
 import { icon } from "./icons";
@@ -21,7 +22,7 @@ export interface Sheet {
   body: HTMLElement;
 }
 
-export function whatsNewSheet(scope: Scope, close: () => void): Sheet {
+export function whatsNewSheet(scope: Scope, close: () => void, openUrl: (url: string) => void): Sheet {
   const items = WHATS_NEW.items.map(([head, text]) =>
     h("div", { class: "news-item" }, h("div", { class: "news-head", text: head }), h("div", { class: "news-text", text })));
   const box = h("div", { style: "display: none" }, ...PREVIOUS.map((v) =>
@@ -36,8 +37,10 @@ export function whatsNewSheet(scope: Scope, close: () => void): Sheet {
     chevron.innerHTML = "";
     chevron.appendChild(icon(open ? "up" : "down"));
   });
+  // (it always ends with About This Mod and its two donation buttons: the user's wish)
   return sheet(scope, WHATS_NEW.title, close, ...items, toggle, box,
-               h("div", { class: "actions end" }, button(scope, "Got it", "primary", close)));
+               h("div", { class: "tiles news-about" }, aboutTile(scope, openUrl)),
+               h("div", { class: "actions end" }, button(scope, "Got it", "", close)));
 }
 
 export function reportSheet(scope: Scope, store: Store, model: PerfReportModel): Sheet {
@@ -111,7 +114,7 @@ export function reportSheet(scope: Scope, store: Store, model: PerfReportModel):
     note.textContent = t;
     note.style.display = t ? "" : "none";
   }));
-  return sheet(scope, "Performance report", () => model.close(), intro, measuring, review, sent, failed, note);
+  return sheet(scope, "Performance Report", () => model.close(), intro, measuring, review, sent, failed, note);
 }
 
 /** Shares one of the user's presets in Community Presets: its look from the add-on (exportPreset), what it changes
@@ -202,5 +205,5 @@ export function shareSheet(scope: Scope, store: Store, preset: string, api: Comm
   const sent = at(h("div", null,
     h("div", { class: "news-text", text: "Shared: it's in Community Presets now. Thank you!" }),
     h("div", { class: "actions" }, button(scope, "Close", "primary", close))), "sent");
-  return sheet(scope, "Share a preset", close, reading, missing, form, sent, note);
+  return sheet(scope, "Share a Preset", close, reading, missing, form, sent, note);
 }

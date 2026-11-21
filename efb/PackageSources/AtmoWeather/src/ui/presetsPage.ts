@@ -11,7 +11,7 @@ import {
 import {
   missingText, NAME_RULE, PRESET_DEFAULT, PRESET_NAME_MAX, presetChar, presetName, sameName, settingsInWords,
 } from "../presets";
-import { button, card, iconMenu, MenuItem, textField, twoTaps } from "./controls";
+import { button, chipIcon, iconMenu, MenuItem, section, textField, tileLabel, twoTaps } from "./controls";
 import { h, Scope, Value } from "./dom";
 import { icon } from "./icons";
 import { Store } from "./model";
@@ -25,7 +25,7 @@ const COMPATIBLE = "compatible", ALL_VERSIONS = "all";
 const SORT_PHRASE: Record<string, string> = { new: "Newest first", added: "Most added first", name: "A to Z" };
 
 export function presetsPage(scope: Scope, store: Store, focusName: Value<number>, community: CommunityApi,
-                            share: (name: string) => void): HTMLElement {
+                            share: (name: string) => void, jump?: Value<string>): HTMLElement {
   const presets = (): string[] => (store.state.get() && store.state.get()!.presets) || [];
   const missingOf = (name: string): string[] => {
     const s = store.state.get();
@@ -109,10 +109,11 @@ export function presetsPage(scope: Scope, store: Store, focusName: Value<number>
     local.set("");
     store.importPreset();
   }, live);
-  const saveCard = card("Save the settings as they are",
+  const saveCard = h("div", { class: "tiles" }, h("div", { class: "tile glow wide" },
+    tileLabel("presets", "Save Your Settings"),
     h("div", { class: "fieldrow" }, field, saveBtn),
     h("div", { class: "actions" }, h("span", { class: "muted", text: "Or a preset someone shared:" }), importBtn),
-    note);
+    note));
 
   // ---- the list: made again when what it shows changes (not at each state: a second tap would be lost)
   const list = h("div");
@@ -220,7 +221,33 @@ export function presetsPage(scope: Scope, store: Store, focusName: Value<number>
   scope.add(store.state.watch(render));
   scope.add(asking.watch(render));
   scope.add(notYet.watch(render));
-  return h("div", null, saveCard, card("Your presets", list), older, communityCard(scope, store, community));
+  const shared = communityCard(scope, store, community);
+  // (from Home's Community Presets: the card at the top of the page's view, again while its list loads and the page
+  // grows, for 2 s at most and only until the page is scrolled by hand)
+  if (jump && jump.get() === "community") {
+    jump.set("");
+    let set = -1, tries = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const bring = () => {
+      let el = shared.parentElement;
+      while (el && !/\bscroll\b/.test(el.className)) {
+        el = el.parentElement;
+      }
+      if (el) {
+        if (set >= 0 && Math.abs(el.scrollTop - set) > 2) {
+          return;  // (scrolled by hand)
+        }
+        el.scrollTop = shared.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop - 4;
+        set = el.scrollTop;
+      }
+      if (++tries < 20) {
+        timer = setTimeout(bring, 100);
+      }
+    };
+    timer = setTimeout(bring, 0);
+    scope.add(() => timer && clearTimeout(timer));
+  }
+  return h("div", null, saveCard, section("Your Presets", "presets", list), older, shared);
 }
 
 /** Community Presets: the presets other pilots share, a page at a time. Three icons in its heading: search (opens
@@ -240,7 +267,7 @@ function communityCard(scope: Scope, store: Store, api: CommunityApi): HTMLEleme
   scope.add(store.state.watch((s) => {
     const n = (s && s.presetNote) || "";
     if (/from Community Presets$/.test(n)) {
-      showNote(`${n}: load it under Your presets.`);
+      showNote(`${n}: load it under Your Presets.`);
     }
   }));
   let alive = true;
@@ -346,7 +373,8 @@ function communityCard(scope: Scope, store: Store, api: CommunityApi): HTMLEleme
   const prev = button(scope, "Previous", "small", () => turn(-1), hasPrev);
   const next = button(scope, "Next", "small", () => turn(1), hasNext);
   const pager = h("div", { class: "pager", style: "display: none" }, prev, pagerText, next);
-  const head = h("div", { class: "card-head" }, h("h2", { text: "Community Presets" }), tools);
+  const head = h("div", { class: "card-head" },
+    h("div", { class: "sec-title" }, chipIcon("globe"), h("h2", { text: "Community Presets" })), tools);
 
   /** The card's top back in view after a page turned (when it's above the page's scrolled view). */
   const topInView = () => {

@@ -48,6 +48,19 @@ export function card(title: string, ...children: (Node | null)[]): HTMLElement {
   return h("div", { class: "card" }, h("h2", { text: title }), h("div", { class: "body" }, ...children));
 }
 
+/** A round icon in the page's colour (a section's mark). */
+export const chipIcon = (name: string): HTMLElement => h("span", { class: "chipicon" }, icon(name));
+
+/** A section: a card whose title has a round icon in the page's colour. */
+export function section(title: string, iconName: string, ...children: (Node | null)[]): HTMLElement {
+  return h("div", { class: "card" }, h("div", { class: "sec-head" }, chipIcon(iconName), h("h2", { text: title })),
+           h("div", { class: "body" }, ...children));
+}
+
+/** A tile's label: its icon and its name (and what follows, at the right). */
+export const tileLabel = (iconName: string, text: string, ...more: (Node | null)[]): HTMLElement =>
+  h("div", { class: "tlabel" }, icon(iconName), h("span", { text }), ...more);
+
 /** A tap that asks for a second one before it acts (if `needed`): the button reads `armedText` meanwhile. */
 export function twoTaps(scope: Scope, label: string, armedText: string, kind: string, act: () => void,
                         needed: () => boolean, enabled?: Value<boolean>): HTMLElement {

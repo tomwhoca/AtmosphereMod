@@ -1,6 +1,7 @@
 // Is there a newer release on GitHub? (the redesign, 2026-11-20, the user's wish): the latest release's tag from
 // GitHub's API, at most once a day (kept with the host's stored data), against the add-on's version. A request to
-// api.github.com, nothing sent but the request itself; offline or refused, nothing shows.
+// api.github.com, nothing sent but the request itself; offline or refused, nothing shows. And a bug report's
+// address: GitHub's new issue form with a template and the versions (Tools, 2026-11-21).
 
 import { Value } from "./dom";
 import { Host } from "./host";
@@ -8,6 +9,34 @@ import { Host } from "./host";
 const LATEST = "https://api.github.com/repos/tomwhoca/AtmosphereMod/releases/latest";
 /** The latest release's page on GitHub (the notice links there). */
 export const RELEASE_PAGE = "https://github.com/tomwhoca/AtmosphereMod/releases/latest";
+/** The README's troubleshooting entry for an add-on that doesn't answer (Home's Add-on tile links there): its
+ * heading, "The EFB app says "No answer"", as GitHub makes it an anchor. */
+export const TROUBLESHOOTING = "https://github.com/tomwhoca/AtmosphereMod#the-efb-app-says-no-answer";
+/** GitHub's form for a new issue (it asks the user to sign in first). */
+export const NEW_ISSUE = "https://github.com/tomwhoca/AtmosphereMod/issues/new";
+
+/** What a bug report starts with: the versions, and whether the mod is on. Nothing else about the user. */
+export interface BugInfo {
+  app: string;
+  addon?: string;
+  modOn?: boolean;
+}
+
+/** The new issue form's address, its text filled in: what happened, what was expected, how to see it (the hints
+ * as comments, which GitHub doesn't show), then the versions. */
+export function bugReportUrl(info: BugInfo): string {
+  const body = [
+    "### What happened", "", "",
+    "### What you expected", "", "",
+    "### How to see it",
+    "<!-- Where and when (airport, time of day), the weather (live, historical or a preset), the preset or settings "
+      + "you use, and a screenshot if you can. -->", "", "",
+    "---",
+    `EFB app ${info.app} \u00b7 add-on ${info.addon || "not connected"}`
+      + `${info.modOn === undefined ? "" : ` \u00b7 the mod ${info.modOn ? "on" : "off"}`}`,
+  ].join("\n");
+  return `${NEW_ISSUE}?body=${encodeURIComponent(body)}`;
+}
 const KEY = "atmo-ui-latest";
 const DAY_MS = 24 * 3600 * 1000;
 const TIMEOUT_MS = 10000;

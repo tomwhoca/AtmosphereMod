@@ -264,9 +264,25 @@ class HarnessHost implements Host {
     return () => undefined;
   }
 
+  /** The METAR link's status as the shell reports it (the fixture's, or one picked in the sidebar to see the
+   * Home tile's other states: a failed poll, not started). */
+  private linkNow: string | undefined;
+  private readonly linkWatchers: ((s: string) => void)[] = [];
+
+  public setLink(status: string): void {
+    this.linkNow = status;
+    this.linkWatchers.slice().forEach((cb) => cb(status));
+  }
+
   public onLinkStatus(cb: (s: string) => void): () => void {
-    cb(this.fixture.link);
-    return () => undefined;
+    this.linkWatchers.push(cb);
+    cb(this.linkNow !== undefined ? this.linkNow : this.fixture.link);
+    return () => {
+      const i = this.linkWatchers.indexOf(cb);
+      if (i >= 0) {
+        this.linkWatchers.splice(i, 1);
+      }
+    };
   }
 
   public onPanel(cb: (p: Panel) => void): () => void {
@@ -555,6 +571,13 @@ async function main(): Promise<void> {
   };
   ($("connected") as HTMLInputElement).onchange = (e) => {
     addon.answers = (e.target as HTMLInputElement).checked;
+    void mountUi();  // (as the app starts: an add-on that doesn't answer leaves it waiting)
+  };
+  // (the METAR link's states, as the shell words them: AtmoWeather.tsx)
+  ($("link") as HTMLSelectElement).onchange = (e) => {
+    const v = (e.target as HTMLSelectElement).value;
+    host.setLink(v === "failed" ? "running, last poll failed: Error: no answer from the sim's weather (timed out)"
+      : v === "off" ? "" : fixture.link);
   };
   $("reset").onclick = () => addon.reset();
   window.addEventListener("resize", fit);

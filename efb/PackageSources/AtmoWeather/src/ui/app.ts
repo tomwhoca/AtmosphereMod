@@ -151,7 +151,12 @@ export function mount(root: HTMLElement, host: Host): () => void {
   scope.add(theme.watch(pickVariant));
   const dayTimer = setInterval(() => theme.get() === "auto" && pickVariant(), AUTO_THEME_MS);
   scope.add(() => clearInterval(dayTimer));
-  const go = (id: string) => page.set(id);
+  /** Where on the next page to go (presetsPage: "community"); cleared once there. */
+  const jump = new Value("");
+  const go = (id: string, target = "") => {
+    jump.set(target);
+    page.set(id);
+  };
 
   // ---- the sheets: What's new when this release's is new to the user; the performance report from Tools
   const sheetName = new Value<SheetName>(whatsNewDue(host.load(WHATS_NEW_KEY)) ? "news" : "");
@@ -259,7 +264,7 @@ export function mount(root: HTMLElement, host: Host): () => void {
     scroll.appendChild(def.id === "overview" ? overviewPage(ps, store, go, latest)
       : def.id === "sky" ? settingsPage(ps, store, SKY_TABS())
       : def.id === "clouds" ? settingsPage(ps, store, CLOUD_TABS(), true)
-      : def.id === "presets" ? presetsPage(ps, store, focusName, community, openShare)
+      : def.id === "presets" ? presetsPage(ps, store, focusName, community, openShare, jump)
       : def.id === "keys" ? hotkeysPage(ps, store)
       : toolsPage(ps, store, theme, openSheet));
   };
@@ -285,7 +290,7 @@ export function mount(root: HTMLElement, host: Host): () => void {
       return;
     }
     sheetScope = new Scope();
-    shown = name === "news" ? whatsNewSheet(sheetScope, closeNews)
+    shown = name === "news" ? whatsNewSheet(sheetScope, closeNews, (url) => host.openUrl(url))
       : name === "share" ? shareSheet(sheetScope, store, sharing, community, () => sheetName.set(""))
       : reportSheet(sheetScope, store, report);
     dragToScroll(sheetScope, shown.body);
@@ -296,9 +301,11 @@ export function mount(root: HTMLElement, host: Host): () => void {
   // ---- the tablet: orientation and scale
   const classes = () => {
     const p = store.panel.get();
-    ui.className = `atmo-ui ${p.vertical ? "v" : "h"} s${p.size} ${variant.get()}`;
+    // (pg-*: the page's colour, theme.ts)
+    ui.className = `atmo-ui ${p.vertical ? "v" : "h"} s${p.size} ${variant.get()} pg-${page.get()}`;
   };
   scope.add(variant.watch(classes));
+  scope.add(page.watch(classes));
   scope.add(store.panel.watch((p) => {
     const u = p.width > 0 ? Math.min(p.width, p.height) / BASE_PX : 1;
     ui.style.setProperty("--u", u.toFixed(4));

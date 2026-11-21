@@ -31,6 +31,9 @@ export class Store {
   private readonly drops: (() => void)[] = [];
   private askedAt = Date.now();
 
+  /** When the app started (the add-on not answering for a while after it: Home's Add-on tile says so). */
+  public readonly startedAt = Date.now();
+
   public constructor(public readonly host: Host) {
     this.drops.push(host.onState((s) => this.accept(s)));
     this.drops.push(host.onPanel((p) => {

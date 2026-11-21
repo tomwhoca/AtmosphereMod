@@ -673,6 +673,30 @@ check(spec("T16").metarOnly && !spec("T3").metarOnly && spec("T16").toDisplay(1)
     check(more.weather.join(" | ") === "freezing rain | patches of fog | blowing snow | thunderstorm nearby | light snow showers",
           `metar: descriptors in plain word order (${more.weather.join(" | ")})`);
     check(feet(12500) === "12,500 ft" && decode("garbage").weather.length === 0, "metar: thousands, and nonsense ignored");
+    // the flight category: the worse of the ceiling (the lowest broken, overcast or vertical visibility) and the
+    // visibility; LIFR < 500 ft or 1 mi, IFR < 1,000 ft or 3 mi, MVFR to 3,000 ft or 5 mi
+    const { flightCategory, hazeReading } = app.metar;
+    const cat = (m) => flightCategory(decode(m));
+    check(d.ceilingFt === 1500 && d.visibilityM === 10000 && cat("EDDK 201250Z 22003KT 9999 -SHRA BKN015 09/08 Q1001")
+          === "MVFR" && cat("LIRF 090920Z 00000KT CAVOK M02/M05 Q1025") === "VFR" && us.ceilingFt === 300
+          && flightCategory(us) === "LIFR" && fog.ceilingFt === 100 && flightCategory(fog) === "LIFR"
+          && flightCategory(ts) === "VFR" && flightCategory(more) === "IFR",
+          "metar: flight categories (ceiling 1,500 MVFR, CAVOK VFR, 300 ft LIFR, fog LIFR, 10SM with SCT VFR, 3000 m IFR)");
+    check(cat("EDDF 201250Z 25010KT 9999 SCT040 BKN031 10/05 Q1015") === "VFR"
+          && cat("EDDF 201250Z 25010KT 9999 BKN030 10/05 Q1015") === "MVFR"
+          && cat("EDDF 201250Z 25010KT 9000 FEW040 10/05 Q1015") === "VFR"
+          && cat("EDDF 201250Z 25010KT 8000 BR FEW040 10/05 Q1015") === "MVFR"
+          && cat("EDDF 201250Z 25010KT 6000 FEW040 10/05 Q1015") === "MVFR"
+          && cat("EDDF 201250Z 25010KT 2500 BR OVC009 10/05 Q1015") === "IFR"
+          && cat("EDDF 201250Z 25010KT 1500 BR OVC009 10/05 Q1015") === "LIFR"
+          && cat("KJFK 201251Z 31008KT 1/2SM FG OVC002 10/09 A3001") === "LIFR"
+          && cat("EDDF 201250Z 25010KT 10/05 Q1015") === undefined,
+          "metar: the limits (3,100 ft VFR, 3,000 ft MVFR, 9 km VFR, 8 km (4.97 mi) MVFR, 6 km MVFR, 900 ft IFR, 1,500 m (0.93 mi) LIFR, a half mile LIFR, nothing: none)");
+    const r1 = hazeReading("EDDK (+3): continental haze, visibility ~25 km, humidity 87%");
+    const r2 = hazeReading("LIRF: smoke (FU), visibility ~6 km, humidity 40%");
+    check(r1.kind === "continental haze" && r1.visibility === "~25 km" && r1.humidity === "87%" && r1.stations === 4
+          && r2.kind === "smoke (FU)" && r2.visibility === "~6 km" && r2.stations === 1 && hazeReading("") === undefined,
+          `metar: the add-on's haze reading taken apart (${JSON.stringify(r1)} ${JSON.stringify(r2)})`);
 
     // ... and whether GitHub has a newer release (src/ui/update.ts)
     const up = app.update;
@@ -680,6 +704,12 @@ check(spec("T16").metarOnly && !spec("T3").metarOnly && spec("T16").toDisplay(1)
           && !up.newer("v0.7.3", "0.7.3") && !up.newer("v0.7.2", "0.7.3") && !up.newer("v0.8.0", "dev (harness)")
           && !up.newer(undefined, "0.7.3") && !up.newer("latest", "0.7.3") && up.newer("v.0.8.0", "v.0.7.3"),
           "update: newer only when the release's version is higher (10 > 9; not a version: no)");
+    const bugUrl = up.bugReportUrl({ app: "0.8.0", addon: "0.8.0", modOn: true });
+    const bugBody = decodeURIComponent(bugUrl.split("?body=")[1]);
+    check(bugUrl.startsWith("https://github.com/tomwhoca/AtmosphereMod/issues/new?body=") && bugBody.indexOf("### What happened") === 0
+          && /EFB app 0\.8\.0 . add-on 0\.8\.0 . the mod on$/.test(bugBody)
+          && /add-on not connected$/.test(decodeURIComponent(up.bugReportUrl({ app: "0.8.0" }).split("?body=")[1])),
+          "update: a bug report's address, the template and the versions filled in");
   }
 
   fs.rmSync(out, { force: true });

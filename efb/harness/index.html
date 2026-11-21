@@ -55,6 +55,11 @@
     <h2>Add-on</h2>
     <label><input type="checkbox" id="connected" checked> answers (unchecked: an add-on that never does)</label>
     <button id="reset">reset its state to the fixture</button>
+    <label>METAR link: <select id="link">
+      <option value="live">polling</option>
+      <option value="failed">a poll failed</option>
+      <option value="off">not started</option>
+    </select></label>
     <h2>Messages to the add-on</h2>
     <div id="log"></div>
   </div>

@@ -1,6 +1,6 @@
 // A METAR in plain words, for the overview's "Weather now" (the redesign, 2026-11-20): the report's station and
-// time, wind, visibility, weather, clouds, temperature and pressure. Only the observation: trends (NOSIG, BECMG,
-// TEMPO) and remarks (RMK) end it. What it doesn't know it leaves out.
+// time, wind, visibility, weather, clouds, temperature and pressure, and its flight category. Only the observation:
+// trends (NOSIG, BECMG, TEMPO) and remarks (RMK) end it. What it doesn't know it leaves out.
 
 export interface Layer {
   cover: string;       // "few", "scattered", "broken", "overcast"
@@ -19,6 +19,56 @@ export interface Decoded {
   sky?: string;        // what the clouds' groups said when they gave no layer: "no significant cloud", "clear", ...
   temperature?: string;
   pressure?: string;
+  /** The visibility in metres (9999 and CAVOK: 10,000; "M1/4SM": the quarter mile), for the flight category. */
+  visibilityM?: number;
+  /** The ceiling: the lowest broken or overcast layer, or the vertical visibility, in feet (none: no ceiling). */
+  ceilingFt?: number;
+}
+
+/** The flight categories, the worst first. */
+export type Category = "LIFR" | "IFR" | "MVFR" | "VFR";
+export const CATEGORIES: readonly Category[] = ["LIFR", "IFR", "MVFR", "VFR"];
+const METRES_PER_MILE = 1609.344;
+
+/** A METAR's flight category, by the usual limits (the worse of ceiling and visibility): LIFR below 500 ft or 1 mile,
+ * IFR below 1,000 ft or 3 miles, MVFR up to 3,000 ft or 5 miles, VFR above. Undefined without either. */
+export function flightCategory(d: Decoded): Category | undefined {
+  const miles = d.visibilityM === undefined ? undefined : d.visibilityM / METRES_PER_MILE;
+  const ceil = d.ceilingFt;
+  if (miles === undefined && ceil === undefined && d.layers.length === 0 && !d.sky) {
+    return undefined;
+  }
+  const below = (ft: number, mi: number) => (ceil !== undefined && ceil < ft) || (miles !== undefined && miles < mi);
+  if (below(500, 1)) {
+    return "LIFR";
+  }
+  if (below(1000, 3)) {
+    return "IFR";
+  }
+  if ((ceil !== undefined && ceil <= 3000) || (miles !== undefined && miles <= 5)) {
+    return "MVFR";
+  }
+  return miles === undefined ? undefined : "VFR";
+}
+
+/** The add-on's reading of the haze, "EDDK (+3): continental haze, visibility ~25 km, humidity 87%", taken apart. */
+export interface HazeReading {
+  kind: string;          // "continental haze", "smoke (FU)", ...
+  visibility?: string;   // "~25 km"
+  humidity?: string;     // "87%"
+  stations: number;      // the METARs it's made of (1, or more with the haze field)
+}
+
+export function hazeReading(line: string | undefined): HazeReading | undefined {
+  const m = /^\s*([A-Z0-9]{3,4})?(?:\s*\(\+(\d+)\))?\s*:\s*(.+)$/.exec(line || "");
+  if (!m) {
+    return undefined;
+  }
+  const parts = m[3].split(/,\s*/);
+  const vis = parts.map((p) => /^visibility\s+(.+)$/.exec(p)).filter((x) => x)[0];
+  const hum = parts.map((p) => /^humidity\s+(.+)$/.exec(p)).filter((x) => x)[0];
+  return { kind: parts[0], visibility: vis ? vis[1] : undefined, humidity: hum ? hum[1] : undefined,
+           stations: 1 + (m[2] ? parseInt(m[2], 10) : 0) };
 }
 
 const COVER: Record<string, string> = { FEW: "few", SCT: "scattered", BKN: "broken", OVC: "overcast" };
@@ -83,26 +133,34 @@ export function decode(metar: string): Decoded {
       out.wind += ` (varying ${m[1]}-${m[2]}°)`;
     } else if (t === "CAVOK") {
       out.visibility = "10 km or more";
+      out.visibilityM = 10000;
       out.sky = "no cloud below 5,000 ft";
     } else if ((m = /^(\d{4})(NDV)?$/.exec(t)) && out.visibility === undefined) {
       const n = parseInt(m[1], 10);
       out.visibility = n >= 9999 ? "10 km or more" : n >= 5000 ? `${n / 1000} km` : `${n} m`;
+      out.visibilityM = n >= 9999 ? 10000 : n;
     } else if ((m = /^(M)?(\d+)?(?:(\d)\/(\d))?SM$/.exec(t)) && out.visibility === undefined) {
       const whole = m[2] ? parseInt(m[2], 10) : 0;
       // (a whole number and a fraction come as two tokens: "1 1/2SM")
       const prev = /^\d+$/.test(tokens[i - 1] || "") ? parseInt(tokens[i - 1], 10) : 0;
       const miles = whole + prev + (m[3] ? parseInt(m[3], 10) / parseInt(m[4], 10) : 0);
       out.visibility = `${m[1] ? "less than " : ""}${miles} mi${miles >= 10 ? " or more" : ""}`;
+      out.visibilityM = miles * METRES_PER_MILE * (m[1] ? 0.99 : 1);
     } else if (/^\d$/.test(t) && /SM$/.test(tokens[i + 1] || "")) {
       continue;  // (the whole miles before a fraction)
     } else if (/^R\d{2}/.test(t)) {
       continue;  // (runway visual range)
     } else if ((m = /^(FEW|SCT|BKN|OVC)(\d{3}|\/\/\/)(CB|TCU|\/\/\/)?$/.exec(t))) {
       if (m[2] !== "///") {
-        out.layers.push({ cover: COVER[m[1]], feet: parseInt(m[2], 10) * 100, type: m[3] && m[3] !== "///" ? m[3] : undefined });
+        const ft = parseInt(m[2], 10) * 100;
+        out.layers.push({ cover: COVER[m[1]], feet: ft, type: m[3] && m[3] !== "///" ? m[3] : undefined });
+        if ((m[1] === "BKN" || m[1] === "OVC") && (out.ceilingFt === undefined || ft < out.ceilingFt)) {
+          out.ceilingFt = ft;
+        }
       }
     } else if ((m = /^VV(\d{3})$/.exec(t))) {
       out.sky = `sky obscured, vertical visibility ${feet(parseInt(m[1], 10) * 100)}`;
+      out.ceilingFt = Math.min(out.ceilingFt === undefined ? Infinity : out.ceilingFt, parseInt(m[1], 10) * 100);
     } else if (SKY[t]) {
       out.sky = SKY[t];
     } else if ((m = /^(M?\d{2})\/(M?\d{2})?$/.exec(t))) {

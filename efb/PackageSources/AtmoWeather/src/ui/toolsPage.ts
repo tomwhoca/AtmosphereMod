@@ -1,10 +1,12 @@
-// The Tools page: the look (dark or light), the performance report and What's new (each opens its sheet), the
-// settings file (read it again; every setting back to the default), and what's installed.
+// The Tools page: the look (dark or light), the performance report and What's new (each opens its sheet), a bug
+// report (GitHub's new issue form in the PC's browser), the settings file (read it again; every setting back to the
+// default), and what's installed.
 
 import { TABS } from "../specs";
 import { WHATS_NEW } from "../whatsnew";
-import { button, card, twoTaps } from "./controls";
+import { button, section, tileLabel, twoTaps } from "./controls";
 import { h, Scope, Value } from "./dom";
+import { bugReportUrl } from "./update";
 import { Store } from "./model";
 
 export type SheetName = "" | "news" | "report" | "share";
@@ -18,18 +20,31 @@ export function toolsPage(scope: Scope, store: Store, theme: Value<string>, open
     scope.add(theme.watch((t) => { b.className = `btn${t === name ? " chosen" : ""}`; }));
     return b;
   };
-  const appearance = card("Appearance",
+  const appearance = h("div", { class: "tile sun half" }, tileLabel("contrast", "Appearance"),
     h("div", { class: "actions" }, look("auto", "Auto"), look("dark", "Dark"), look("light", "Light")),
-    h("div", { class: "note", text: "Auto: light by day in the sim, dark at dawn, dusk and night." }));
+    h("p", { class: "tp", text: "Auto: light by day in the sim, dark at dawn, dusk and night." }));
 
-  const report = card("Performance report",
-    h("div", { class: "muted", text: "Measures what the mod costs on your PC, with it and without, and if you like "
-                                     + "sends me the result. About a minute, in a view with clouds." }),
+  const report = h("div", { class: "tile sky half" }, tileLabel("tools", "Performance Report"),
+    h("div", { class: "big", text: "~1 minute" }),
+    h("p", { class: "tp", text: "Measures what the mod costs on your PC, with it and without, and if you like sends "
+                                + "me the result. Best in a view with clouds." }),
     h("div", { class: "actions" }, button(scope, "Open", "primary", () => open("report"), live)));
 
-  const news = card("What's new",
-    h("div", { class: "muted", text: `${WHATS_NEW.title}, and the changes in earlier versions.` }),
-    h("div", { class: "actions" }, button(scope, "Open", "", () => open("news"))));
+  const news = h("div", { class: "tile dusk half" }, tileLabel("info", "What's New"),
+    h("div", { class: "big", text: `Version ${WHATS_NEW.release}` }),
+    h("p", { class: "tp", text: "What this version brings, and the changes in earlier ones." }),
+    h("div", { class: "actions" }, button(scope, "Open", "primary", () => open("news"))));
+
+  // (a bug report: GitHub's form, the versions filled in; GitHub asks for an account)
+  const bug = h("div", { class: "tile aurora half" }, tileLabel("bug", "Report a Bug"),
+    h("div", { class: "big", text: "On GitHub" }),
+    h("p", { class: "tp", text: "Opens a new issue in your PC's browser, with the mod's versions filled in. You need "
+                                + "a GitHub account. How to see it, and a screenshot, help most." }),
+    h("div", { class: "actions" }, button(scope, "Open an issue", "primary", () => {
+      const s = store.state.get();
+      store.host.openUrl(bugReportUrl({ app: store.host.version, addon: s ? s.version : undefined,
+                                        modOn: s ? !!s.enabled : undefined }));
+    })));
 
   const reloadKey = h("span", { class: "muted" });
   scope.add(store.state.watch((s) => {
@@ -37,7 +52,7 @@ export function toolsPage(scope: Scope, store: Store, theme: Value<string>, open
     reloadKey.textContent = k ? `(also ${k})` : "";
   }));
   const allKeys = TABS.reduce<string[]>((all, t) => all.concat(t.settings.map((s) => s.key)), []);
-  const file = card("Settings",
+  const file = section("Settings", "sliders",
     h("div", { class: "muted", text: "The settings live in tunables.ini. Read it again after editing it by hand; it "
                                      + "also reloads the mod's shaders." }),
     h("div", { class: "actions" }, button(scope, "Reload tunables.ini", "", () => store.reload(), live), reloadKey),
@@ -56,5 +71,6 @@ export function toolsPage(scope: Scope, store: Store, theme: Value<string>, open
   };
   scope.add(store.state.watch(fill));
   scope.add(store.link.watch(fill));
-  return h("div", null, report, news, file, h("div", { class: "cols" }, appearance, card("About", about)));
+  return h("div", null, h("div", { class: "tiles" }, report, news, bug, appearance),
+           h("div", { class: "cols" }, file, section("About", "info", about)));
 }

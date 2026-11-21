@@ -102,7 +102,7 @@ export const TABS: TabSpec[] = [
           + "smoke. Together, these reports describe the haze over a whole region.\nThe haze follows these "
           + "reports (METARs) from the sim's live or historical weather, blended between the stations around you "
           + "as you fly: how much there is, how high it reaches and what kind it is. Off, your own values under "
-          + "Manual haze apply.",
+          + "Manual Haze apply.",
       },
       {
         kind: "slider", key: "T16", label: "Haze strength", min: 0, max: 200, step: 5, metarOnly: true,
@@ -135,7 +135,7 @@ export const TABS: TabSpec[] = [
     ],
   },
   {
-    name: "Manual haze",
+    name: "Manual Haze",
     settings: [
       plain("T3", "Haze near the ground",
             "Most haze sits in the lowest one or two kilometres of the air, where dust, moisture and pollution "

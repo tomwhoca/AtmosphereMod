@@ -3,7 +3,7 @@
 // Default. Under them the add-on's note on the last change and other add-ons' keys that are the same.
 
 import { DEFAULT_HOTKEYS, HOTKEY_ACTIONS, hotkeyClashes, hotkeyNoteText, KEYS_ALLOWED, LEARN_SECONDS } from "../hotkeys";
-import { button, card } from "./controls";
+import { button, section, tileLabel } from "./controls";
 import { h, Scope, Value } from "./dom";
 import { icon } from "./icons";
 import { Store } from "./model";
@@ -56,8 +56,13 @@ export function hotkeysPage(scope: Scope, store: Store): HTMLElement {
     clashes.style.display = c ? "" : "none";
     older.style.display = s && s.hotkeys === undefined ? "" : "none";
   }));
-  return h("div", null, card("Keys in the sim",
-    h("div", { class: "muted intro", text: `Tap Change, then press the new keys in the sim within ${LEARN_SECONDS} seconds: `
-                                           + `${KEYS_ALLOWED}. The keys work while the sim's window is in front.` }),
-    rows, note, clashes, older));
+  // (the mod's own switch, the key most use, in large)
+  const toggleKey = h("div", { class: "big" });
+  scope.add(store.state.watch(() => { toggleKey.textContent = keysNow().toggle || "No key"; }));
+  const hero = h("div", { class: "tiles" }, h("div", { class: "tile aurora wide" },
+    tileLabel("keys", "Keys in the Sim"), toggleKey,
+    h("div", { class: "bigsub", text: "The whole mod on or off, to compare with the sim's own" }),
+    h("p", { class: "tp", text: `Tap Change, then press the new keys in the sim within ${LEARN_SECONDS} seconds: `
+                                + `${KEYS_ALLOWED}. The keys work while the sim's window is in front.` })));
+  return h("div", null, hero, section("Your Keys", "keys", rows, note, clashes, older));
 }

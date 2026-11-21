@@ -937,10 +937,14 @@ graphics devices of their own, and ReShade leaves them alone. "Errors compiling
 some effects" are about ReShade's own effects (the shader packages chosen in
 ReShade's setup), not about AtmosphereMod.
 
-### The EFB app shows "Waiting for AtmosphereMod"
+### The EFB app says "No answer"
 
-The app runs, but the add-on in the sim hasn't answered it. That's normal for
-a few seconds after a flight loads. If it stays:
+On the EFB app's Home page, the **Add-on** tile says "Waiting" while the app
+waits for the add-on in the sim, which normally answers within a second or two.
+If there's still no answer after 20 seconds, the tile turns red and says
+"No answer", and its **Troubleshooting** button opens this section. The app
+runs, but the add-on isn't answering it, most often because ReShade didn't
+load it:
 
 1. **Is ReShade running?** ReShade's banner should appear at the top of the
    screen when the sim starts, and the Home key opens its overlay. If not,
@@ -961,14 +965,16 @@ a few seconds after a flight loads. If it stays:
    | `weather feed stopped by an error: …` | A bug: please report it. |
    | No `weather feed starting` for that session, or no `weather.log` at all | The add-on didn't load: back to step 2. |
 
-4. **Connected, but still waiting:** the line at the bottom of the app's page
-   starts with "METAR link:". If it says "CommBus unavailable", the app itself
-   can't reach SimConnect. Either way, please report it.
+4. **`weather.log` looks fine, but the tile still says "No answer":** look at
+   the **METAR Link** tile beside it. "Failed" with "CommBus unavailable"
+   means the app itself can't reach the sim's CommBus, which carries its
+   messages to the add-on. Either way, please report it.
 
 ### Reporting a problem
 
-Open an issue on the
-[issues page](https://github.com/tomwhoca/AtmosphereMod/issues) and attach:
+The EFB app's **Report a Bug** button, on its Tools page, opens a new issue
+with the mod's versions filled in. Or open one on the
+[issues page](https://github.com/tomwhoca/AtmosphereMod/issues). Attach:
 - `ReShade.log`, `weather.log` and `install.log` (see above);
 - a screenshot of the problem, or of the EFB app's page;
 - your graphics card and driver version, Windows version, MS Store or Steam
