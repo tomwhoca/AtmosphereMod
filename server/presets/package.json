@@ -1,0 +1,12 @@
+{
+  "name": "atmospheremod-presets",
+  "private": true,
+  "description": "Community Presets: the AtmosphereMod EFB app's shared presets (a Cloudflare Worker with a D1 database)",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "4.166.0"
+  }
+}

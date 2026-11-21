@@ -1,0 +1,15 @@
+# Community Presets: the AtmosphereMod EFB app's shared presets (notes/presets-library.md, private).
+# Deploy: npx wrangler deploy (after wrangler login); the database: wrangler d1 create atmospheremod-presets, its id
+# below, then wrangler d1 migrations apply DB --remote. Secrets (never in the repo): wrangler secret put SALT, ADMIN_TOKEN;
+# locally they come from .dev.vars (git-ignored).
+name = "atmospheremod-presets"
+main = "src/index.ts"
+compatibility_date = "2026-11-01"
+workers_dev = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "atmospheremod-presets"
+# (created 2026-11-21, region Western Europe; the local one under .wrangler uses it too)
+database_id = "986b2ed7-61e8-4709-ae13-8ee57367a3d0"
+migrations_dir = "migrations"

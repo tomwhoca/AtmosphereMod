@@ -41,3 +41,8 @@ flightsim.to/
 
 # the developer's to-do list (kept locally)
 /ATMOSPHERE MOD TO-DOs.txt
+
+# Community Presets: the local database and secrets of wrangler dev
+server/presets/.wrangler/
+server/presets/.dev.vars
+server/presets/.admin-token
