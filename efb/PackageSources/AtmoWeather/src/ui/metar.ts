@@ -51,6 +51,32 @@ export function flightCategory(d: Decoded): Category | undefined {
   return miles === undefined ? undefined : "VFR";
 }
 
+/** Where the weather is on the flight category scale, 0-100: LIFR at zero visibility 0, VFR at CAVOK (10 km or
+ * more, no cloud below 5,000 ft) 100, each category a quarter. Within one, how far into its range the ceiling and
+ * the visibility are (ceiling 0-500-1,000-3,000-5,000 ft, visibility 0-1-3-5 miles-10 km), the worse of the two, as
+ * for the category itself. Undefined without a category. */
+export function categoryPosition(d: Decoded): number | undefined {
+  const cat = flightCategory(d);
+  if (!cat) {
+    return undefined;
+  }
+  // (a value's place on a scale of limits, each step a quarter)
+  const place = (x: number, limits: number[]): number => {
+    for (let i = 1; i < limits.length; i++) {
+      if (x < limits[i]) {
+        return 25 * (i - 1 + Math.max(0, x - limits[i - 1]) / (limits[i] - limits[i - 1]));
+      }
+    }
+    return 100;
+  };
+  const miles = d.visibilityM === undefined ? undefined : d.visibilityM / METRES_PER_MILE;
+  const byVis = miles === undefined ? 100 : place(miles, [0, 1, 3, 5, 10000 / METRES_PER_MILE]);
+  const byCeil = d.ceilingFt === undefined ? 100 : place(d.ceilingFt, [0, 500, 1000, 3000, 5000]);
+  // (inside its category's quarter: MVFR's limits are inclusive, the line itself is MVFR)
+  const low = 25 * CATEGORIES.indexOf(cat);
+  return Math.min(Math.max(Math.min(byVis, byCeil), low), low + (cat === "VFR" ? 25 : 24.9));
+}
+
 /** The add-on's reading of the haze, "EDDK (+3): continental haze, visibility ~25 km, humidity 87%", taken apart. */
 export interface HazeReading {
   kind: string;          // "continental haze", "smoke (FU)", ...

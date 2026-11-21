@@ -41,7 +41,9 @@ rendering, and consists of several components:
 - **METAR passing.** MSFS 2024 gives the METARs of its live weather only to
   JavaScript running inside the sim, not to add-ons like this one. A small
   EFB app, included with the mod, fetches them and passes them on. They drive
-  the haze and the cloud forming.
+  the haze and the cloud forming. The same app shows how the weather is
+  drawn, holds the mod's settings and your presets, and has
+  **Community Presets**, where pilots share theirs.
 
 > **Use at your own risk.** AtmosphereMod is an unofficial, experimental mod,
 > provided as is, without any warranty. It has been developed and tested on a
@@ -244,42 +246,41 @@ above, except solid clouds 0.5 and a 60 km anchoring radius.
   </tr>
 </table>
 
-### Settings on the EFB tablet
+### On the EFB tablet
 
-The AtmosphereMod app's five tabs in 0.7.0 (see [Settings](#settings)), here
-with a few settings changed from the defaults.
+The AtmosphereMod app's pages ([The EFB app](#the-efb-app)).
 
 <table>
   <tr>
-    <td width="50%"><a href="Screenshots/efb-haze.png"><img src="Screenshots/efb-haze.png" alt="EFB app: the Haze tab"></a></td>
-    <td width="50%"><a href="Screenshots/efb-sky-light.png"><img src="Screenshots/efb-sky-light.png" alt="EFB app: the Sky &amp; light tab"></a></td>
+    <td width="50%"><a href="Screenshots/efb-home.png"><img src="Screenshots/efb-home.png" alt="EFB app: Home"></a></td>
+    <td width="50%"><a href="Screenshots/efb-home-dark.png"><img src="Screenshots/efb-home-dark.png" alt="EFB app: Home at night"></a></td>
   </tr>
   <tr>
-    <td><b>Haze</b>: the atmosphere, the METAR's haze and its strength; the manual haze is folded away.</td>
-    <td><b>Sky &amp; light</b>: real-world sky colours and the daylight white balance.</td>
+    <td><b>Home</b>: the weather as the mod draws it, with the METAR's flight category, the add-on and the METAR link, and your presets.</td>
+    <td><b>Home at night</b>: the app turns dark at dawn, dusk and night by itself.</td>
   </tr>
   <tr>
-    <td><a href="Screenshots/efb-cloud-lighting.png"><img src="Screenshots/efb-cloud-lighting.png" alt="EFB app: the Cloud lighting tab"></a></td>
-    <td><a href="Screenshots/efb-clouds.png"><img src="Screenshots/efb-clouds.png" alt="EFB app: the Clouds tab"></a></td>
+    <td><a href="Screenshots/efb-sky-haze.png"><img src="Screenshots/efb-sky-haze.png" alt="EFB app: Sky &amp; Haze"></a></td>
+    <td><a href="Screenshots/efb-clouds-page.png"><img src="Screenshots/efb-clouds-page.png" alt="EFB app: Clouds"></a></td>
   </tr>
   <tr>
-    <td><b>Cloud lighting</b>: silver lining, glory, your aircraft's shadow and Sun-facing cloud sides; the powder effect, crisper edges and the finer settings are under "More".</td>
-    <td><b>Clouds</b>: the METAR anchoring, solid clouds, fly-through clouds, cloud types, smooth bases and thunderstorms; under "More", each cloud type's thickness.</td>
+    <td><b>Sky &amp; Haze</b>: Mod Atmosphere, the haze from the METARs, the manual haze and the sky colours, with a setting's description open.</td>
+    <td><b>Clouds</b>: Mod Clouds, the clouds' light, their shape and the weather they follow.</td>
   </tr>
   <tr>
-    <td><a href="Screenshots/efb-presets.png"><img src="Screenshots/efb-presets.png" alt="EFB app: the Presets tab"></a></td>
-    <td></td>
+    <td><a href="Screenshots/efb-presets-page.png"><img src="Screenshots/efb-presets-page.png" alt="EFB app: Presets"></a></td>
+    <td><a href="Screenshots/efb-tools.png"><img src="Screenshots/efb-tools.png" alt="EFB app: Tools"></a></td>
   </tr>
   <tr>
-    <td><b>Presets</b>: your settings saved under a name, the mod's Default, and presets imported from a file.</td>
-    <td></td>
+    <td><b>Presets</b>: save, load, share and import presets, and Community Presets.</td>
+    <td><b>Tools</b>: the performance report, what's new, a bug report and the app's look.</td>
   </tr>
 </table>
 
 ## What it does
 
 Ctrl+Shift+F9 switches between the mod and stock at any time, for comparison
-(another key if you choose one: [Using it](#using-it)).
+(another key if you choose one: [Hotkeys](#hotkeys)).
 The settings named below are in `tunables.ini` ([Settings](#settings)).
 
 ### Haze
@@ -326,8 +327,9 @@ What it can do:
 
   With `T15 = 0`, the nearest METAR alone sets the haze everywhere, smoothed
   over about 30 seconds.
-- **Haze strength** (`T16`). A slider under "Haze from METAR" in the app, for
-  when the reported haze looks too strong or too weak to you:
+- **Haze strength** (`T16`). A setting under **Haze from METAR** on the app's
+  Sky & Haze page, for when the reported haze looks too strong or too weak to
+  you:
   - 100 % is what the reports say. 50 % makes the haze half as thick, so the
     visibility about doubles; 200 % makes it twice as thick.
   - It changes the amount of haze, not the layer's height or its colour.
@@ -459,7 +461,7 @@ What it can do:
   - `C33` is the visibility inside a dense cloud, in metres (10 by default;
     thinner parts of a cloud allow more); 0 turns it off. A hotkey can switch
     it off for now, when it shows just below a cloud, and on again: choose
-    one in the app's Hotkeys tab ([Using it](#using-it)).
+    one on the app's Keys page ([Hotkeys](#hotkeys)).
   - **Turn off other in-cloud effects:** add-ons that simulate flying
     through clouds, such as TriTriSim GFX's wing fade effect or CloudSurf
     (flightsim.to), will most likely conflict with the mod's denser clouds.
@@ -557,8 +559,8 @@ What it can't do:
 - **Less rain near stations.** MSFS makes its rain, and the weather radar's
   picture, from the clouds it has. Where the anchoring gives thinner cloud
   than the sim had, the rain and the radar thin out with it, even when the
-  report has rain or a thunderstorm. With "Clouds follow the METARs" at 0 in
-  the app's Clouds tab (`C20 = 0`), the sim's rain is back.
+  report has rain or a thunderstorm. With **Clouds follow the METARs** at 0
+  on the app's Clouds page (`C20 = 0`), the sim's rain is back.
 - **Live weather only.** Weather presets and third-party weather engines (such
   as Active Sky) keep their own cloud layers.
 - **Experimental.** Shapes and transitions can look wrong in some weather.
@@ -579,14 +581,14 @@ add-on outside the sim can't read them directly.
 - The app is called "AtmosphereMod" and is installed into your Community
   folder.
 - It runs in the background on every aircraft's tablet (EFB) from the start
-  of the flight. You don't need to open it for the METARs; opening it shows the
-  mod's settings (see [Settings](#settings)), its status and the last METAR it
-  passed on.
+  of the flight. You don't need to open it for the METARs; opening it shows
+  how the weather is drawn, the mod's status and its settings
+  ([The EFB app](#the-efb-app)).
 - When the add-on asks, it fetches a METAR from the sim and sends it to the
   add-on over the sim's CommBus, through SimConnect.
 - At most once a day it asks GitHub for the version of the mod's latest
-  release, so its overview can tell you when a newer one is out. That request
-  is all: nothing about you or your PC is sent.
+  release, so its Home page can tell you when a newer one is out. That request
+  is all ([Privacy](#privacy)).
 
 **Which METARs.**
 - Every minute: the METAR nearest the aircraft, for the haze and the clouds.
@@ -647,7 +649,7 @@ So far the mod has been tested on one PC only:
 Nothing is known yet about other systems. If you try it, please report how it
 went, whether it works or not, on the
 [issues page](https://github.com/tomwhoca/AtmosphereMod/issues). For how fast
-it runs, the EFB app's [performance report](#settings) measures it and sends
+it runs, the EFB app's [performance report](#performance-report) measures it and sends
 the result with your system's details. Include your
 graphics card and driver version, Windows version, and whether you run the MS
 Store or Steam version. Systems that have been reported will be added here.
@@ -766,101 +768,71 @@ unzipped.
 
 ## Using it
 
-The hotkeys, unless you change them in the app's **Hotkeys** tab:
+### The EFB app
 
-| Key | Action |
-|---|---|
-| Ctrl+Shift+F9 | switch between the mod and stock |
-| Ctrl+Shift+F10 | reload the settings (`tunables.ini`) and shaders, without restarting |
-| Ctrl+Shift+F11 | write a diagnostic capture (useful for bug reports) |
-| Ctrl+Shift+F12 | log the GPU time of each draw (for performance questions) |
-| none | switch the fog inside clouds off for now, and on again |
+The mod's app, **AtmosphereMod**, is on your EFB tablet. It runs in the
+background from the start of every flight, passing the sim's METARs to the
+add-on ([METAR passing](#metar-passing)). Open it to see how the weather is
+drawn and to change the mod's settings. Its pages are **Home**,
+**Sky & Haze**, **Clouds**, **Presets**, **Keys** and **Tools**.
 
-**Hotkeys tab.** Tap **Change** next to an action, then press the new keys in
-the sim within 15 seconds: F1 to F12 with any of Ctrl, Shift and Alt, or a
-letter or digit with Ctrl or Alt. **Clear** leaves the action without a key,
-and **Default** puts back the one above. The keys are kept in
-`%LOCALAPPDATA%\AtmosphereMod\hotkeys.ini`, which installing again keeps; they
-aren't part of presets.
+- **The mod's switch**, at the top right, switches between the mod and stock,
+  as Ctrl+Shift+F9 does.
+- **The preset**, beside each page's title, is the one your settings come
+  from. Once you change a setting it says **Unsaved**: **Save** writes your
+  changes into that preset, and **Undo** (two taps) goes back to it. With no
+  preset active, **Save as …** takes you to the Presets page.
+- **Appearance**, on the Tools page: **Auto** is light by day in the sim, and
+  dark at dawn, dusk and night, when a bright tablet would dazzle you. Or
+  always **Dark** or **Light**.
+- After an update, **What's New** opens once with the new version's changes.
+  When a newer release is out, Home's **Add-on** tile says so and links to it.
 
-The in-cloud fog key is for when the fog shows just below a cloud: it switches
-[Fly-through clouds](#cloud-forming-very-experimental) off without changing
-your setting. The fog is on again with the same key, with **Switch it on** at
-the top of the app, or at the next start.
-
-If another ReShade add-on uses the same keys, pressing them does both. Glass
-Cockpit DLSS Fix (one of OptiShade's components) uses Ctrl+Shift+F9 and
-Ctrl+Shift+F11 by default, for its overlay and a green tint on the screens.
-While it's loaded, the Hotkeys tab tells you where its keys are the mod's.
-Give one of the two other keys: in this tab, or in that add-on's own tab in
-the ReShade overlay.
+**Home** shows the mod at a glance:
+- **Weather Now**: the weather as the mod draws it. First the visibility: the
+  reported one, with the haze that the METARs make (its kind and the
+  humidity). Where the report is open-ended ("10 km or more"), the haze's own
+  estimate of how far you can see takes its place. Then the reported clouds
+  and how they're drawn (anchored to the reports near stations, or the sim's
+  own), the wind, temperature, pressure and weather, and the METAR itself.
+- **Flight category**: a scale from **LIFR** to **VFR** marks the METAR's,
+  in its usual colour (LIFR magenta, IFR red, MVFR blue, VFR green). The
+  worse of the ceiling (the lowest broken or overcast layer) and the
+  visibility decides: LIFR below 500 ft or 1 mile, IFR below 1,000 ft or
+  3 miles, MVFR up to 3,000 ft or 5 miles, VFR above. The scale fills up to
+  where the weather is, from zero visibility (0 %) to CAVOK (100 %).
+- **Add-on**: **Connected**, with its version. If the add-on in the sim
+  doesn't answer within 20 seconds, the tile turns red and says
+  **No answer**; its **Troubleshooting** button opens
+  [that section](#the-efb-app-says-no-answer).
+- **METAR Link**: **Live** while the app passes METARs on, **Failed** in red,
+  with the reason, when it can't.
+- **Presets**: tap one to load it. **Manage presets** and
+  **Community Presets** open the Presets page.
+- **About This Mod**, with **Buy me a coffee** and **PayPal**.
 
 ### Settings
 
-The main settings are in the **AtmosphereMod app on your EFB tablet**, as
-switches and sliders in four tabs: Haze, Sky & light, Cloud lighting and Clouds.
-Changes apply at once and are saved to `tunables.ini`. While the haze comes
-from the METAR, the manual haze sliders are greyed out and show what the METAR
-set, and a Haze strength slider scales it (100 % is as reported). Hover over a
-setting's name for an explanation of what it does. The app's
-"Reload tunables.ini" button does what Ctrl+Shift+F10 does. The sixth tab,
-Hotkeys, is in [Using it](#using-it). After an update,
-the app opens with a short list of what's new; "Got it" closes it until the
-next one.
+The **Sky & Haze** and **Clouds** pages hold the main settings. Each page
+starts with its main switch, **Mod Atmosphere** or **Mod Clouds**, which turns
+that part of the mod on or off; the settings follow in sections. Changes apply
+at once and are saved to `tunables.ini`.
 
-**Presets.** The app's fifth tab saves all your settings (every value in
-`tunables.ini`, also the ones the app doesn't show) under a name, and loads
-them again:
-- The tab shows the active preset, and marks it **unsaved changes** once you
-  change a setting. **Save changes** writes them into that preset. Settings that
-  match no preset show as **unsaved settings**.
-- Loading a preset while your settings aren't saved asks first: save them, or
-  tap Load again to discard them.
-- **Default** is the mod's own settings, renewed at every install. It can be
-  loaded but not replaced or deleted.
-- Replacing or deleting a preset takes a second tap.
-- **Import from a file** opens a Windows file window in front of the sim
-  (Downloads at first): pick a preset someone shared, and it's added to the list
-  under its file's name, never over one of yours. In VR, the window is on your
-  desktop monitor.
-- A preset without some settings (one from an older version of the mod, say)
-  names them when you load it, and asks whether to fill them in with the mod's
-  defaults or with your current values. They're added to the preset, so it asks
-  only once.
-- Presets are in `%LOCALAPPDATA%\AtmosphereMod\presets`, one `.ini` file each,
-  in the same format as `tunables.ini`. Installing again keeps your own presets
-  and `tunables.ini`, and adds a new version's new settings to them.
-
-**Performance report.** The button at the end of the app's page measures what
-the mod costs on your PC and, if you want, sends me the result, so I can see
-which systems it runs well on and which it doesn't:
-1. Find a view with clouds (most of the mod's cost is in them) and hold it
-   still: pause the sim or slew. Keep other windows off the sim meanwhile.
-2. Tap **Start**. For about 36 seconds the mod switches itself on, off and on
-   again while the add-on times the frames: the frame rate, and how long the
-   GPU works on each frame. The mod's on/off key (Ctrl+Shift+F9), or the
-   app's own switch, stops it; afterwards the mod is as it was.
-3. The app shows the result: the frame rate and the GPU's time per frame, with
-   and without the mod. Where the frame rate is capped (V-Sync, a 60 Hz
-   screen, a frame limit, frame generation), it comes out the same both ways,
-   and the GPU time shows the cost. It also counts how many of the mod's
-   shaders ran: if none did, the mod isn't working on your PC, and the app
-   says so. Then it shows everything that would be sent: the graphics
-   card, driver, CPU, memory and Windows version, the sim's version (MS Store
-   or Steam, and its version number, such as 1.9.24.0), its own graphics
-   settings (from its `UserCfg.opt`: anti-aliasing and upscaling, frame
-   generation, render scaling, cloud quality, ray-traced shadows), how ReShade
-   is loaded and which other add-ons and effects run, the mod's settings that
-   differ from the defaults, the METAR and your altitude. Add how the mod runs
-   for you and, if you like, your username on GitHub or flightsim.to (if I
-   asked you for a report, that's how I find yours), and tap **Send**.
-   Nothing is sent before.
-
-The report goes to a Google Sheet I keep for these reports, through a small
-Google Apps Script ([tools/perf_report_sheet.gs](tools/perf_report_sheet.gs)).
-Google gets your IP address with it, as any website does, but the script
-can't see it and the sheet doesn't keep it. Apart from the username you type,
-the report has no names or file paths.
+- A **value bar** shows a setting's value: drag or tap along it, or step it
+  with − and + (hold them down to keep going).
+- **ⓘ** beside a setting's name opens its description below the row: what
+  happens in reality, and what the setting does.
+- **↺** beside it puts the default back. It shows only while the setting
+  differs from its default.
+- A greyed setting says why it has no effect now: its main switch is off, for
+  example, or the METARs set it. While the haze comes from the METARs, the
+  **Manual Haze** settings show the METAR's values, and **Haze strength**
+  scales the haze (100 % is as reported).
+- **Thunderstorms** carries a lab mark: it's a highly experimental feature.
+- **Reset this page**, at the bottom, puts the page's settings back to the
+  defaults. On the Tools page, **Reset all settings** does it for every
+  setting, and **Reload tunables.ini** reads the file again after you've
+  edited it, as Ctrl+Shift+F10 does.
 
 Every setting, including the ones the app doesn't show, is in `tunables.ini`,
 where each one is explained; edits there take effect with Ctrl+Shift+F10. The
@@ -890,6 +862,149 @@ ones you're most likely to touch:
 | `C24`–`C27` | thickness of stratocumulus, stratus, altocumulus and altostratus (share of `C16`) |
 | `C28` | smooth, flat cloud bases (0 = the sim's puffs) |
 | `C32` | thunderstorms (experimental): 0 = off, 1 = on |
+
+### Presets
+
+A preset is all your settings under a name: every value in `tunables.ini`,
+also the ones the app doesn't show. On the **Presets** page:
+- **Save Your Settings**: type a name and tap **Save**. A name that's taken
+  asks for a second tap before it replaces that preset.
+- **Your Presets** lists them, with **Load**, **Share**
+  ([Community Presets](#community-presets)) and **Delete** (two taps).
+  Loading while your settings aren't saved also takes a second tap, as your
+  changes would be lost.
+- **Default** is the mod's own settings, renewed at every install. It can be
+  loaded but not replaced or deleted.
+- **Import from a file** opens a Windows file window in front of the sim
+  (Downloads at first): pick a preset someone shared, and it's added to the
+  list under its file's name, never over one of yours. In VR, the window is on
+  your desktop monitor.
+- A preset without some settings (one saved with an older version of the mod)
+  says so. Loading it asks whether to fill them in with the mod's defaults or
+  with your current values; they're added to the preset, so it asks only once.
+- Presets are in `%LOCALAPPDATA%\AtmosphereMod\presets`, one `.ini` file each,
+  in the same format as `tunables.ini`. Installing again keeps your own presets
+  and `tunables.ini`, and adds a new version's new settings to them.
+
+### Community Presets
+
+Presets other pilots share, at the end of the Presets page (Home's
+**Community Presets** button takes you there).
+
+- **Browse** them ten at a time. The icons in the heading search names,
+  authors and descriptions, sort the list (**Newest**, **Most added**, **A–Z**)
+  and choose versions. **Compatible versions** comes first: presets made with
+  a version that has the same settings as yours. Presets from other versions
+  are marked. One that lacks some of your settings gets the mod's defaults for
+  them when you add it, and settings your version doesn't know are left out.
+- Each preset shows its author, the version it was made with, how often it was
+  added, and **What it changes in your settings** (folded).
+- **Add to my presets** puts it into Your Presets (with a number if the name
+  is taken); load it from there.
+- **Share** one of yours from Your Presets: give it a name, your name or a
+  username as the author (required), and a short description if you like. It's
+  public at once. Up to five shares a day. A preset saved before some settings
+  existed has to be loaded once first, so it has them all.
+- **Update or unshare** it later, from the PC you shared it from. Your Presets
+  marks it **SHARED**, and the list marks it **YOURS**, with **Update** and
+  **Unshare**. Sharing that preset again offers to update the shared one
+  instead; it keeps its place in the list and how often it was added. Another
+  PC can't change it ([Privacy](#privacy)).
+- I remove presets that don't belong there.
+
+### Hotkeys
+
+The mod's keys in the sim, unless you change them on the app's **Keys** page:
+
+| Key | Action |
+|---|---|
+| Ctrl+Shift+F9 | switch between the mod and stock |
+| Ctrl+Shift+F10 | reload the settings (`tunables.ini`) and shaders, without restarting |
+| Ctrl+Shift+F11 | write a diagnostic capture (useful for bug reports) |
+| Ctrl+Shift+F12 | log the GPU time of each draw (for performance questions) |
+| none | switch the fog inside clouds off for now, and on again |
+
+On the app's **Keys** page, tap **Change** next to an action, then press the
+new keys in the sim within 15 seconds: F1 to F12 with any of Ctrl, Shift and
+Alt, or a letter or digit with Ctrl or Alt. **Clear** leaves the action
+without a key, and **Default** puts back the one above. The keys are kept in
+`%LOCALAPPDATA%\AtmosphereMod\hotkeys.ini`, which installing again keeps; they
+aren't part of presets.
+
+The in-cloud fog key is for when the fog shows just below a cloud: it switches
+[Fly-through clouds](#cloud-forming-very-experimental) off without changing
+your setting. The fog is on again with the same key, with **Switch it on** at
+the top of the app, or at the next start.
+
+If another ReShade add-on uses the same keys, pressing them does both. Glass
+Cockpit DLSS Fix (one of OptiShade's components) uses Ctrl+Shift+F9 and
+Ctrl+Shift+F11 by default, for its overlay and a green tint on the screens.
+While it's loaded, the Keys page tells you where its keys are the mod's.
+Give one of the two other keys: on this page, or in that add-on's own tab in
+the ReShade overlay.
+
+### Performance report
+
+The **Performance Report** tile on the Tools page measures what the mod costs
+on your PC and, if you want, sends me the result, so I can see which systems
+it runs well on and which it doesn't:
+1. Find a view with clouds (most of the mod's cost is in them) and hold it
+   still: pause the sim or slew. Keep other windows off the sim meanwhile.
+2. Tap **Open** on the tile, then **Start**. For about 36 seconds the mod
+   switches itself on, off and on again while the add-on times the frames:
+   the frame rate, and how long the GPU works on each frame. **Stop**, the
+   mod's on/off key (Ctrl+Shift+F9) or the app's own switch stops it;
+   afterwards the mod is as it was.
+3. The app shows the result: the frame rate and the GPU's time per frame, with
+   and without the mod. Where the frame rate is capped (V-Sync, a 60 Hz
+   screen, a frame limit, frame generation), it comes out the same both ways,
+   and the GPU time shows the cost. It also counts how many of the mod's
+   shaders ran: if none did, the mod isn't working on your PC, and the app
+   says so. Then it shows everything that would be sent: the graphics
+   card, driver, CPU, memory and Windows version, the sim's version (MS Store
+   or Steam, and its version number, such as 1.9.24.0), its own graphics
+   settings (from its `UserCfg.opt`: anti-aliasing and upscaling, frame
+   generation, render scaling, cloud quality, ray-traced shadows), how ReShade
+   is loaded and which other add-ons and effects run, the mod's settings that
+   differ from the defaults, the METAR and your altitude. Add how the mod runs
+   for you and, if you like, your username on GitHub or flightsim.to (if I
+   asked you for a report, that's how I find yours), and tap **Send**.
+   Nothing is sent before.
+
+What's sent, and where: [Privacy](#privacy).
+
+## Privacy
+
+The mod works on your PC. It goes online only for these, and this is what goes
+where:
+
+- **Update check.** At most once a day, the EFB app asks GitHub's API for the
+  version of the mod's latest release. Nothing else is sent.
+- **Community Presets.** The list comes from the mod's own small server, a
+  Cloudflare Worker (`atmospheremod-presets.tomwhoca.workers.dev`). Browsing
+  sends nothing but the requests. Sharing or updating a preset sends what's
+  published: its name, the author and description you type, its settings
+  (haze, sky and clouds) and the mod's version. Adding a preset counts that it
+  was added, nothing more.
+  - Cloudflare sees your IP address, as any website's host does. The server
+    doesn't store it or log requests. For the limit on shares a day, it keeps
+    a keyed hash of your address and the day, which can't be turned back into
+    the address or matched across days.
+  - Sharing gives your PC a key to update or unshare that preset later. The
+    app keeps it with its own data in the sim; the server keeps only a hash of
+    it. On another PC, or if the sim's stored data is lost, the key is gone,
+    and that preset can't be changed from the app any more.
+- **Performance report.** Only when you tap **Send**. The report goes to a
+  Google Sheet I keep for these reports, through a small Google Apps Script
+  ([tools/perf_report_sheet.gs](tools/perf_report_sheet.gs)). Google gets your
+  IP address with it, as any website does, but the script can't see it and the
+  sheet doesn't keep it. Apart from the username you type, the report has no
+  names or file paths.
+- **Links.** **Report a Bug**, **Troubleshooting**, the release link and the
+  donation buttons open your PC's browser; the app itself sends nothing.
+
+The logs in `%LOCALAPPDATA%\AtmosphereMod\logs` stay on your PC unless you
+attach them to a report yourself.
 
 ## Uninstalling
 
@@ -988,8 +1103,10 @@ with the mod's versions filled in. Or open one on the
 - After a sim update, parts of the mod fall back to stock until it is
   re-patched.
 - DirectX 12 only. The performance cost hasn't been measured on many other
-  systems yet: the EFB app's [performance report](#settings) measures it on
+  systems yet: the EFB app's [performance report](#performance-report) measures it on
   yours.
+- A shared Community Preset can be updated or unshared only from the PC it
+  was shared from.
 - Inside a dense cloud, the aircraft's outline (a wing's edge against the
   fogged background) can flicker by a pixel or two: MSFS draws its clouds at
   a reduced resolution and rebuilds the full picture over several frames,
@@ -999,8 +1116,9 @@ with the mod's versions filled in. Or open one on the
 ## Support the mod
 
 AtmosphereMod is free. If you like it and would like to support its
-development, you can [buy me a coffee](https://buymeacoffee.com/tomwhoca).
-Thank you!
+development, you can [buy me a coffee](https://buymeacoffee.com/tomwhoca) or
+[donate with PayPal](https://www.paypal.com/donate/?hosted_button_id=CHZN2J8XPLNJU).
+The app's **About This Mod** has the same two buttons. Thank you!
 
 ## Disclaimer
 

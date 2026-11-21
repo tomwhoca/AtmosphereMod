@@ -207,22 +207,25 @@ export const UI_CSS = units(`
 .atmo-ui .tile .tline .v { flex: 1 1 auto; min-width: 0; }
 .atmo-ui .tile .tline .lay { font-family: var(--f-med); }
 .atmo-ui .tile .tline .how { margin-top: 2u; font-size: 12u; opacity: 0.85; }
+/* (the flight category's scale: white ticks, lit up to where the weather is; the labels in plain white, the
+   METAR's own category alone in a pill of the charts' colour: LIFR magenta, IFR red, MVFR blue, VFR green) */
 .atmo-ui .tile .fc { margin-top: 14u; }
-.atmo-ui .tile .fc-title { display: flex; font-family: var(--f-med); font-size: 11u; opacity: 0.85; margin-bottom: 6u; }
-.atmo-ui .tile .fc-title .right { margin-left: auto; padding-left: 8u; }
-.atmo-ui .tile .segs { display: flex; margin: 0 -3u; }
-.atmo-ui .tile .seg { flex: 1 1 0; min-width: 0; margin: 0 3u; --k: var(--aurora); }
-.atmo-ui .tile .seg.lifr { --k: var(--glow); }
-.atmo-ui .tile .seg.ifr { --k: var(--storm); }
-.atmo-ui .tile .seg.mvfr { --k: var(--sky); }
-.atmo-ui .tile .segticks { height: 18u; opacity: 0.32;
+.atmo-ui .tile .fc-title { font-family: var(--f-med); font-size: 11u; opacity: 0.85; margin-bottom: 6u; }
+.atmo-ui .tile .segs { display: flex; }
+.atmo-ui .tile .seg { flex: 1 1 0; min-width: 0; --k: 22, 163, 74; }
+.atmo-ui .tile .seg.lifr { --k: 192, 38, 211; }
+.atmo-ui .tile .seg.ifr { --k: 220, 38, 38; }
+.atmo-ui .tile .seg.mvfr { --k: 37, 99, 235; }
+.atmo-ui .tile .fcbar { position: relative; height: 18u; }
+.atmo-ui .tile .fcbar .base, .atmo-ui .tile .fcbar .lit { position: absolute; left: 0; top: 0; bottom: 0;
   background-image: linear-gradient(90deg, #ffffff 0u, #ffffff 2u, rgba(255, 255, 255, 0) 2u);
   background-size: 7u 100%; background-repeat: repeat-x; }
-.atmo-ui .tile .seg.on .segticks { opacity: 1; }
-.atmo-ui .tile .seglabel { margin-top: 5u; text-align: center; font-family: var(--f-med); font-size: 11u; opacity: 0.75; }
-.atmo-ui .tile .seglabel span { display: inline-block; padding: 1u 8u; border-radius: 9u; }
-.atmo-ui .tile .seg.on .seglabel { opacity: 1; }
-.atmo-ui .tile .seg.on .seglabel span { color: rgb(var(--k)); background: #ffffff; }
+.atmo-ui .tile .fcbar .base { right: 0; opacity: 0.3; }
+.atmo-ui .tile .fcbar .lit { width: 0; }
+.atmo-ui .tile .seglabel { margin-top: 6u; text-align: center; font-family: var(--f-med); font-size: 11u; }
+.atmo-ui .tile .seglabel span { display: inline-block; padding: 1u 8u; border-radius: 9u; opacity: 0.85; }
+.atmo-ui .tile .seg.on .seglabel span { opacity: 1; }
+.atmo-ui .tile .seg.on .seglabel span { color: #ffffff; background: rgb(var(--k)); }
 .atmo-ui .tile .traw { margin-top: 12u; font-size: 11u; line-height: 1.35; opacity: 0.72; word-wrap: break-word; }
 .atmo-ui .tile .tlink { margin-top: 8u; font-family: var(--f-med); font-size: 13u; text-decoration: underline;
   cursor: pointer; display: inline-flex; align-items: center; }

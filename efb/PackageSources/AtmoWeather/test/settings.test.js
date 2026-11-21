@@ -700,6 +700,20 @@ check(spec("T16").metarOnly && !spec("T3").metarOnly && spec("T16").toDisplay(1)
           && cat("KJFK 201251Z 31008KT 1/2SM FG OVC002 10/09 A3001") === "LIFR"
           && cat("EDDF 201250Z 25010KT 10/05 Q1015") === undefined,
           "metar: the limits (3,100 ft VFR, 3,000 ft MVFR, 9 km VFR, 8 km (4.97 mi) MVFR, 6 km MVFR, 900 ft IFR, 1,500 m (0.93 mi) LIFR, a half mile LIFR, nothing: none)");
+    // where on the scale: LIFR at zero visibility 0, VFR at CAVOK 100, a quarter each, the worse of ceiling and
+    // visibility within its category's quarter
+    const { categoryPosition } = app.metar;
+    const pos = (m) => Math.round(categoryPosition(decode(m)) * 10) / 10;
+    check(pos("LIRF 090920Z 00000KT CAVOK M02/M05 Q1025") === 100
+          && pos("EGLL 201320Z VRB02KT 0000 FG VV000 05/05 Q1012") === 0
+          && pos("KJFK 201251Z 31008KT 1/2SM FG OVC002 10/09 A3001") === 10
+          && pos("EDDF 201250Z 25010KT 9999 BKN020 10/05 Q1015") === 62.5
+          && pos("EDDF 201250Z 25010KT 9999 BKN040 10/05 Q1015") === 87.5
+          && pos("EDDF 201250Z 25010KT 9999 BKN030 10/05 Q1015") === 74.9
+          && pos("EDDF 201250Z 25010KT 2000 BR FEW040 10/05 Q1015") === 28
+          && categoryPosition(decode("EDDF 201250Z 25010KT 10/05 Q1015")) === undefined,
+          "metar: the scale's position (CAVOK 100, fog 0, a half mile under 200 ft 10, 2,000 ft 62.5, 4,000 ft 87.5, "
+          + "3,000 ft still MVFR, 2 km 28, nothing: none)");
     const r1 = hazeReading("EDDK (+3): continental haze, visibility ~25 km, humidity 87%");
     const r2 = hazeReading("LIRF: smoke (FU), visibility ~6 km, humidity 40%");
     check(r1.kind === "continental haze" && r1.visibility === "~25 km" && r1.humidity === "87%" && r1.stations === 4

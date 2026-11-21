@@ -6,7 +6,7 @@ import { button, card, section, settingRow, switchEl, tileLabel, twoTaps } from 
 import { h, Scope, Value } from "./dom";
 import { icon } from "./icons";
 import { aboutTile } from "./about";
-import { CATEGORIES, decode, Decoded, flightCategory, hazeReading, layersText } from "./metar";
+import { CATEGORIES, categoryPosition, decode, Decoded, flightCategory, hazeReading, layersText } from "./metar";
 import { PRESET_DEFAULT, sameName, Store } from "./model";
 import { newer, RELEASE_PAGE, TROUBLESHOOTING } from "./update";
 
@@ -41,11 +41,14 @@ export function overviewPage(scope: Scope, store: Store, go: Go, latest: Value<s
   const clouds = h("div", { class: "tline" }, h("span", { class: "k", text: "Clouds" }),
                    h("div", { class: "v" }, cloudsV, cloudsHow));
   const wxStats = h("div", { class: "stats" });
-  const segs = CATEGORIES.map((c) => h("div", { class: `seg ${c.toLowerCase()}` }, h("div", { class: "segticks" }),
-                                       h("div", { class: "seglabel" }, h("span", { text: c }))));
-  const conditions = h("span", { class: "right" });
+  // (the flight category's scale: one bar of ticks, lit up to where the weather is, LIFR at zero visibility to
+  // VFR at CAVOK; under it the four categories, a quarter each)
+  const lit = h("div", { class: "lit" });
+  const segs = CATEGORIES.map((c) => h("div", { class: `seg ${c.toLowerCase()}` },
+    h("div", { class: "seglabel" }, h("span", { text: c }))));
   const scale = h("div", { class: "fc" },
-    h("div", { class: "fc-title" }, h("span", { text: "Flight category, from the METAR" }), conditions),
+    h("div", { class: "fc-title", text: "Flight category, from the METAR" }),
+    h("div", { class: "fcbar" }, h("div", { class: "base" }), lit),
     h("div", { class: "segs" }, ...segs));
   const raw = h("div", { class: "traw" });
   const wxTile = h("div", { class: "tile sky wide" },
@@ -74,10 +77,11 @@ export function overviewPage(scope: Scope, store: Store, go: Go, latest: Value<s
       stat("Weather", d.weather.join(", "));
     }
     const cat = d ? flightCategory(d) : undefined;
+    const at = d ? categoryPosition(d) : undefined;
     segs.forEach((el, i) => {
       el.className = `seg ${CATEGORIES[i].toLowerCase()}${CATEGORIES[i] === cat ? " on" : ""}`;
     });
-    conditions.textContent = cat === "VFR" || cat === "MVFR" ? "VMC" : cat ? "IMC" : "";
+    lit.style.width = `${(at === undefined ? 0 : at).toFixed(1)}%`;
     scale.style.display = cat ? "" : "none";
     raw.textContent = m || "";
     raw.style.display = m ? "" : "none";
@@ -280,13 +284,22 @@ function depiction(store: Store, d: Decoded | undefined): { big: string; sub: st
   if (!r || !r.visibility) {
     return { big: reported, sub: "Reported visibility; the haze follows the METAR once the add-on has one.", clouds };
   }
+  // (the haze's own visibility is the haze alone: below a reported value (mist, fog: the sim's own, which the mod
+  // leaves) it isn't what one sees, and would contradict the METAR. So the reported visibility, unless the report
+  // is open-ended ("10 km or more") or missing, and the haze's reaches beyond it)
   const from = r.stations > 1 ? `from ${r.stations} stations' METARs` : "from the METAR";
-  return {
-    big: r.visibility,
-    sub: `Visibility in ${r.kind}${r.humidity ? `, humidity ${r.humidity}` : ""}, ${from}`
-      + `${d && d.visibility ? ` (reported: ${d.visibility})` : ""}`,
-    clouds,
-  };
+  const haze = `${r.kind}${r.humidity ? `, humidity ${r.humidity}` : ""}, ${from}`;
+  const hazeKm = parseFloat(r.visibility.replace(/[^0-9.]/g, ""));
+  const given = !!d && !!d.visibility;
+  const open = !given || /or more/.test(d!.visibility || "");
+  if (open && (!given || hazeKm >= 10)) {
+    return {
+      big: r.visibility,
+      sub: `Visibility in ${haze}${given ? ` (reported: ${d!.visibility})` : ""}`,
+      clouds,
+    };
+  }
+  return { big: reported, sub: `Reported visibility \u00b7 ${haze}`, clouds };
 }
 
 /** A setting's definition by key. */
