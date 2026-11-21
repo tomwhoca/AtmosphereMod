@@ -50,6 +50,11 @@ export const ICONS: Record<string, string> = {
     + '<path d="M17.5 14v4.5a1.5 1.5 0 0 1-1.5 1.5H6a1.5 1.5 0 0 1-1.5-1.5V8.5A1.5 1.5 0 0 1 6 7h4.5"/>'),
 };
 
+/** The EFB app's own dock icon (src/Assets/app-icon.svg): a sun behind a haze layer. The mod has no logo; this
+ * is its mark in the app's navigation too (the user's choice, 2026-11-21). */
+ICONS.brand = '<svg viewBox="0 0 26 27" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">'
+  + '<circle cx="13" cy="10" r="5"/><path d="M3 17h20M5 21h16M8 25h10"/></svg>';
+
 /** An icon as an element. */
 export function icon(name: string): HTMLElement {
   const span = document.createElement("span");

@@ -92,7 +92,10 @@ export const UI_CSS = units(`
 .atmo-ui ::-webkit-scrollbar-thumb { background: var(--b4); border-radius: 2u; }
 
 /* the frame: the sim's status bar over the top strip; the bottom strip, where the dock button sits, stays empty as
-   in the sim's own apps */
+   in the sim's own apps, in the EFB's own dock colour across the whole width (the user's wish, 2026-11-21: read
+   from the EFB by app.ts; here as measured in the sim, rgb(21, 28, 38)) */
+.atmo-ui { --efb-dock: #151c26; }
+.atmo-ui::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 47u; background: var(--efb-dock); }
 .atmo-ui .nav, .atmo-ui .main { position: absolute; }
 .atmo-ui.v .nav { top: 33u; left: 0; right: 0; height: 96u; }
 /* (the bottom strip: 47u, the dock button's 46u rounded up to whole pixels at every size: 55 px for 54.9) */
@@ -102,9 +105,10 @@ export const UI_CSS = units(`
 
 /* the brand and the mod's switch */
 .atmo-ui .brand { display: flex; align-items: center; height: 44u; padding: 0 16u; }
-.atmo-ui .brand .mark { width: 20u; height: 20u; margin-right: 10u; flex: 0 0 auto; border-radius: 10u;
-  background: rgb(var(--sky));
-  background-image: linear-gradient(135deg, rgb(var(--sun)) 0%, rgb(var(--glow)) 45%, rgb(var(--dusk)) 75%, rgb(var(--sky)) 100%); }
+/* (the mark: the EFB app's dock icon, a sun behind haze lines, white in a cerulean tile; the mod has no logo) */
+.atmo-ui .brand .mark { display: flex; align-items: center; justify-content: center; width: 26u; height: 26u;
+  margin-right: 10u; flex: 0 0 auto; border-radius: 8u; color: #ffffff; background: rgb(var(--sky)); }
+.atmo-ui .brand .mark svg { width: 16u; height: 17u; }
 .atmo-ui .brand .name { flex: 1 1 auto; font-family: var(--f-med); font-size: 16u; min-width: 0; }
 .atmo-ui .modrow { display: flex; align-items: center; }
 .atmo-ui .modrow .modlabel { flex: 1 1 auto; color: var(--muted); font-size: 13u; }

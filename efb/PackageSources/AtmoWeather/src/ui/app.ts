@@ -200,7 +200,8 @@ export function mount(root: HTMLElement, host: Host): () => void {
   scope.add(store.state.watch((s) => enabled.set(!!s && !!s.enabled)));
   const stateText = h("span", { class: "state" });
   scope.add(store.state.watch((s) => { stateText.textContent = !s ? "waiting" : s.enabled ? "On" : "Off"; }));
-  const brand = h("div", { class: "brand" }, h("div", { class: "mark" }), h("div", { class: "name", text: "AtmosphereMod" }));
+  const brand = h("div", { class: "brand" }, h("div", { class: "mark" }, icon("brand")),
+                  h("div", { class: "name", text: "AtmosphereMod" }));
   const modRow = h("div", { class: "modrow" }, h("span", { class: "modlabel", text: "Mod" }), stateText,
                    switchEl(scope, enabled, () => store.setEnabled(!enabled.get())));
   scope.add(store.state.watch((s) => {
@@ -306,10 +307,20 @@ export function mount(root: HTMLElement, host: Host): () => void {
   };
   scope.add(variant.watch(classes));
   scope.add(page.watch(classes));
+  // (the bottom strip takes the EFB's own dock colour, read from the EFB's page; theme.ts has it as measured, for
+  // the harness and should the EFB not have its dock where it was)
+  const dockColour = () => {
+    const dock = document.querySelector(".efb .dock") as HTMLElement | null;
+    const c = dock ? getComputedStyle(dock).backgroundColor : "";
+    if (c && c !== "transparent" && !/^rgba\(.*,\s*0\)$/.test(c)) {
+      ui.style.setProperty("--efb-dock", c);
+    }
+  };
   scope.add(store.panel.watch((p) => {
     const u = p.width > 0 ? Math.min(p.width, p.height) / BASE_PX : 1;
     ui.style.setProperty("--u", u.toFixed(4));
     classes();
+    dockColour();
     // (tab labels: short under the icons when vertical, the full title beside them when horizontal)
     for (let i = 0; i < PAGES.length; i++) {
       (tabs.children[i].lastChild as HTMLElement).textContent = p.vertical ? PAGES[i].short : PAGES[i].title;
