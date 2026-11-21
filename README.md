@@ -248,32 +248,32 @@ above, except solid clouds 0.5 and a 60 km anchoring radius.
 
 ### On the EFB tablet
 
-The AtmosphereMod app's pages ([The EFB app](#the-efb-app)).
+The AtmosphereMod app's pages, in its dark look ([The EFB app](#the-efb-app)).
 
 <table>
   <tr>
     <td width="50%"><a href="Screenshots/efb-home.png"><img src="Screenshots/efb-home.png" alt="EFB app: Home"></a></td>
-    <td width="50%"><a href="Screenshots/efb-home-dark.png"><img src="Screenshots/efb-home-dark.png" alt="EFB app: Home at night"></a></td>
+    <td width="50%"><a href="Screenshots/efb-sky-haze.png"><img src="Screenshots/efb-sky-haze.png" alt="EFB app: Sky &amp; Haze"></a></td>
   </tr>
   <tr>
     <td><b>Home</b>: the weather as the mod draws it, with the METAR's flight category, the add-on and the METAR link, and your presets.</td>
-    <td><b>Home at night</b>: the app turns dark at dawn, dusk and night by itself.</td>
-  </tr>
-  <tr>
-    <td><a href="Screenshots/efb-sky-haze.png"><img src="Screenshots/efb-sky-haze.png" alt="EFB app: Sky &amp; Haze"></a></td>
-    <td><a href="Screenshots/efb-clouds-page.png"><img src="Screenshots/efb-clouds-page.png" alt="EFB app: Clouds"></a></td>
-  </tr>
-  <tr>
     <td><b>Sky &amp; Haze</b>: Mod Atmosphere, the haze from the METARs, the manual haze and the sky colours, with a setting's description open.</td>
-    <td><b>Clouds</b>: Mod Clouds, the clouds' light, their shape and the weather they follow.</td>
   </tr>
   <tr>
+    <td><a href="Screenshots/efb-clouds-page.png"><img src="Screenshots/efb-clouds-page.png" alt="EFB app: Clouds"></a></td>
     <td><a href="Screenshots/efb-presets-page.png"><img src="Screenshots/efb-presets-page.png" alt="EFB app: Presets"></a></td>
-    <td><a href="Screenshots/efb-tools.png"><img src="Screenshots/efb-tools.png" alt="EFB app: Tools"></a></td>
   </tr>
   <tr>
+    <td><b>Clouds</b>: Mod Clouds, the clouds' light, their shape and the weather they follow.</td>
     <td><b>Presets</b>: save, load, share and import presets, and Community Presets.</td>
+  </tr>
+  <tr>
+    <td><a href="Screenshots/efb-tools.png"><img src="Screenshots/efb-tools.png" alt="EFB app: Tools"></a></td>
+    <td></td>
+  </tr>
+  <tr>
     <td><b>Tools</b>: the performance report, what's new, a bug report and the app's look.</td>
+    <td></td>
   </tr>
 </table>
 

@@ -18,14 +18,14 @@ const HARNESS = `http://127.0.0.1:8078/?app=${VERSION}&addon=${VERSION}`;
 const OUT = new URL("../Screenshots/", import.meta.url);
 const PORT = 9333;
 /** Each shot: its file, the tab (Home 0, Sky & Haze 1, Clouds 2, Presets 3, Keys 4, Tools 5), the sim's time of day
- * (1 day: light; 3 night: dark), and a setting whose description is open. */
+ * (1 day: light; 3 night: dark), a setting whose description is open, and how many Community Presets show (the
+ * rest of the page hidden: the pager below still tells how many there are). The README shows the dark theme only. */
 const SHOTS = [
-  { file: "efb-home.png", tab: 0, daytime: "1" },
-  { file: "efb-home-dark.png", tab: 0, daytime: "3" },
-  { file: "efb-sky-haze.png", tab: 1, daytime: "1", open: "Haze strength" },
-  { file: "efb-clouds-page.png", tab: 2, daytime: "1" },
-  { file: "efb-presets-page.png", tab: 3, daytime: "1" },
-  { file: "efb-tools.png", tab: 5, daytime: "1" },
+  { file: "efb-home.png", tab: 0, daytime: "3" },
+  { file: "efb-sky-haze.png", tab: 1, daytime: "3", open: "Haze strength" },
+  { file: "efb-clouds-page.png", tab: 2, daytime: "3" },
+  { file: "efb-presets-page.png", tab: 3, daytime: "3", shared: 2 },
+  { file: "efb-tools.png", tab: 5, daytime: "3" },
 ];
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -100,6 +100,13 @@ try {
         const row = [...document.querySelectorAll(".card .row")]
           .find((r) => r.querySelector(".label").textContent.trim().indexOf(open) === 0);
         row.querySelector(".icon-btn.info").click();
+        await wait(300);
+      }
+      const shared = ${shot.shared || 0};
+      if (shared) {
+        const all = [...document.querySelectorAll(".tablet .shared-list > .shared")];
+        if (all.length <= shared) { throw new Error("only " + all.length + " Community Presets to show"); }
+        all.slice(shared).forEach((e) => { e.style.display = "none"; });
         await wait(300);
       }
       // the screen as tall as the page: nothing scrolls, the dock button at its foot
