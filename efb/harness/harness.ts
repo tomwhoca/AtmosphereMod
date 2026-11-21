@@ -3,6 +3,10 @@
 // tools/efb_harness.py serves it with live reload: on every save the UI module is evaluated again and mounted
 // anew, the harness keeping its state (the tablet, the fake add-on's settings).
 
+import { OWN_KEYS, queryPresets } from "../PackageSources/AtmoWeather/src/community";
+import { DEFAULTS } from "../PackageSources/AtmoWeather/src/defaults";
+import type { Answer, CommunityApi, ListPage, SharedPreset, VersionCount }
+  from "../PackageSources/AtmoWeather/src/community";
 import type { Transport } from "../PackageSources/AtmoWeather/src/report";
 import type { AddonState, Host, Panel } from "../PackageSources/AtmoWeather/src/ui/host";
 
@@ -150,6 +154,31 @@ class FakeAddon {
     if (typeof data.cloudFogOff === "boolean") {
       s.cloudFogOff = data.cloudFogOff;
     }
+    // Community Presets: a preset's look (its T and C values: here the settings now), and a shared one added
+    if (s.presetExport === undefined) {
+      s.presetExport = null;
+    }
+    if (typeof data.exportPreset === "string") {
+      // (as the add-on: the preset file's look, its known T and C settings; here the current values, or the default
+      // where the state has none, e.g. C37)
+      const values: Record<string, number> = {};
+      OWN_KEYS.forEach((k) => {
+        const v = (k[0] === "T" ? s.T : s.C) || [];
+        const x = v[parseInt(k.slice(1), 10)];
+        values[k] = typeof x === "number" ? x : DEFAULTS[k];
+      });
+      const n = (s.presetExport ? s.presetExport.n : 0) + 1;
+      s.presetExport = { n, name: data.exportPreset, values };
+    }
+    if (data.addPreset && typeof data.addPreset === "object") {
+      const wanted = String((data.addPreset as { name?: unknown }).name || "Shared");
+      let name = wanted;
+      for (let n = 2; (s.presets || []).some((p) => p.toLowerCase() === name.toLowerCase()); n++) {
+        name = `${wanted} (${n})`;
+      }
+      s.presets = [...(s.presets || []), name];
+      s.presetNote = `Added \u201c${name}\u201d from Community Presets`;
+    }
     if (typeof data.deletePreset === "string") {
       s.presets = (s.presets || []).filter((p) => p !== data.deletePreset);
       s.presetNote = `deleted "${data.deletePreset}"`;
@@ -206,6 +235,8 @@ class HarnessHost implements Host {
   public readonly version = "dev (harness)";
   /** The performance report's way out: nothing reaches the sheet from here; the harness answers as its script would
    * when the post can't be read (as in the sim): the post's answer unreadable, the confirmation ok. */
+  /** Community Presets: a library in memory (two samples), so nothing reaches the server from here. */
+  public readonly communityApi: CommunityApi = harnessCommunity();
   public readonly reportTransport: Transport = {
     post: (url, body) => {
       log(`report not sent (the harness): ${body.length} chars`);
@@ -284,6 +315,82 @@ class HarnessHost implements Host {
   public save(key: string, value: string): void {
     store(`data-${key}`, value);
   }
+}
+
+// ---------------------------------------------------------------- Community Presets, in memory
+
+function harnessCommunity(): CommunityApi {
+  const day = 86400000;
+  // (a share has every setting of the version it was made with: this one's, as if 0.7.3 lacked three, and a
+  // made-up 0.9.0 with one this version doesn't know)
+  const OLDER = ["C33", "C34", "C36"];
+  const full = (version: string, own: Record<string, number>): Record<string, number> => {
+    const values: Record<string, number> = {};
+    OWN_KEYS.forEach((k) => {
+      if (version !== "0.7.3" || OLDER.indexOf(k) < 0) {
+        values[k] = DEFAULTS[k];
+      }
+    });
+    if (version === "0.9.0") {
+      values.C40 = 1;
+    }
+    return { ...values, ...own };
+  };
+  const presets: SharedPreset[] = [
+    { id: "sample00001", name: "Hazy summer afternoon", author: "sample_pilot", version: "0.8.0", downloads: 12,
+      description: "Thick lowland haze and solid cumulus for a hot afternoon.",
+      created: Date.now() - day,
+      values: { T0: 1, T13: 0, T3: 10, T1: 2.4, T6: 0.12, T10: 1, C0: 1, C16: 1.5, C17: 0.33, C23: 1, C2: 0.5 } },
+    { id: "sample00002", name: "Crisp winter light", author: "another_pilot", version: "0.7.3", downloads: 3,
+      description: "", created: Date.now() - 3 * day,
+      values: { T0: 1, T3: 2, T4: 0.3, C0: 1, C8: 2, C9: 1.2, C12: 0.8, C16: 0.5 } },
+  ];
+  // (more, so the list has pages)
+  const more = ["Alpine morning", "Coastal fog", "Desert glare", "Monsoon towers", "Northern dusk", "Soft overcast",
+                "Tropical noon", "Autumn evening", "Clear and cold", "Prairie storms", "Harbour haze", "Polar light"];
+  presets.push({ id: "sample00003", name: "Tomorrow's sky", author: "future_pilot", version: "0.9.0", downloads: 0,
+                  description: "Made with a newer version.", created: Date.now() - 2 * day,
+                  values: { T0: 1, T3: 5, C0: 1 } });
+  more.forEach((name, i) => presets.push({
+    id: `sample1${String(i).padStart(4, "0")}`, name, author: i % 3 ? "sample_pilot" : "third_pilot",
+    version: i % 4 ? "0.8.0" : "0.7.3", downloads: (i * 7) % 11,
+    description: i % 2 ? `A sample for the list, number ${i + 3}.` : "",
+    created: Date.now() - (5 + i) * day, values: { T0: 1, T3: 3 + i, C0: 1, C16: 0.8 + i / 10 } }));
+  presets.forEach((p) => { p.values = full(p.version, p.values); });
+  const wait = <T>(v: T) => new Promise<T>((resolve) => setTimeout(() => resolve(v), 400));
+  return {
+    list: (query) => {
+      log(`Community Presets: list ${JSON.stringify(query)}`);
+      return wait<Answer<ListPage>>({ ok: true, value: queryPresets(presets, query) });
+    },
+    versions: () => {
+      const by: Record<string, VersionCount> = {};
+      presets.forEach((p) => {
+        const v = by[p.version] || (by[p.version] = { version: p.version, count: 0, keys: [] });
+        v.count++;
+        Object.keys(p.values).forEach((k) => v.keys.indexOf(k) < 0 && v.keys.push(k));
+      });
+      // (the newest first; these versions sort as text)
+      const value = Object.keys(by).map((k) => by[k]).sort((a, b) => (a.version < b.version ? 1 : -1));
+      return wait<Answer<VersionCount[]>>({ ok: true, value });
+    },
+    share: (p) => {
+      log(`Community Presets: share "${p.name}" by ${p.author} (${Object.keys(p.values).length} values)`);
+      if (!p.author.trim()) {
+        return wait<Answer<string>>({ ok: false, error: "author: needed" });
+      }
+      const id = `h${Date.now().toString(36)}`;
+      presets.unshift({ ...p, id, created: Date.now(), downloads: 0 });
+      return wait<Answer<string>>({ ok: true, value: id });
+    },
+    added: async (id) => {
+      log(`Community Presets: added ${id}`);
+      const p = presets.find((x) => x.id === id);
+      if (p) {
+        p.downloads++;
+      }
+    },
+  };
 }
 
 // ---------------------------------------------------------------- the tablet

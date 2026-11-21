@@ -4,6 +4,7 @@
 // bottom strip, where the sim's dock button sits, left empty as the sim's own apps do. Over it all, a sheet when
 // one is open: What's new (once per release that has news), the performance report.
 
+import { WEB_COMMUNITY } from "../community";
 import { AddonReport, Context, PerfReportModel } from "../report";
 import { closedValue, WHATS_NEW_KEY, whatsNewDue } from "../whatsnew";
 import { button, switchEl, twoTaps } from "./controls";
@@ -14,7 +15,7 @@ import { icon } from "./icons";
 import { PRESET_DEFAULT, sameName, Store } from "./model";
 import { CLOUD_TABS, overviewPage, settingsPage, SKY_TABS } from "./pages";
 import { presetsPage } from "./presetsPage";
-import { reportSheet, Sheet, whatsNewSheet } from "./sheets";
+import { reportSheet, shareSheet, Sheet, whatsNewSheet } from "./sheets";
 import { THEME_CHOICES, UI_CSS } from "./theme";
 import { SheetName, toolsPage } from "./toolsPage";
 import { latestRelease } from "./update";
@@ -181,6 +182,13 @@ export function mount(root: HTMLElement, host: Host): () => void {
       sheetName.set(s);
     }
   };
+  // (Community Presets: the server, or the host's stand-in; the preset a Share button asked to share)
+  const community = host.communityApi || WEB_COMMUNITY;
+  let sharing = "";
+  const openShare = (name: string) => {
+    sharing = name;
+    sheetName.set("share");
+  };
 
   // ---- navigation, with the brand and the mod's switch
   const enabled = new Value(false);
@@ -251,7 +259,7 @@ export function mount(root: HTMLElement, host: Host): () => void {
     scroll.appendChild(def.id === "overview" ? overviewPage(ps, store, go, latest)
       : def.id === "sky" ? settingsPage(ps, store, SKY_TABS())
       : def.id === "clouds" ? settingsPage(ps, store, CLOUD_TABS(), true)
-      : def.id === "presets" ? presetsPage(ps, store, focusName)
+      : def.id === "presets" ? presetsPage(ps, store, focusName, community, openShare)
       : def.id === "keys" ? hotkeysPage(ps, store)
       : toolsPage(ps, store, theme, openSheet));
   };
@@ -277,7 +285,9 @@ export function mount(root: HTMLElement, host: Host): () => void {
       return;
     }
     sheetScope = new Scope();
-    shown = name === "news" ? whatsNewSheet(sheetScope, closeNews) : reportSheet(sheetScope, store, report);
+    shown = name === "news" ? whatsNewSheet(sheetScope, closeNews)
+      : name === "share" ? shareSheet(sheetScope, store, sharing, community, () => sheetName.set(""))
+      : reportSheet(sheetScope, store, report);
     dragToScroll(sheetScope, shown.body);
     ui.appendChild(shown.el);
   }));

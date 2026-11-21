@@ -4,6 +4,7 @@ against wrangler dev with a local D1 database (a fresh one each run).
     python tools/test_presets_server.py
 """
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -64,9 +65,13 @@ out.notNum = bad({ values: { ...good.values, T3: "6" } }).error;
 out.few = bad({ values: { T0: 1, C0: 1 } }).error;
 out.shareable = [r.shareable("C37"), r.shareable("C13"), r.shareable("R1"), r.shareable("T14")];
 out.canon = r.canonical({ C10: 1, C2: 2, T1: 3 });
+out.notShared = JSON.parse(process.argv[2]).filter((k) => !r.shareable(k));
+out.order = ["0.9.1", "0.10.0", "0.8", "0.9.1-beta", "1.0"].sort(r.versionOrder);
 console.log(JSON.stringify(out));
 """
-    res = json.loads(subprocess.run([str(NODE), "-e", script, str(out)], capture_output=True, text=True,
+    app_keys = re.findall(r"^  ([TC]\d+):", (ROOT / "efb" / "PackageSources" / "AtmoWeather" / "src" / "defaults.ts")
+                          .read_text(encoding="utf-8"), re.M)
+    res = json.loads(subprocess.run([str(NODE), "-e", script, str(out), json.dumps(app_keys)], capture_output=True, text=True,
                                     check=True).stdout)
     check(res["good"], "rules: a good preset passes; radar (R) and aircraft (C13-C15) values are left out")
     check(res["noAuthor"] == "author: needed", f"rules: author required ({res['noAuthor']})")
@@ -84,6 +89,9 @@ console.log(JSON.stringify(out));
     check(res["few"] == "values: too few to be a preset", "rules: a preset has values")
     check(res["shareable"] == [True, False, False, True], f"rules: shareable keys ({res['shareable']})")
     check(res["canon"] == "C2=2;C10=1;T1=3", f"rules: canonical order ({res['canon']})")
+    check(len(app_keys) > 40 and res["notShared"] == [],
+          f"rules: every setting the app ships is shareable (else versions differ falsely: {res['notShared']})")
+    check(res["order"] == ["0.8", "0.9.1", "0.9.1-beta", "0.10.0", "1.0"], f"rules: version order ({res['order']})")
 
 
 def call(method: str, path: str, body=None, token: str = "", ip: str = ""):
@@ -136,31 +144,55 @@ def api_tests() -> None:
         check(st == 409 and "Evening haze" in res["error"], "api: the same settings aren't listed twice")
         st, res, _ = call("POST", "/v1/presets", {"name": "Bad", "author": "", "values": values}, ip="1.1.1.2")
         check(st == 400 and res["error"] == "author: needed", "api: the checks apply")
-        codes = [call("POST", "/v1/presets", {"name": f"P{i}", "author": "spam", "values": {**values, "T3": 9 + i}},
+        codes = [call("POST", "/v1/presets", {"name": f"P{i}", "author": "spam", "version": "0.7.3",
+                                              "values": {**values, "T3": 9 + i, **({"C33": 10} if i == 4 else {})}},
                       ip="9.9.9.9")[0] for i in range(6)]
         check(codes == [200] * 5 + [429], f"api: 5 shares a day per client ({codes})")
+        names = lambda q: [x["name"] for x in call("GET", "/v1/presets" + q)[1]["presets"]]  # noqa: E731
+        st, res, _ = call("GET", "/v1/presets?per=2&page=2&sort=name")
+        check(res["total"] == 6 and res["page"] == 2 and res["per"] == 2 and [x["name"] for x in res["presets"]]
+              == ["P1", "P2"], f"api: pages ({res['total']}, {[x['name'] for x in res['presets']]})")
+        check(names("?sort=name") == ["Evening haze", "P0", "P1", "P2", "P3", "P4"], "api: sorted by name")
+        check(names("?sort=new")[0] == "P4" and names("")[-1] == "Evening haze", "api: newest first (the default)")
+        check(names("?per=1&page=99") == [], "api: past the last page: none")
         st, res, _ = call("POST", f"/v1/presets/{pid}/download")
-        check(call("GET", "/v1/presets")[1]["presets"][-1]["downloads"] == 1, "api: a download counted")
-        r1 = call("POST", f"/v1/presets/{pid}/report", {"reason": "rude"}, ip="2.2.2.1")[1]
-        r1b = call("POST", f"/v1/presets/{pid}/report", {}, ip="2.2.2.1")[1]
-        r2 = call("POST", f"/v1/presets/{pid}/report", {}, ip="2.2.2.2")[1]
-        r3 = call("POST", f"/v1/presets/{pid}/report", {}, ip="2.2.2.3")[1]
-        listed = [x["id"] for x in call("GET", "/v1/presets")[1]["presets"]]
-        check(not r1["hidden"] and r1b.get("already") and not r2["hidden"] and r3["hidden"] and pid not in listed,
-              "api: one report per client; hidden at 3 reports")
+        check(names("?sort=added")[0] == "Evening haze" and
+              call("GET", "/v1/presets?sort=added")[1]["presets"][0]["downloads"] == 1, "api: a download counted; most added")
+        check(names("?version=0.8.0") == ["Evening haze"] and len(names("?version=0.7.3")) == 5
+              and len(names("?version=all")) == 6 and len(names("?version=0.8.0,0.7.3")) == 6
+              and names("?version=0.8.0,%20nope") == ["Evening haze"], "api: filtered by the version(s) it was made with")
+        vs = call("GET", "/v1/versions")[1]["versions"]
+        keys = sorted(values)
+        check(vs == [{"version": "0.8.0", "count": 1, "keys": keys},
+                     {"version": "0.7.3", "count": 5, "keys": sorted(keys + ["C33"])}],
+              f"api: the versions, newest first, with the settings their presets have ({vs})")
+        check(names("?q=evening") == ["Evening haze"] and len(names("?q=SPAM")) == 5 and names("?q=Soft") ==
+              ["Evening haze"] and names("?q=%25") == [] and names("?q=_") == [],
+              "api: search in name, author and description, any case; % and _ literal")
+        st, res, hd = call("GET", "/v1/presets?sort=rated")
+        check(st == 200 and [x["name"] for x in res["presets"]] == names("?sort=new") and
+              not any("rating" in x or "ratings" in x for x in res["presets"]) and hd.get("Cache-Control") == "no-store"
+              and call("GET", "/v1/versions")[2].get("Cache-Control") == "no-store",
+              "api: no ratings (an old sort=rated lists the newest); the lists aren't cached")
+        check(call("POST", f"/v1/presets/{pid}/rate", {"stars": 5})[0] == 404 and
+              call("POST", f"/v1/presets/{pid}/report", {})[0] == 404, "api: no ratings or reports any more")
         check(call("GET", "/v1/admin/presets")[0] == 403 and call("GET", "/v1/admin/presets", token="x" * 48)[0] == 403,
               "api: admin needs the token")
-        st, res, _ = call("GET", "/v1/admin/presets?status=hidden", token=token)
-        check(st == 200 and [x["id"] for x in res["presets"]] == [pid] and res["presets"][0]["reasons"] == ["rude"],
-              "api: the admin sees the hidden preset and the reasons")
+        st, res, _ = call("POST", f"/v1/admin/presets/{pid}", {"action": "hide"}, token=token)
+        check(st == 200 and pid not in [x["id"] for x in call("GET", "/v1/presets")[1]["presets"]] and
+              [x["id"] for x in call("GET", "/v1/admin/presets?status=hidden", token=token)[1]["presets"]] == [pid],
+              "api: hidden, and the admin sees it")
         st, res, _ = call("POST", f"/v1/admin/presets/{pid}", {"action": "restore"}, token=token)
         check(st == 200 and pid in [x["id"] for x in call("GET", "/v1/presets")[1]["presets"]], "api: restored")
         st, res, _ = call("POST", f"/v1/admin/presets/{pid}", {"action": "edit", "description": "Soft light."},
                           token=token)
-        check(st == 200 and call("GET", "/v1/presets")[1]["presets"][-1]["description"] == "Soft light.", "api: edited")
+        check(st == 200 and call("GET", "/v1/presets?sort=name")[1]["presets"][0]["description"] == "Soft light.",
+              "api: edited")
         st, res, _ = call("POST", f"/v1/admin/presets/{pid}", {"action": "remove"}, token=token)
         check(st == 200 and pid not in [x["id"] for x in call("GET", "/v1/presets")[1]["presets"]], "api: removed")
-        check(call("POST", f"/v1/presets/{pid}/report", {}, ip="2.2.2.9")[0] == 404, "api: a removed one can't be reported")
+        call("POST", f"/v1/presets/{pid}/download")
+        gone = next(x for x in call("GET", "/v1/admin/presets?status=removed", token=token)[1]["presets"] if x["id"] == pid)
+        check(gone["downloads"] == 1, f"api: a removed one isn't counted as added ({gone['downloads']})")
         check(call("GET", "/v1/nothing")[0] == 404 and call("POST", "/v1/presets", None)[0] == 400, "api: errors")
     finally:
         dev.terminate()

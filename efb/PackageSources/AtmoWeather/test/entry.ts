@@ -8,3 +8,4 @@ export * as hotkeys from "../src/hotkeys";
 export * as model from "../src/ui/model";
 export * as metar from "../src/ui/metar";
 export * as update from "../src/ui/update";
+export * as community from "../src/community";

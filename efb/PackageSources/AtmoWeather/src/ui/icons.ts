@@ -28,6 +28,10 @@ export const ICONS: Record<string, string> = {
     + '<path d="M16 10.5h1.2a2.6 2.6 0 0 1 0 5.2H15.6M8.5 3.5c-.6 1 .6 1.6 0 2.8M12 3.5c-.6 1 .6 1.6 0 2.8"/>'),
   heart: svg('<path d="M12 19.5s-7-4.3-7-9.6A3.9 3.9 0 0 1 12 7.6a3.9 3.9 0 0 1 7 2.3c0 5.3-7 9.6-7 9.6z"/>'),
   close: svg('<path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/>'),
+  search: svg('<circle cx="10.5" cy="10.5" r="6"/><path d="M15 15l5 5"/>'),
+  sort: svg('<path d="M4 7h9M4 12h6.5M4 17h4"/><path d="M17.5 5v14M14.5 16l3 3 3-3"/>'),
+  filter: svg('<path d="M4 5.5h16l-6.2 7.3v5.4l-3.6 1.8v-7.2z"/>'),
+  check: svg('<path d="M5.5 12.5l4 4 9-9"/>'),
   out: svg('<path d="M14 4.5h5.5V10M19.5 4.5L11 13"/>'
     + '<path d="M17.5 14v4.5a1.5 1.5 0 0 1-1.5 1.5H6a1.5 1.5 0 0 1-1.5-1.5V8.5A1.5 1.5 0 0 1 6 7h4.5"/>'),
 };

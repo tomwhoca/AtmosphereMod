@@ -79,6 +79,9 @@ struct Requests
     std::optional<std::string> learn_hotkey;  // an action's name (hotkeys.h): learn its keys; "": stop learning
     std::vector<std::pair<std::string, std::string>> set_hotkeys;  // (action, keys as text; "" for none), in order
     std::optional<bool> cloud_fog_off;  // the in-cloud fog off for now (true) or on again
+    // Community Presets: a preset's look wanted for sharing (its name), and a shared preset to add (name, values)
+    std::optional<std::string> export_preset;
+    std::optional<std::pair<std::string, std::vector<Change>>> add_preset;
 };
 
 // A message from the app (the weather feed's thread). Unreadable parts are
@@ -180,5 +183,22 @@ bool remove(const std::filesystem::path &dir, const std::string &name, std::stri
 constexpr size_t kImportMax = 1 << 20;
 std::string import(const std::filesystem::path &dir, const std::filesystem::path &from,
                    const std::function<bool(char prefix, unsigned index)> &known, std::string &error);
+
+// Community Presets (the EFB app's shared presets): what a shared preset is, the look only. A T or C key `known`
+// accepts, not C13-C15 (the aircraft's, set by the add-on); never R (the weather radar's: the user's own).
+bool shareable(char prefix, unsigned index, const std::function<bool(char prefix, unsigned index)> &known);
+
+// Preset `name`'s look, for sharing: its shareable values, in key order. Empty with `error` if there's no such
+// preset or nothing to share in it.
+std::vector<Change> look(const std::filesystem::path &dir, const std::string &name,
+                         const std::function<bool(char prefix, unsigned index)> &known, std::string &error);
+
+// A shared preset added as a new preset: Default's file (else tunables.ini's) with the shared values written in
+// (only shareable ones), and the radar's R values from tunables.ini (the user's own). Settings it lacks keep
+// Default's values: it's complete, so loading it asks nothing. Named `name` ("Shared" if it can't be one), with
+// " (2)", " (3)" ... while a preset has that name: none is replaced. Returns the name, "" with `error`.
+std::string add_shared(const std::filesystem::path &dir, const std::string &name, const std::vector<Change> &values,
+                       const std::filesystem::path &tunables,
+                       const std::function<bool(char prefix, unsigned index)> &known, std::string &error);
 } // namespace presets
 } // namespace settings

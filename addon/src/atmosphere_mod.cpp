@@ -3767,6 +3767,10 @@ std::map<std::string, std::vector<std::string>> g_presets_missing;
 settings::presets::Current g_preset_current;
 std::string g_presets_stamp;
 std::string g_preset_note;
+// Community Presets: the look of the preset the app asked for, to share (JSON {"n", "name", "values"}; "" for none),
+// and how many were asked for (n: the app knows the answer to its own request).
+std::string g_preset_export;
+unsigned g_preset_exports = 0;
 
 // The EFB app's performance report (perf_report.h). Present thread.
 perf::Measurement g_measurement;
@@ -3925,6 +3929,7 @@ std::string settings_state(bool pending)
            ",\"preset\":\"" + json_text(g_preset_current.name) + "\",\"presetSaved\":" +
            (g_preset_current.saved && !pending ? "true" : "false") + ",\"presetsMissing\":" + missing +
            ",\"presetNote\":\"" + json_text(g_preset_note) + "\"" +
+           ",\"presetExport\":" + (g_preset_export.empty() ? std::string("null") : g_preset_export) +
            (g_report_asked ? ",\"report\":" + perf::state_json(g_measurement, perf::Clock::now(), g_report_system)
                            : std::string()) +
            ",\"hotkeys\":" + hotkeys::json(g_hotkeys, g_developer) + ",\"learning\":\"" +
@@ -3970,6 +3975,36 @@ bool apply_preset_requests(const settings::Requests &requests)
     {
         if (presets::remove(dir, *requests.delete_preset, error))
             done += " deleted \"" + presets::valid_name(*requests.delete_preset) + "\"";
+        else
+            g_preset_note = error;
+    }
+    // Community Presets: a preset's look for the app to share; a shared one added
+    if (requests.export_preset)
+    {
+        const std::vector<settings::Change> look = presets::look(dir, *requests.export_preset, known_tunable, error);
+        std::string values;
+        for (const settings::Change &c : look)
+            values += (values.empty() ? "\"" : ",\"") + std::string(1, c.prefix) + std::to_string(c.index) + "\":" +
+                      settings::format(c.value);
+        g_preset_export = look.empty() ? std::string()
+                                       : "{\"n\":" + std::to_string(++g_preset_exports) + ",\"name\":\"" +
+                                             json_text(presets::valid_name(*requests.export_preset)) +
+                                             "\",\"values\":{" + values + "}}";
+        if (look.empty())
+            g_preset_note = error;
+        else
+            done += " exported \"" + presets::valid_name(*requests.export_preset) + "\" (" +
+                    std::to_string(look.size()) + " settings) to share";
+    }
+    if (requests.add_preset)
+    {
+        const std::string name = presets::add_shared(dir, requests.add_preset->first, requests.add_preset->second,
+                                                     tunables, known_tunable, error);
+        if (!name.empty())
+        {
+            g_preset_note = "Added \"" + name + "\" from Community Presets";
+            done += " added \"" + name + "\" from Community Presets";
+        }
         else
             g_preset_note = error;
     }
@@ -4099,7 +4134,8 @@ bool sync_settings(bool reload_key, void *window, bool now_changed = false)
         }
         last_change = now;
     }
-    const bool preset = requests.save_preset || requests.load_preset || requests.delete_preset;
+    const bool preset = requests.save_preset || requests.load_preset || requests.delete_preset ||
+                        requests.export_preset || requests.add_preset;
     if (!unsaved.empty() && (flush || preset || now - last_change >= 1s))
     {
         const fs::path path = tunables_path();

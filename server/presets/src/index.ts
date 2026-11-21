@@ -1,18 +1,22 @@
 // Community Presets: the AtmosphereMod EFB app's shared presets, a Cloudflare Worker with a D1 database
-// (notes/presets-library.md). Public at once; users report what doesn't belong, and a preset reported by
-// HIDE_AT different clients is hidden until the admin restores or removes it (tools/presets_admin.py).
+// (notes/presets-library.md). Public at once; the admin hides or removes what doesn't belong (tools/presets_admin.py).
 //
-//   GET  /v1/presets                 the public presets, newest first, with their values
+//   GET  /v1/presets?sort=&version=&q=&page=&per=   the public presets with their values, a page of them:
+//                                    sort new | added | name; version: only those made with it (or with
+//                                    any of several: 0.8.0,0.7.5); q: in the name, author or description; per page
+//                                    1-50 (10)
+//   GET  /v1/versions                the versions public presets were made with, the newest first: how many each,
+//                                    and the settings they have
 //   POST /v1/presets                 share one: {name, author, description, version, values} (text/plain JSON)
 //   POST /v1/presets/:id/download    count an "Add to my presets"
-//   POST /v1/presets/:id/report      {reason}: one per client
-//   GET  /v1/admin/presets?status=   (Authorization: Bearer ADMIN_TOKEN) hidden | reported | public | removed | all
+//   GET  /v1/admin/presets?status=   (Authorization: Bearer ADMIN_TOKEN) hidden | public | removed | all
 //   POST /v1/admin/presets/:id       {action: restore | hide | remove | edit, name?, description?}
 //
-// No IP address is stored: a client is a keyed hash of its address (HMAC with the secret SALT), for submissions
-// one that changes daily. Bodies are text/plain JSON, so the tablet's browser sends them without a CORS preflight.
+// No IP address is stored: for the share limit a client is a keyed hash of its address and the day (HMAC with the
+// secret SALT). Bodies are text/plain JSON, so the tablet's browser sends them without a CORS preflight. The lists
+// aren't cached (no-store): a preset shared shows at once.
 
-import { canonical, checkSubmission, DESCRIPTION_MAX, NAME_MAX, textProblem } from "./rules";
+import { canonical, checkSubmission, DESCRIPTION_MAX, NAME_MAX, textProblem, versionOrder } from "./rules";
 
 interface D1Result<T> {
   results: T[];
@@ -35,11 +39,22 @@ export interface Env {
 
 /** Shares per client and day. */
 const SUBMISSIONS_PER_DAY = 5;
-/** Reports from different clients that hide a preset. */
-const HIDE_AT = 3;
+/** A page of the list: this many by default, at most PER_MAX. */
+const PER_DEFAULT = 10;
+const PER_MAX = 50;
+/** A search: at most this long. */
+const QUERY_MAX = 60;
+/** The versions listed, and asked for in one list. */
+const VERSIONS_MAX = 30;
+const SORTS: Record<string, string> = {
+  new: "created DESC",
+  added: "downloads DESC, created DESC",
+  name: "name COLLATE NOCASE ASC, created DESC",
+};
+/** The lists: never from a cache, so a share shows at once. */
+const FRESH = { "Cache-Control": "no-store" };
 /** The largest body taken. */
 const BODY_MAX = 16 * 1024;
-const REASON_MAX = 200;
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -62,10 +77,10 @@ async function hmac(secret: string, text: string): Promise<string> {
   return Array.from(new Uint8Array(sig)).slice(0, 16).map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-/** The client as a keyed hash of its address: for reports a lasting one, for submissions one per day. */
-function clientKey(env: Env, req: Request, day = ""): Promise<string> {
+/** The client for the share limit: a keyed hash of its address and the day (so it can't be followed across days). */
+function clientKey(env: Env, req: Request, day: string): Promise<string> {
   const ip = req.headers.get("CF-Connecting-IP") || "local";
-  return hmac(env.SALT, day ? `${ip}|${day}` : ip);
+  return hmac(env.SALT, `${ip}|${day}`);
 }
 
 function newId(): string {
@@ -84,17 +99,53 @@ async function bodyOf(req: Request): Promise<unknown> {
 
 interface Row {
   id: string; name: string; author: string; description: string; version: string; vals: string;
-  status: string; created: number; downloads: number; reports: number;
+  status: string; created: number; downloads: number;
 }
 const publicView = (r: Row) => ({
   id: r.id, name: r.name, author: r.author, description: r.description, version: r.version,
   created: r.created, downloads: r.downloads, values: JSON.parse(r.vals),
 });
 
-async function listPublic(env: Env): Promise<Response> {
-  const rows = await env.DB.prepare("SELECT * FROM presets WHERE status = 'public' ORDER BY created DESC LIMIT 500")
-    .all<Row>();
-  return json({ ok: true, presets: rows.results.map(publicView) }, 200, { "Cache-Control": "public, max-age=120" });
+async function listPublic(env: Env, url: URL): Promise<Response> {
+  const p = url.searchParams;
+  const sort = SORTS[p.get("sort") || "new"] || SORTS.new;
+  const per = Math.min(PER_MAX, Math.max(1, parseInt(p.get("per") || "", 10) || PER_DEFAULT));
+  const page = Math.max(1, parseInt(p.get("page") || "", 10) || 1);
+  const where = ["status = 'public'"];
+  const binds: unknown[] = [];
+  // (one version, or several separated by commas: the app's "compatible with yours")
+  const wanted = (p.get("version") || "").split(",").map((v) => v.trim().slice(0, 20)).filter((v) => v && v !== "all")
+    .slice(0, VERSIONS_MAX);
+  if (wanted.length) {
+    where.push(`version IN (${wanted.map(() => "?").join(", ")})`);
+    binds.push(...wanted);
+  }
+  const q = (p.get("q") || "").trim().slice(0, QUERY_MAX);
+  if (q) {
+    // (LIKE ignores case for ASCII; % _ and the escape itself are taken literally)
+    const like = `%${q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+    where.push("(name LIKE ? ESCAPE '\\' OR author LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\')");
+    binds.push(like, like, like);
+  }
+  const clause = where.join(" AND ");
+  const total = await env.DB.prepare(`SELECT COUNT(*) AS n FROM presets WHERE ${clause}`).bind(...binds)
+    .first<{ n: number }>();
+  const rows = await env.DB.prepare(`SELECT * FROM presets WHERE ${clause} ORDER BY ${sort} LIMIT ? OFFSET ?`)
+    .bind(...binds, per, (page - 1) * per).all<Row>();
+  return json({ ok: true, presets: rows.results.map(publicView), total: total ? total.n : 0, page, per }, 200,
+              FRESH);
+}
+
+/** The versions public presets were made with, the newest first: how many each, and the settings their presets have
+ * (all of them together), so the app can tell which have the same settings as its own. */
+async function versions(env: Env): Promise<Response> {
+  const rows = await env.DB.prepare(
+    "SELECT p.version AS version, COUNT(DISTINCT p.id) AS count, json_group_array(DISTINCT j.key) AS keys "
+    + "FROM presets p, json_each(p.vals) j WHERE p.status = 'public' AND p.version != '' GROUP BY p.version")
+    .all<{ version: string; count: number; keys: string }>();
+  const out = rows.results.map((r) => ({ version: r.version, count: r.count, keys: (JSON.parse(r.keys) as string[]).sort() }))
+    .sort((a, b) => versionOrder(b.version, a.version)).slice(0, VERSIONS_MAX);
+  return json({ ok: true, versions: out }, 200, FRESH);
 }
 
 async function share(env: Env, req: Request): Promise<Response> {
@@ -138,34 +189,6 @@ async function download(env: Env, id: string): Promise<Response> {
   return json({ ok: true });
 }
 
-async function report(env: Env, req: Request, id: string): Promise<Response> {
-  const preset = await env.DB.prepare("SELECT status FROM presets WHERE id = ?").bind(id).first<{ status: string }>();
-  if (!preset || preset.status === "removed") {
-    return fail("no such preset", 404);
-  }
-  let reason = "";
-  try {
-    const b = (await bodyOf(req)) as Record<string, unknown>;
-    reason = typeof b.reason === "string" ? b.reason.trim().slice(0, REASON_MAX) : "";
-  } catch {
-    reason = "";
-  }
-  const client = await clientKey(env, req);
-  const known = await env.DB.prepare("SELECT 1 AS x FROM reports WHERE preset_id = ? AND client = ?").bind(id, client)
-    .first();
-  if (known) {
-    return json({ ok: true, already: true });
-  }
-  await env.DB.batch([
-    env.DB.prepare("INSERT INTO reports (preset_id, client, reason, created) VALUES (?, ?, ?, ?)")
-      .bind(id, client, reason, Date.now()),
-    env.DB.prepare("UPDATE presets SET reports = reports + 1, status = CASE WHEN reports + 1 >= ? AND status = 'public' "
-                   + "THEN 'hidden' ELSE status END WHERE id = ?").bind(HIDE_AT, id),
-  ]);
-  const now = await env.DB.prepare("SELECT status FROM presets WHERE id = ?").bind(id).first<{ status: string }>();
-  return json({ ok: true, hidden: !!now && now.status === "hidden" });
-}
-
 /** Whether the request carries the admin's token (compared in constant time). */
 function isAdmin(env: Env, req: Request): boolean {
   const given = (req.headers.get("Authorization") || "").replace(/^Bearer\s+/i, "");
@@ -181,21 +204,13 @@ function isAdmin(env: Env, req: Request): boolean {
 }
 
 async function adminList(env: Env, status: string): Promise<Response> {
-  const where = status === "all" ? "1 = 1" : status === "reported" ? "reports > 0" : "status = ?";
+  const where = status === "all" ? "1 = 1" : "status = ?";
   let stmt = env.DB.prepare(`SELECT * FROM presets WHERE ${where} ORDER BY created DESC LIMIT 1000`);
   if (where === "status = ?") {
     stmt = stmt.bind(status);
   }
   const rows = await stmt.all<Row>();
-  const reasons = await env.DB.prepare("SELECT preset_id, reason, created FROM reports ORDER BY created DESC LIMIT 2000")
-    .all<{ preset_id: string; reason: string; created: number }>();
-  return json({
-    ok: true,
-    presets: rows.results.map((r) => ({
-      ...publicView(r), status: r.status, reports: r.reports,
-      reasons: reasons.results.filter((x) => x.preset_id === r.id).map((x) => x.reason).filter((x) => x),
-    })),
-  });
+  return json({ ok: true, presets: rows.results.map((r) => ({ ...publicView(r), status: r.status })) });
 }
 
 async function adminAct(env: Env, req: Request, id: string): Promise<Response> {
@@ -209,10 +224,6 @@ async function adminAct(env: Env, req: Request, id: string): Promise<Response> {
   if (action === "restore" || action === "hide" || action === "remove") {
     const status = action === "restore" ? "public" : action === "hide" ? "hidden" : "removed";
     await env.DB.prepare("UPDATE presets SET status = ? WHERE id = ?").bind(status, id).run();
-    if (action === "restore") {
-      // (restored: its reports so far don't count toward hiding it again)
-      await env.DB.prepare("UPDATE presets SET reports = 0 WHERE id = ?").bind(id).run();
-    }
     return json({ ok: true, status });
   }
   if (action === "edit") {
@@ -246,14 +257,17 @@ export default {
     const path = url.pathname.replace(/\/+$/, "");
     try {
       if (path === "/v1/presets" && req.method === "GET") {
-        return await listPublic(env);
+        return await listPublic(env, url);
+      }
+      if (path === "/v1/versions" && req.method === "GET") {
+        return await versions(env);
       }
       if (path === "/v1/presets" && req.method === "POST") {
         return await share(env, req);
       }
-      let m = /^\/v1\/presets\/([a-z0-9]{6,16})\/(download|report)$/.exec(path);
+      let m = /^\/v1\/presets\/([a-z0-9]{6,16})\/download$/.exec(path);
       if (m && req.method === "POST") {
-        return m[2] === "download" ? await download(env, m[1]) : await report(env, req, m[1]);
+        return await download(env, m[1]);
       }
       if (path.startsWith("/v1/admin/")) {
         if (!isAdmin(env, req)) {

@@ -256,6 +256,48 @@ export const UI_CSS = units(`
 .atmo-ui .ask { margin: 0 0 8u; padding: 8u 10u; border-left: 2u solid rgb(var(--dawn)); background: var(--soft);
   font-size: 13u; color: var(--text-2); }
 .atmo-ui .ask .btns { justify-content: flex-start; margin-top: 8u; }
+/* Community Presets: an entry, its author line, its description */
+.atmo-ui .shared { padding: 9u 0; border-top: 1px solid var(--b1); }
+.atmo-ui .shared:first-child { border-top: none; }
+.atmo-ui .shared .label { display: flex; align-items: baseline; flex-wrap: wrap; }
+.atmo-ui .shared .pn { font-family: var(--f-med); font-size: 15u; color: var(--text); margin-right: 10u; }
+.atmo-ui .shared .by { font-size: 12u; color: var(--muted); }
+.atmo-ui .shared-desc { font-size: 13u; color: var(--text-2); margin-top: 3u; line-height: 1.35; }
+.atmo-ui .shared .more { min-height: 28u; border-top: none; }
+.atmo-ui .shared .btns { justify-content: flex-start; margin-top: 4u; }
+.atmo-ui .shared .meta { margin-top: 3u; font-size: 12u; color: var(--muted); }
+.atmo-ui .shared .differs { margin-top: 3u; font-size: 12u; line-height: 1.35; color: rgb(var(--dawn)); }
+/* its heading's icons (search, sort, versions), their menus, the search field, what's shown; the pages */
+.atmo-ui .card-head { display: flex; align-items: center; justify-content: space-between; padding: 4u 8u 0 0; }
+.atmo-ui .card-head h2 { margin: 0; padding: 6u 14u 0; font-family: var(--f-med); font-weight: normal; font-size: 11u;
+  letter-spacing: 0.09em; text-transform: uppercase; color: var(--muted); }
+.atmo-ui .tools { display: flex; align-items: center; flex: 0 0 auto; }
+.atmo-ui .drop { position: relative; }
+.atmo-ui .tool { display: flex; align-items: center; justify-content: center; width: 32u; height: 32u; margin-left: 2u;
+  border-radius: 3u; cursor: pointer; color: var(--muted); }
+.atmo-ui .tool svg { width: 18u; height: 18u; }
+.atmo-ui .tool:hover { color: var(--text-2); }
+.atmo-ui .tool.set { color: rgb(var(--acc)); }
+.atmo-ui .tool.open { background: var(--b2); color: var(--text); }
+.atmo-ui .menu { position: absolute; top: 35u; right: 0; z-index: 10; width: 260u; padding: 4u 0; border-radius: 3u;
+  border: 1px solid var(--b3); background: var(--card); box-shadow: var(--card-shadow); }
+.atmo-ui .menu .item { display: flex; align-items: flex-start; padding: 7u 12u 7u 8u; cursor: pointer; font-size: 13u;
+  color: var(--text-2); }
+.atmo-ui .menu .item:hover { background: var(--b1); }
+.atmo-ui .menu .item.on { color: var(--text); }
+.atmo-ui .menu .tick { flex: 0 0 auto; width: 16u; height: 16u; margin-right: 8u; color: rgb(var(--acc)); }
+.atmo-ui .menu .tick svg { width: 16u; height: 16u; }
+.atmo-ui .menu .text { flex: 1 1 auto; min-width: 0; }
+.atmo-ui .menu .sub { margin-top: 2u; font-size: 11u; line-height: 1.3; color: var(--muted); }
+.atmo-ui .menu .sub.warn { color: rgb(var(--dawn)); }
+.atmo-ui .searchrow { display: flex; align-items: center; margin: 2u 0 6u; }
+.atmo-ui .searchrow .field { flex: 1 1 auto; min-width: 0; }
+.atmo-ui .searchrow .tool { flex: 0 0 auto; margin-left: 4u; }
+.atmo-ui .status { margin: 0 0 4u; font-size: 12u; }
+.atmo-ui .pager { display: flex; align-items: center; justify-content: space-between; margin-top: 4u; padding-top: 8u;
+  border-top: 1px solid var(--b1); }
+.atmo-ui .pager .muted { flex: 1 1 auto; text-align: center; font-size: 12u; }
+.atmo-ui .pager .btn { flex: 0 0 auto; }
 /* hotkeys: the keys over the buttons, at the right */
 .atmo-ui .hotkey .hk { flex: 0 0 auto; display: flex; flex-direction: column; align-items: flex-end; }
 .atmo-ui .hotkey .keys { font-family: var(--f-med); font-size: 14u; margin-bottom: 5u; color: var(--text); }

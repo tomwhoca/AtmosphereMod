@@ -2,6 +2,7 @@
 // AtmoWeather.tsx), the browser harness fakes it (efb/harness). The UI module itself uses no SDK or EFB component,
 // only the DOM, so the same bundle runs in both.
 
+import type { CommunityApi } from "../community";
 import type { OtherHotkey } from "../hotkeys";
 import type { Transport } from "../report";
 
@@ -31,6 +32,9 @@ export interface AddonState {
   /** The add-on's note on the last hotkey change (src/hotkeys.ts hotkeyNoteText). */
   hotkeyNote?: string;
   cloudFogOff?: boolean;
+  /** Community Presets: the look of the preset asked for (exportPreset), to share; n counts the requests. null while
+   * none was asked for; missing from an add-on without Community Presets. */
+  presetExport?: { n: number; name: string; values: Record<string, number> } | null;
 }
 
 /** The tablet as the app sees it: its area (px) and the EFB's size and orientation settings. */
@@ -68,6 +72,8 @@ export interface Host {
    * field has asked for them. `events.text`: what was typed on the OS's own keyboard (a gamepad's) for the field;
    * `events.outside`: a click outside the tablet, where the field should let go. */
   textFocus(focused: boolean, events?: TextEvents): void;
+  /** How Community Presets is reached, if not on the web (the harness: a stand-in, so nothing reaches the server). */
+  readonly communityApi?: CommunityApi;
   /** How a performance report travels, if not to the sheet (the harness: a stand-in, so nothing reaches it). */
   readonly reportTransport?: Transport;
   /** Small values kept across flights (What's new: the version last seen). */

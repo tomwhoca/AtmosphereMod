@@ -50,6 +50,78 @@ void write(const std::filesystem::path &p, const std::string &text)
     o << text;
 }
 
+// Community Presets (settings::presets look, add_shared, and the app's requests for them): only the look is shared,
+// the user's radar settings stay theirs, a shared preset is complete (Default fills what it lacks), none replaced.
+void shared_checks()
+{
+    namespace p = settings::presets;
+    const auto dir = std::filesystem::temp_directory_path() / "atmo_shared_test";
+    std::filesystem::remove_all(dir);
+    const auto presets = dir / "presets";
+    std::filesystem::create_directories(presets);
+    const auto tunables = dir / "tunables.ini";
+    write(presets / "Default.ini", "; defaults\r\nT3 = 4\r\nT9 = 0.7\r\nC16 = 0.5\r\nC37 = 2\r\nR1 = 1\r\nR2 = 2\r\n");
+    write(tunables, "; mine\r\nT3 = 6\r\nT9 = 0.6\r\nC13 = 0.3\r\nC16 = 1\r\nC37 = 0\r\nR1 = 7.5\r\nR2 = 8\r\n");
+    write(presets / "Mine.ini", read(tunables));
+    const auto known = [](char prefix, unsigned index) {
+        return (prefix == 'T' && index < 17) || (prefix == 'R' && index < 14) || (prefix == 'C' && index < 38);
+    };
+    std::string error;
+
+    check(p::shareable('T', 3, known) && p::shareable('C', 37, known) && !p::shareable('C', 14, known) &&
+              !p::shareable('R', 1, known) && !p::shareable('C', 99, known),
+          "shared: the look only (T, C; not C13-C15, not R, not unknown keys)");
+    const std::vector<settings::Change> look = p::look(presets, "mine", known, error);
+    std::string keys;
+    for (const settings::Change &c : look)
+        keys += std::string(1, c.prefix) + std::to_string(c.index) + "=" + settings::format(c.value) + " ";
+    check(keys == "C16=1 C37=0 T3=6 T9=0.6 ", "shared: a preset's look, in key order, without C13 and R");
+    check(p::look(presets, "Nothing", known, error).empty() && !error.empty(), "shared: no such preset: refused");
+
+    const std::string name = p::add_shared(presets, "Evening haze",
+                                           { { 'T', 3, 9.0f }, { 'C', 16, 2.0f }, { 'R', 1, 99.0f }, { 'C', 14, 5.0f } },
+                                           tunables, known, error);
+    const std::string text = read(presets / "Evening haze.ini");
+    check(name == "Evening haze" && value_of(text, 'T', 3) == 9.0f && value_of(text, 'C', 16) == 2.0f,
+          "shared: added, with its values");
+    check(value_of(text, 'T', 9) == 0.7f && value_of(text, 'C', 37) == 2.0f,
+          "shared: what it lacks from Default (complete: loading it asks nothing)");
+    check(value_of(text, 'R', 1) == 7.5f && value_of(text, 'R', 2) == 8.0f && value_of(text, 'C', 14) == -999.0f,
+          "shared: the radar's settings the user's own (its R1 ignored), no C14");
+    check(text.find("; defaults\r\n") == 0, "shared: Default's file, comments kept");
+    check(p::add_shared(presets, "Evening haze", { { 'T', 3, 5.0f } }, tunables, known, error) == "Evening haze (2)" &&
+              value_of(read(presets / "Evening haze.ini"), 'T', 3) == 9.0f,
+          "shared: a name taken gets (2): none replaced");
+    check(p::add_shared(presets, "default", { { 'T', 3, 5.0f } }, tunables, known, error) == "default (2)",
+          "shared: never Default");
+    check(p::add_shared(presets, "a/b", { { 'T', 3, 5.0f } }, tunables, known, error) == "Shared" &&
+              std::filesystem::exists(presets / "Shared.ini"),
+          "shared: a name that can't be one: Shared");
+    check(p::add_shared(presets, "Empty", { { 'R', 1, 1.0f } }, tunables, known, error).empty() && !error.empty() &&
+              !std::filesystem::exists(presets / "Empty.ini"),
+          "shared: nothing shareable in it: refused, no file");
+
+    settings::on_message(R"({"exportPreset":"Mine"})");
+    settings::Requests r = settings::take();
+    check(r.export_preset == std::optional<std::string>("Mine") && !settings::take().export_preset,
+          "requests: an export, taken once");
+    settings::on_message(R"({"addPreset":{"name":"Evening haze","values":{"T3":9,"C16":2.5,"R1":3,"C37":0}}})");
+    r = settings::take();
+    std::string got;
+    if (r.add_preset)
+        for (const settings::Change &c : r.add_preset->second)
+            got += std::string(1, c.prefix) + std::to_string(c.index) + "=" + settings::format(c.value) + " ";
+    check(r.add_preset && r.add_preset->first == "Evening haze" && got == "T3=9 C16=2.5 C37=0 ",
+          "requests: a shared preset, its name and values (R left out by the parser)");
+    settings::on_message(R"({"addPreset":{"values":{"T3":1},"name":"Order"}})");
+    r = settings::take();
+    check(r.add_preset && r.add_preset->first == "Order" && r.add_preset->second.size() == 1,
+          "requests: a shared preset, either order");
+    settings::on_message(R"({"addPreset":{"name":"x\"y","values":{"T3":1}}})");
+    check(!settings::take().add_preset, "requests: a name with a quote: ignored");
+    std::filesystem::remove_all(dir);
+}
+
 // Presets (settings::presets): names, saving, which preset the settings are, loading without
 // harming settings no preset has, Default kept, deleting, and the app's requests.
 void presets_checks()
@@ -377,6 +449,7 @@ int main()
     std::filesystem::remove_all(dir);
 
     presets_checks();
+    shared_checks();
 
     std::printf("%s\n", g_failures ? "FAILED" : "all checks passed");
     return g_failures ? 1 : 0;

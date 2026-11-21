@@ -7,7 +7,7 @@ import { button, card, twoTaps } from "./controls";
 import { h, Scope, Value } from "./dom";
 import { Store } from "./model";
 
-export type SheetName = "" | "news" | "report";
+export type SheetName = "" | "news" | "report" | "share";
 
 export function toolsPage(scope: Scope, store: Store, theme: Value<string>, open: (s: SheetName) => void): HTMLElement {
   const live = new Value(false);

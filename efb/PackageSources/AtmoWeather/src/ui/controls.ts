@@ -93,6 +93,60 @@ export function choice(scope: Scope, options: readonly string[], selected: Value
   return row;
 }
 
+export interface MenuItem {
+  id: string;
+  label: string;
+  /** A second line, smaller; `warn` colours it. */
+  sub?: string;
+  warn?: boolean;
+}
+
+/** An icon that opens a menu under it, at its right: the items, the chosen one ticked. A pick closes it, as does a
+ * click anywhere else. The icon is marked while the choice isn't `normal`. */
+export function iconMenu(scope: Scope, iconName: string, title: string, items: Value<readonly MenuItem[]>,
+                         chosen: Value<string>, normal: string): HTMLElement {
+  const btn = h("div", { class: "tool", title }, icon(iconName));
+  const menu = h("div", { class: "menu" });
+  const wrap = h("div", { class: "drop" }, btn, menu);
+  const open = new Value(false);
+  let rows = new Scope();
+  scope.add(() => rows.dispose());
+  const render = () => {
+    rows.dispose();
+    rows = new Scope();
+    menu.innerHTML = "";
+    for (const it of items.get()) {
+      const on = it.id === chosen.get();
+      const row = h("div", { class: `item${on ? " on" : ""}` },
+        h("span", { class: "tick" }, on ? icon("check") : null),
+        h("div", { class: "text" }, h("div", { text: it.label }),
+          it.sub ? h("div", { class: `sub${it.warn ? " warn" : ""}`, text: it.sub }) : null));
+      rows.listen(row, "click", () => {
+        open.set(false);
+        chosen.set(it.id);
+      });
+      menu.appendChild(row);
+    }
+  };
+  const mark = () => {
+    btn.className = `tool${open.get() ? " open" : ""}${chosen.get() !== normal ? " set" : ""}`;
+    menu.style.display = open.get() ? "" : "none";
+  };
+  scope.add(items.watch(render));
+  scope.add(chosen.watch(() => {
+    render();
+    mark();
+  }));
+  scope.add(open.watch(mark));
+  scope.listen(btn, "click", () => open.set(!open.get()));
+  scope.listen(document, "mousedown", (e) => {
+    if (open.get() && !wrap.contains(e.target as Node)) {
+      open.set(false);
+    }
+  });
+  return wrap;
+}
+
 export interface FieldOptions {
   placeholder: string;
   value: Value<string>;

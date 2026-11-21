@@ -277,6 +277,27 @@ export class Store {
   /** Loads preset `name`: the add-on writes its values into tunables.ini and reloads. Unless `discard`, only while
    * the settings are a preset's (the add-on checks: settings no preset has aren't replaced unasked). The settings it
    * lacks stay as they are, or with `fill` are first added to it: Default's values or the current ones. */
+  // ---- Community Presets
+
+  /** Grows with each preset shared from here: the Community Presets card loads again. */
+  public readonly shared = new Value(0);
+
+  /** The add-on can export and add shared presets (it sends presetExport, null or not). */
+  public get hasCommunity(): boolean {
+    const s = this.state.get();
+    return !!s && s.presetExport !== undefined;
+  }
+
+  /** Asks the add-on for preset `name`'s look, to share: the state's presetExport answers (its n grows). */
+  public exportPreset(name: string): void {
+    this.host.send({ exportPreset: name });
+  }
+
+  /** A shared preset added as a new preset of the user's (named `name`, or with " (2)" ...: none replaced). */
+  public addShared(name: string, values: Record<string, number>): void {
+    this.host.send({ addPreset: { name, values } });
+  }
+
   public load(name: string, discard: boolean, fill?: "defaults" | "current"): void {
     this.flush();
     this.pending.clear();  // (the preset's values, not the ones set here a moment ago)

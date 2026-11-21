@@ -1,13 +1,20 @@
-// The sheets over the app: What's new (once per release that has news, and from Tools) and the performance report
-// (from Tools: measure, review what will be sent with the user's answers, send). Their logic: src/whatsnew.ts and
-// src/report.ts.
+// The sheets over the app: What's new (once per release that has news, and from Tools), the performance report
+// (from Tools: measure, review what will be sent with the user's answers, send) and sharing a preset in Community
+// Presets (from Presets). Their logic: src/whatsnew.ts, src/report.ts and src/community.ts.
 
+import { changesFromDefault, CommunityApi } from "../community";
+import { NAME_RULE, PRESET_NAME_MAX, presetChar, presetName } from "../presets";
 import { IMPRESSION, LIMITED_BY, PHASE_TEXT, PerfReportModel, Step, STUTTERS, WEATHER } from "../report";
 import { PREVIOUS, WHATS_NEW } from "../whatsnew";
 import { button, choice, sheet, switchEl, textField } from "./controls";
-import { h, Scope } from "./dom";
+import { h, Scope, Value } from "./dom";
 import { icon } from "./icons";
-import { Store } from "./model";
+import { sameName, Store } from "./model";
+
+/** The author last typed when sharing, offered next time. */
+const AUTHOR_KEY = "atmo-ui-author";
+/** The add-on answers an export within this long, or doesn't have Community Presets. */
+const EXPORT_WAIT_MS = 6000;
 
 export interface Sheet {
   el: HTMLElement;
@@ -105,4 +112,95 @@ export function reportSheet(scope: Scope, store: Store, model: PerfReportModel):
     note.style.display = t ? "" : "none";
   }));
   return sheet(scope, "Performance report", () => model.close(), intro, measuring, review, sent, failed, note);
+}
+
+/** Shares one of the user's presets in Community Presets: its look from the add-on (exportPreset), what it changes
+ * from the mod's defaults, a name, the author (required, remembered) and a description; sent on Send. */
+export function shareSheet(scope: Scope, store: Store, preset: string, api: CommunityApi, close: () => void): Sheet {
+  type ShareStep = "reading" | "missing" | "ready" | "sending" | "sent";
+  const step = new Value<ShareStep>("reading");
+  const at = (el: HTMLElement, ...steps: ShareStep[]): HTMLElement => {
+    scope.add(step.watch((s) => { el.style.display = steps.indexOf(s) >= 0 ? "" : "none"; }));
+    return el;
+  };
+  const name = new Value(preset);
+  const author = new Value(store.host.load(AUTHOR_KEY) || "");
+  const description = new Value("");
+  const note = h("div", { class: "note warn" });
+  const showNote = (t: string) => {
+    note.textContent = t;
+    note.style.display = t ? "" : "none";
+  };
+  showNote("");
+
+  // the preset's look, as the add-on reads it from the preset's file (an answer newer than any before)
+  const before = store.state.get() && store.state.get()!.presetExport;
+  const n0 = before ? before.n : 0;
+  let values: Record<string, number> | undefined;
+  const changes = h("div", { class: "details" });
+  scope.add(store.state.watch((s) => {
+    const e = s && s.presetExport;
+    if (step.get() === "reading" && e && e.n > n0 && sameName(e.name, preset)) {
+      values = e.values;
+      const c = changesFromDefault(values);
+      changes.textContent = c.lines.length === 0 && c.hidden === 0 ? "The same as the mod's defaults."
+        : c.lines.concat(c.hidden ? [`And ${c.hidden} the app doesn't show.`] : []).join("\n");
+      step.set("ready");
+    }
+  }));
+  store.exportPreset(preset);
+  const timer = setTimeout(() => step.get() === "reading" && step.set("missing"), EXPORT_WAIT_MS);
+  scope.add(() => clearTimeout(timer));
+
+  const send = async () => {
+    showNote("");
+    const n = presetName(name.get());
+    if (n === "") {
+      showNote(NAME_RULE);
+      return;
+    }
+    if (author.get().trim() === "") {
+      showNote("Your name or username, please: it's shown with the preset.");
+      return;
+    }
+    store.host.save(AUTHOR_KEY, author.get().trim());
+    step.set("sending");
+    const r = await api.share({ name: n, author: author.get().trim(), description: description.get().trim(),
+                                version: store.host.version, values: values || {} });
+    if (r.ok) {
+      step.set("sent");
+      store.shared.set(store.shared.get() + 1);
+    } else {
+      step.set("ready");
+      showNote(r.error.charAt(0).toUpperCase() + r.error.slice(1) + ".");
+    }
+  };
+  const label = (text: string) => h("div", { class: "q", text });
+  const form = at(h("div", null,
+    h("div", { class: "news-text", text: `Share “${preset}” with other pilots. It's public at once: anyone can `
+                                         + "add it to their presets." }),
+    label("Name"),
+    h("div", { class: "fieldrow" }, textField(scope, store.host, { placeholder: "The preset's name", value: name,
+                                                                  accepts: presetChar, max: PRESET_NAME_MAX })),
+    label("Author, shown with it (your name or a username, e.g. on flightsim.to)"),
+    h("div", { class: "fieldrow" }, textField(scope, store.host, { placeholder: "Author", value: author, max: 40 })),
+    label("Description (optional)"),
+    h("div", { class: "fieldrow" }, textField(scope, store.host, { placeholder: "What it's for, in a sentence",
+                                                                  value: description, max: 300 })),
+    label("What it changes from the mod's defaults (as saved)"), changes,
+    h("div", { class: "news-text small", text: "Sent: this preset's haze, sky and cloud settings, the name, author and "
+                                               + "description above, and the mod's version. Your weather radar settings "
+                                               + "stay with you, and your IP address isn't stored." }),
+    at(h("div", { class: "actions" }, button(scope, "Share", "primary", () => void send()),
+      button(scope, "Close", "", close)), "ready"),
+    at(h("div", { class: "news-text", text: "Sharing ..." }), "sending")), "ready", "sending");
+  const reading = at(h("div", { class: "news-text", text: "Reading the preset ..." }), "reading");
+  const missing = at(h("div", null,
+    h("div", { class: "news-text", text: "The add-on in the sim didn't send the preset: sharing needs the add-on of this "
+                                         + "version. Install the mod again." }),
+    h("div", { class: "actions" }, button(scope, "Close", "", close))), "missing");
+  const sent = at(h("div", null,
+    h("div", { class: "news-text", text: "Shared: it's in Community Presets now. Thank you!" }),
+    h("div", { class: "actions" }, button(scope, "Close", "primary", close))), "sent");
+  return sheet(scope, "Share a preset", close, reading, missing, form, sent, note);
 }

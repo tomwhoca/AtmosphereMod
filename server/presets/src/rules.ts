@@ -39,10 +39,21 @@ for (const [key, lo, hi] of HIDDEN) {
 }
 
 export const shareable = (key: string): boolean => RANGES.has(key);
+
+/** "0.10.2" after "0.9.1": by the numbers in it. */
+export function versionOrder(a: string, b: string): number {
+  const x = a.split(/[^0-9]+/).filter((s) => s).map(Number), y = b.split(/[^0-9]+/).filter((s) => s).map(Number);
+  for (let i = 0; i < Math.max(x.length, y.length); i++) {
+    if ((x[i] || 0) !== (y[i] || 0)) {
+      return (x[i] || 0) - (y[i] || 0);
+    }
+  }
+  return a < b ? -1 : a > b ? 1 : 0;
+}
 export const rangeOf = (key: string): [number, number] | undefined => RANGES.get(key);
 
-/** Words a name, an author or a description may not contain (whole words, any case). Short on purpose: users report
- * the rest (the Report button), and the admin removes it. */
+/** Words a name, an author or a description may not contain (whole words, any case). Short on purpose: the admin
+ * removes the rest (tools/presets_admin.py). */
 const BLOCKED = ["fuck", "fucking", "fucker", "shit", "bitch", "cunt", "asshole", "whore", "nazi", "hitler",
                  "wichser", "scheisse", "scheiße", "fotze", "hurensohn", "arschloch", "nutte"];
 /** A link, or what looks like one (flightsim.to and the like stay allowed: people name their profile there). */

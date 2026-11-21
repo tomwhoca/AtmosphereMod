@@ -83,6 +83,29 @@ void on_message(const std::string &json)
     static const std::regex fog_re(R"re("cloudFogOff"\s*:\s*(true|false))re");
     if (std::regex_search(json, m, fog_re))
         in.cloud_fog_off = m[1] == "true";
+    // Community Presets: {"exportPreset": "name"}; {"addPreset": {"name": "...", "values": {"T0": 1, ...}}}
+    static const std::regex export_re(R"re("exportPreset"\s*:\s*"([^"\\]*)")re");
+    if (std::regex_search(json, m, export_re))
+        in.export_preset = m[1].str();
+    if (const size_t at = json.find("\"addPreset\""); at != std::string::npos)
+    {
+        static const std::regex shared_name_re(R"re("name"\s*:\s*"([^"\\]*)")re");
+        static const std::regex shared_values_re(R"re("values"\s*:\s*\{([^}]*)\})re");
+        const std::string rest = json.substr(at);
+        std::smatch n, v;
+        if (std::regex_search(rest, n, shared_name_re) && std::regex_search(rest, v, shared_values_re))
+        {
+            std::vector<Change> values;
+            const std::string body = v[1];
+            for (auto it = std::sregex_iterator(body.begin(), body.end(), value_re); it != std::sregex_iterator(); ++it)
+            {
+                const float value = std::strtof((*it)[3].str().c_str(), nullptr);
+                if (std::isfinite(value))
+                    values.push_back({ (*it)[1].str()[0], static_cast<unsigned>(std::stoul((*it)[2].str())), value });
+            }
+            in.add_preset = std::pair{ n[1].str(), std::move(values) };
+        }
+    }
 
     const std::lock_guard lock(g_mutex);
     g_requests.set.insert(g_requests.set.end(), in.set.begin(), in.set.end());
@@ -107,6 +130,10 @@ void on_message(const std::string &json)
     g_requests.set_hotkeys.insert(g_requests.set_hotkeys.end(), in.set_hotkeys.begin(), in.set_hotkeys.end());
     if (in.cloud_fog_off)
         g_requests.cloud_fog_off = in.cloud_fog_off;
+    if (in.export_preset)
+        g_requests.export_preset = in.export_preset;
+    if (in.add_preset)
+        g_requests.add_preset = in.add_preset;
     g_asked = g_asked || asked;
 }
 
@@ -632,6 +659,82 @@ std::string import(const std::filesystem::path &dir, const std::filesystem::path
     std::filesystem::create_directories(dir, ec);
     if (!write_file(file_of(dir, name), text))
     {
+        error = "Couldn't write the preset \"" + name + "\"";
+        return "";
+    }
+    return name;
+}
+
+bool shareable(char prefix, unsigned index, const std::function<bool(char prefix, unsigned index)> &known)
+{
+    return (prefix == 'T' || (prefix == 'C' && (index < 13 || index > 15))) && known(prefix, index);
+}
+
+std::vector<Change> look(const std::filesystem::path &dir, const std::string &raw,
+                         const std::function<bool(char prefix, unsigned index)> &known, std::string &error)
+{
+    const std::string name = valid_name(raw);
+    std::string text;
+    if (name.empty() || !read_file(file_of(dir, name), text))
+    {
+        error = "There's no preset \"" + raw + "\" to share";
+        return {};
+    }
+    std::vector<Change> values;
+    for (const auto &[key, value] : values_of(text, known))
+        if (shareable(key.first, key.second, known))
+            values.push_back({ key.first, key.second, value });
+    if (values.empty())
+        error = "\"" + name + "\" has no settings to share";
+    return values;
+}
+
+std::string add_shared(const std::filesystem::path &dir, const std::string &raw, const std::vector<Change> &values,
+                       const std::filesystem::path &tunables,
+                       const std::function<bool(char prefix, unsigned index)> &known, std::string &error)
+{
+    std::vector<Change> look;
+    for (const Change &c : values)
+        if (shareable(c.prefix, c.index, known) && std::isfinite(c.value))
+            look.push_back(c);
+    if (look.empty())
+    {
+        error = "That preset has no settings in it";
+        return "";
+    }
+    std::string text, mine;
+    if (!read_file(file_of(dir, kDefault), text) && !read_file(tunables, text))
+    {
+        error = "Couldn't read the Default preset";
+        return "";
+    }
+    // (the weather radar's settings are the user's own, not the preset's)
+    std::vector<Change> radar;
+    if (read_file(tunables, mine))
+        for (const auto &[key, value] : values_of(mine, known))
+            if (key.first == 'R')
+                radar.push_back({ key.first, key.second, value });
+    const std::string base = valid_name(raw).empty() ? std::string("Shared") : valid_name(raw);
+    std::error_code ec;
+    std::string name = base;
+    for (int n = 2; same_name(name, kDefault) || std::filesystem::exists(file_of(dir, name), ec); ++n)
+    {
+        if (n > 99)
+        {
+            error = "There are too many presets named \"" + base + "\"";
+            return "";
+        }
+        const std::string suffix = " (" + std::to_string(n) + ")";
+        std::string cut = base.substr(0, kNameMax - suffix.size());
+        while (!cut.empty() && (cut.back() == ' ' || cut.back() == '.'))
+            cut.pop_back();
+        name = cut + suffix;
+    }
+    std::filesystem::create_directories(dir, ec);
+    const std::filesystem::path file = file_of(dir, name);
+    if (!write_file(file, text) || !settings::save(file, look) || (!radar.empty() && !settings::save(file, radar)))
+    {
+        std::filesystem::remove(file, ec);
         error = "Couldn't write the preset \"" + name + "\"";
         return "";
     }

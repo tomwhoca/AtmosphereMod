@@ -183,7 +183,81 @@ check(spec("T16").metarOnly && !spec("T3").metarOnly && spec("T16").toDisplay(1)
   check(msgs === '{"loadPreset":"Summer"} {"deletePreset":"Summer"} {"importPreset":true} '
         + '{"loadPreset":"Summer","discard":true,"fill":"defaults"} {"loadPreset":"Summer","fill":"current"}',
         `presets: load, delete, import, the gaps filled in (${msgs})`);
+  // Community Presets: the add-on's support (its state has presetExport), the requests, what a preset changes
+  check(!store.hasCommunity, "community: an add-on without presetExport has no Community Presets");
+  f.state({ T, C, TE, presets, presetExport: null });
+  check(store.hasCommunity, "community: presetExport null: the add-on has it");
+  f.sent.length = 0;
+  store.exportPreset("Summer");
+  store.addShared("Evening haze", { T3: 9, C16: 1.5 });
+  check(f.sent.map((m) => JSON.stringify(m)).join(" ")
+        === '{"exportPreset":"Summer"} {"addPreset":{"name":"Evening haze","values":{"T3":9,"C16":1.5}}}',
+        `community: export and add (${f.sent.map((m) => JSON.stringify(m)).join(" ")})`);
   store.dispose();
+  {
+    const { changesFromDefault } = app.community;
+    const same = changesFromDefault({ T3: DEFAULTS.T3, C16: DEFAULTS.C16 });
+    check(same.lines.length === 0 && same.hidden === 0, "community: a preset like the defaults changes nothing");
+    const c = changesFromDefault({ T0: 0, T3: DEFAULTS.T3, C16: 1.5, C37: 0, T2: 0.3 });
+    check(c.lines.join(" | ") === "Mod atmosphere: off | Solid clouds: 1.50" && c.hidden === 2,
+          `community: changes in the settings' words and units, in the pages' order (${c.lines.join(" | ")}; ${c.hidden})`);
+    // what a shared preset would change in the settings as they are: the shown ones by their text (not a float's
+    // last digit), the ones it lacks at the defaults, unknown ones left out
+    const { changesFromCurrent, OWN_KEYS: own } = app.community;
+    const nowVals = { ...DEFAULTS, C16: 0.8, T0: 0, C2: 0.5000001 };
+    const shared = {};
+    own.forEach((k) => { shared[k] = nowVals[k]; });
+    Object.assign(shared, { C16: 1.5, T0: 1, C40: 3 });
+    delete shared.C9;  // (lacks Glory: at the default, as adding it fills it)
+    const cc = changesFromCurrent(shared, (k) => (k === "C9" ? 2 : nowVals[k]));
+    check(cc.lines.join(" | ") === "Mod atmosphere: on (now off) | Glory: 0.5 (now 2.0) | Solid clouds: 1.50 (now 0.80)"
+          && cc.hidden === 0, `community: changes from the current settings (${cc.lines.join(" | ")}; ${cc.hidden})`);
+    const unchanged = changesFromCurrent(shared, (k) => (k === "C9" ? DEFAULTS.C9 : shared[k]));
+    const hid = changesFromCurrent({ ...shared, C37: 0, C9: DEFAULTS.C9 }, (k) => shared[k] !== undefined ? shared[k] : DEFAULTS[k], "default");
+    check(unchanged.lines.length === 0 && unchanged.hidden === 0 && hid.lines.length === 0 && hid.hidden === 1,
+          `community: none when they're the same; hidden ones counted (${unchanged.lines}; ${hid.hidden})`);
+    // the list: its address, its pages, and the server's sorting, filtering and search (the harness's stand-in)
+    const { listPath, pageCount, queryPresets, PER_PAGE, SORTS } = app.community;
+    const q = (o) => ({ sort: "new", versions: [], q: "", page: 1, ...o });
+    check(listPath(q({})) === `/v1/presets?sort=new&page=1&per=${PER_PAGE}`, `community: the plain list (${listPath(q({}))})`);
+    const path = listPath(q({ sort: "added", versions: ["0.8.0", "0.7.3"], q: "  50% & haze ", page: 3 }));
+    check(path === `/v1/presets?sort=added&page=3&per=${PER_PAGE}&version=0.8.0,0.7.3&q=50%25%20%26%20haze`,
+          `community: a query's address (${path})`);
+    check(pageCount(0, 10) === 1 && pageCount(10, 10) === 1 && pageCount(11, 10) === 2, "community: page count");
+    check(SORTS.map((s) => s.by).join() === "new,added,name", "community: the sorts (no ratings)");
+    const day = 86400000;
+    const mk = (i, o) => ({ id: `p${i}`, name: `N${i}`, author: "a", description: "", version: "0.8.0", created: i * day,
+                             downloads: 0, values: {}, ...o });
+    const all = [mk(1, { name: "beta", downloads: 5 }),
+                 mk(2, { name: "Alpha", version: "0.7.3", description: "Soft HAZE" }),
+                 mk(3, { name: "gamma", author: "Haze_pilot", downloads: 5 })];
+    const names = (o, per) => queryPresets(all, q(o), per).presets.map((p) => p.name).join();
+    check(names({}) === "gamma,Alpha,beta" && names({ sort: "added" }) === "gamma,beta,Alpha"
+          && names({ sort: "name" }) === "Alpha,beta,gamma", "community: newest, most added (then newest), A-Z");
+    check(names({ versions: ["0.7.3"] }) === "Alpha" && names({ versions: ["0.7.3", "0.8.0"] }) === "gamma,Alpha,beta"
+          && names({ q: "haze" }) === "gamma,Alpha" && names({ q: "zz" }) === "",
+          "community: by version(s); search in any case, in author and description");
+    // versions: the same settings as this one's, or not
+    const { OWN_KEYS, settingsDiff, compatibleVersions, diffShort, diffNote, sameSettings } = app.community;
+    check(OWN_KEYS.length === Object.keys(DEFAULTS).length && OWN_KEYS.indexOf("C37") >= 0
+          && OWN_KEYS.every((k) => /^(T\d+|C(\d|1[0-2]|1[6-9]|[2-9]\d)\d*)$/.test(k)),
+          `community: this version's shared settings: every default but the aircraft's and the radar's (${OWN_KEYS.length})`);
+    const older = OWN_KEYS.filter((k) => k !== "C9" && k !== "C34" && k !== "T7");
+    const d = settingsDiff(older.concat(["C40"]));
+    check(d.lacks.join() === "T7,C9,C34" && d.extra.join() === "C40" && !sameSettings(d)
+          && sameSettings(settingsDiff(OWN_KEYS.slice().reverse())), `community: settings compared (${JSON.stringify(d)})`);
+    const vs = [{ version: "0.9.0", count: 1, keys: OWN_KEYS.concat(["C40"]) }, { version: "0.8.1", count: 2, keys: OWN_KEYS },
+                { version: "0.8.0", count: 4, keys: OWN_KEYS }, { version: "0.7.3", count: 3, keys: older }];
+    check(compatibleVersions(vs).join() === "0.8.1,0.8.0", "community: compatible versions: the same settings");
+    check(diffShort(d) === "lacks 3 settings yours has, 1 setting yours doesn't have" && diffShort(settingsDiff(OWN_KEYS)) === "",
+          `community: a version's difference in short (${diffShort(d)})`);
+    const note = diffNote(d);
+    check(note === "Lacks 3 settings your version has (Glory, Structure inside clouds and 1 the app doesn't show): adding "
+          + "it sets them to the mod's defaults. Has 1 setting your version doesn't know: adding it leaves it out.",
+          `community: a preset's difference in a sentence (${note})`);
+    const p2 = queryPresets(all, q({ sort: "name", page: 2 }), 2);
+    check(p2.total === 3 && p2.page === 2 && p2.presets.map((p) => p.name).join() === "gamma", "community: page 2 of 2");
+  }
 
   // settings a preset lacks, and names
   const said = (keys, want) => {
