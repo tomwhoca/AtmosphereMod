@@ -77,18 +77,18 @@
    1
   ],
   "weather": "EDDK (+2): continental haze, visibility ~25 km, humidity 87%",
-  "version": "0.7.3",
+  "version": "0.8.0",
   "presets": [
    "Default",
-   "Older preset",
-   "Release install 2026-11-11",
+   "Last summer",
+   "Clear winter days",
    "My settings",
    "Evening haze"
   ],
   "preset": "My settings",
   "presetSaved": false,
   "presetsMissing": {
-   "Older preset": [
+   "Last summer": [
     "C36",
     "C37",
     "T16"

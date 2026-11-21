@@ -66,6 +66,15 @@ class FakeAddon {
 
   public async load(): Promise<Fixture> {
     this.fixture = (await (await fetch(`fixture.json?t=${Date.now()}`)).json()) as Fixture;
+    // (?addon=0.8.0: a release's add-on, for screenshots of a release (tools/app_shots.mjs): that version, the
+    // default keys and no developer's pause key, no other add-on's keys)
+    const addon = new URLSearchParams(location.search).get("addon");
+    if (addon) {
+      this.fixture.state.version = addon;
+      this.fixture.state.hotkeys = { toggle: "Ctrl+Shift+F9", reload: "Ctrl+Shift+F10", capture: "Ctrl+Shift+F11",
+                                     gpuTimes: "Ctrl+Shift+F12", cloudFog: "" };
+      this.fixture.state.otherHotkeys = [];
+    }
     this.reset();
     return this.fixture;
   }
@@ -232,7 +241,8 @@ function log(line: string): void {
 // ---------------------------------------------------------------- the host the UI gets
 
 class HarnessHost implements Host {
-  public readonly version = "dev (harness)";
+  /** The app's version: "dev (harness)", or ?app=0.8.0 in the page's address (screenshots of a release). */
+  public readonly version = new URLSearchParams(location.search).get("app") || "dev (harness)";
   /** The performance report's way out: nothing reaches the sheet from here; the harness answers as its script would
    * when the post can't be read (as in the sim): the post's answer unreadable, the confirmation ok. */
   /** Community Presets: a library in memory (two samples), so nothing reaches the server from here. */
@@ -353,24 +363,31 @@ function harnessCommunity(): CommunityApi {
     return { ...values, ...own };
   };
   const presets: SharedPreset[] = [
-    { id: "sample00001", name: "Hazy summer afternoon", author: "sample_pilot", version: "0.8.0", downloads: 12,
+    { id: "sample00001", name: "Hazy summer afternoon", author: "skyfarer", version: "0.8.0", downloads: 12,
       description: "Thick lowland haze and solid cumulus for a hot afternoon.",
       created: Date.now() - day,
       values: { T0: 1, T13: 0, T3: 10, T1: 2.4, T6: 0.12, T10: 1, C0: 1, C16: 1.5, C17: 0.33, C23: 1, C2: 0.5 } },
-    { id: "sample00002", name: "Crisp winter light", author: "another_pilot", version: "0.7.3", downloads: 3,
+    { id: "sample00002", name: "Crisp winter light", author: "contrail_cat", version: "0.7.3", downloads: 3,
       description: "", created: Date.now() - 3 * day,
       values: { T0: 1, T3: 2, T4: 0.3, C0: 1, C8: 2, C9: 1.2, C12: 0.8, C16: 0.5 } },
   ];
   // (more, so the list has pages)
+  // (made-up authors and texts, fit for the README's screenshots: tools/app_shots.mjs)
+  const AUTHORS = ["lowandslow", "skyfarer", "metar_nerd", "contrail_cat", "valley_vfr"];
+  const ABOUT = ["Crisp mountain air with a thin haze in the valleys.", "Humid sea air and a low deck along the coast.",
+    "Dry, dusty haze and a bright, washed-out horizon.", "Tall cumulus and heavy showers for the tropics.",
+    "Long, cool twilight colours far north.", "", "Hot, humid air under puffy trade cumulus.",
+    "A warm low sun and a hint of smoke.", "Very clean air for clear winter days.", "Big storm clouds over flat land.",
+    "Grey city haze over the water.", ""];
   const more = ["Alpine morning", "Coastal fog", "Desert glare", "Monsoon towers", "Northern dusk", "Soft overcast",
                 "Tropical noon", "Autumn evening", "Clear and cold", "Prairie storms", "Harbour haze", "Polar light"];
   presets.push({ id: "sample00003", name: "Tomorrow's sky", author: "future_pilot", version: "0.9.0", downloads: 0,
                   description: "Made with a newer version.", created: Date.now() - 2 * day,
                   values: { T0: 1, T3: 5, C0: 1 } });
   more.forEach((name, i) => presets.push({
-    id: `sample1${String(i).padStart(4, "0")}`, name, author: i % 3 ? "sample_pilot" : "third_pilot",
+    id: `sample1${String(i).padStart(4, "0")}`, name, author: AUTHORS[i % AUTHORS.length],
     version: i % 4 ? "0.8.0" : "0.7.3", downloads: (i * 7) % 11,
-    description: i % 2 ? `A sample for the list, number ${i + 3}.` : "",
+    description: ABOUT[i] || "",
     created: Date.now() - (5 + i) * day, values: { T0: 1, T3: 3 + i, C0: 1, C16: 0.8 + i / 10 } }));
   presets.forEach((p) => { p.values = full(p.version, p.values); });
   const wait = <T>(v: T) => new Promise<T>((resolve) => setTimeout(() => resolve(v), 400));
