@@ -2,7 +2,7 @@
 // (from Tools: measure, review what will be sent with the user's answers, send) and sharing a preset in Community
 // Presets (from Presets). Their logic: src/whatsnew.ts, src/report.ts and src/community.ts.
 
-import { changesFromDefault, CommunityApi } from "../community";
+import { changesFromDefault, CommunityApi, MY_SHARES_KEY, MyShare, mySharesOf } from "../community";
 import { NAME_RULE, PRESET_NAME_MAX, presetChar, presetName } from "../presets";
 import { IMPRESSION, LIMITED_BY, PHASE_TEXT, PerfReportModel, Step, STUTTERS, WEATHER } from "../report";
 import { PREVIOUS, WHATS_NEW } from "../whatsnew";
@@ -118,8 +118,11 @@ export function reportSheet(scope: Scope, store: Store, model: PerfReportModel):
 }
 
 /** Shares one of the user's presets in Community Presets: its look from the add-on (exportPreset), what it changes
- * from the mod's defaults, a name, the author (required, remembered) and a description; sent on Send. */
-export function shareSheet(scope: Scope, store: Store, preset: string, api: CommunityApi, close: () => void): Sheet {
+ * from the mod's defaults, a name, the author (required, remembered) and a description; sent on Send. With presets
+ * shared from this PC (their edit keys kept: MY_SHARES_KEY), it can instead update one of them: `target`, or the
+ * one shared from this preset, is chosen to begin with. */
+export function shareSheet(scope: Scope, store: Store, preset: string, api: CommunityApi, close: () => void,
+                           target = ""): Sheet {
   type ShareStep = "reading" | "missing" | "ready" | "sending" | "sent";
   const step = new Value<ShareStep>("reading");
   const at = (el: HTMLElement, ...steps: ShareStep[]): HTMLElement => {
@@ -129,6 +132,33 @@ export function shareSheet(scope: Scope, store: Store, preset: string, api: Comm
   const name = new Value(preset);
   const author = new Value(store.host.load(AUTHOR_KEY) || "");
   const description = new Value("");
+  // a new share, or an update of one shared from here (its texts filled in)
+  const mine = mySharesOf(store.host.load(MY_SHARES_KEY));
+  const mineList = Object.keys(mine).map((id) => mine[id]).sort((a, b) => b.at - a.at);
+  const NEW = "A new preset";
+  const labelOf = (s: MyShare) => `Update \u201c${s.name}\u201d`;
+  const first = mine[target] || mineList.filter((s) => sameName(s.local, preset))[0];
+  const mode = new Value(first ? labelOf(first) : NEW);
+  const chosen = (): MyShare | undefined => mineList.filter((s) => labelOf(s) === mode.get())[0];
+  scope.add(mode.watch(() => {
+    const s = chosen();
+    name.set(s ? s.name : preset);
+    description.set(s ? s.description : "");
+    if (s && s.author) {
+      author.set(s.author);
+    }
+  }));
+  const remember = (s: MyShare) => {
+    const all = mySharesOf(store.host.load(MY_SHARES_KEY));
+    all[s.id] = s;
+    store.host.save(MY_SHARES_KEY, JSON.stringify(all));
+  };
+  const forget = (id: string) => {
+    const all = mySharesOf(store.host.load(MY_SHARES_KEY));
+    delete all[id];
+    store.host.save(MY_SHARES_KEY, JSON.stringify(all));
+  };
+  const updated = new Value(false);
   const note = h("div", { class: "note warn" });
   const showNote = (t: string) => {
     note.textContent = t;
@@ -168,9 +198,36 @@ export function shareSheet(scope: Scope, store: Store, preset: string, api: Comm
     }
     store.host.save(AUTHOR_KEY, author.get().trim());
     step.set("sending");
-    const r = await api.share({ name: n, author: author.get().trim(), description: description.get().trim(),
-                                version: store.host.version, values: values || {} });
+    const body = { name: n, author: author.get().trim(), description: description.get().trim(),
+                   version: store.host.version, values: values || {} };
+    const s = chosen();
+    const kept = (id: string, key: string): MyShare => ({ id, key, name: n, author: body.author,
+                                                          description: body.description, local: preset, at: Date.now() });
+    if (s) {
+      const r = await api.update(s.id, s.key, body);
+      if (r.ok) {
+        remember(kept(s.id, s.key));
+        updated.set(true);
+        step.set("sent");
+        store.shared.set(store.shared.get() + 1);
+        return;
+      }
+      step.set("ready");
+      if (r.status === 404 || r.status === 403) {
+        // (unshared or removed since, or its key no longer fits: it's no longer this PC's to change)
+        forget(s.id);
+        showNote(`\u201c${s.name}\u201d can't be updated any more (it was unshared or removed): share it as a new `
+                 + "preset instead.");
+        return;
+      }
+      showNote(r.error.charAt(0).toUpperCase() + r.error.slice(1) + ".");
+      return;
+    }
+    const r = await api.share(body);
     if (r.ok) {
+      if (r.value.key) {
+        remember(kept(r.value.id, r.value.key));
+      }
       step.set("sent");
       store.shared.set(store.shared.get() + 1);
     } else {
@@ -179,9 +236,19 @@ export function shareSheet(scope: Scope, store: Store, preset: string, api: Comm
     }
   };
   const label = (text: string) => h("div", { class: "q", text });
+  const intro = h("div", { class: "news-text" });
+  scope.add(mode.watch(() => {
+    const s = chosen();
+    intro.textContent = s ? `Update your shared \u201c${s.name}\u201d with the settings of \u201c${preset}\u201d. It `
+      + "keeps its place in the list and how often it was added."
+      : `Share \u201c${preset}\u201d with other pilots. It's public at once: anyone can add it to their presets.`;
+  }));
+  const sendText = new Value("Share");
+  scope.add(mode.watch(() => sendText.set(chosen() ? "Update" : "Share")));
   const form = at(h("div", null,
-    h("div", { class: "news-text", text: `Share “${preset}” with other pilots. It's public at once: anyone can `
-                                         + "add it to their presets." }),
+    mineList.length ? label("Share as") : null,
+    mineList.length ? choice(scope, [NEW].concat(mineList.map(labelOf)), mode) : null,
+    intro,
     label("Name"),
     h("div", { class: "fieldrow" }, textField(scope, store.host, { placeholder: "The preset's name", value: name,
                                                                   accepts: presetChar, max: PRESET_NAME_MAX })),
@@ -191,19 +258,22 @@ export function shareSheet(scope: Scope, store: Store, preset: string, api: Comm
     h("div", { class: "fieldrow" }, textField(scope, store.host, { placeholder: "What it's for, in a sentence",
                                                                   value: description, max: 300 })),
     label("What it changes from the mod's defaults (as saved)"), changes,
-    h("div", { class: "news-text small", text: "Sent: this preset's haze, sky and cloud settings, the name, author and "
-                                               + "description above, and the mod's version. Your weather radar settings "
-                                               + "stay with you, and your IP address isn't stored." }),
-    at(h("div", { class: "actions" }, button(scope, "Share", "primary", () => void send()),
+    h("div", { class: "news-text small", text: "Published: the name, author and description above, this preset's "
+                                               + "settings and the mod's version. Your IP address isn't stored." }),
+    at(h("div", { class: "actions" }, button(scope, sendText, "primary", () => void send()),
       button(scope, "Close", "", close)), "ready"),
-    at(h("div", { class: "news-text", text: "Sharing ..." }), "sending")), "ready", "sending");
+    at(h("div", { class: "news-text", text: "Sending ..." }), "sending")), "ready", "sending");
   const reading = at(h("div", { class: "news-text", text: "Reading the preset ..." }), "reading");
   const missing = at(h("div", null,
     h("div", { class: "news-text", text: "The add-on in the sim didn't send the preset: sharing needs the add-on of this "
                                          + "version. Install the mod again." }),
     h("div", { class: "actions" }, button(scope, "Close", "", close))), "missing");
-  const sent = at(h("div", null,
-    h("div", { class: "news-text", text: "Shared: it's in Community Presets now. Thank you!" }),
+  const sentText = h("div", { class: "news-text" });
+  scope.add(updated.watch((u) => {
+    sentText.textContent = u ? "Updated: Community Presets has the new version now. Thank you!"
+      : "Shared: it's in Community Presets now. Thank you! This PC can update or unshare it later.";
+  }));
+  const sent = at(h("div", null, sentText,
     h("div", { class: "actions" }, button(scope, "Close", "primary", close))), "sent");
   return sheet(scope, "Share a Preset", close, reading, missing, form, sent, note);
 }

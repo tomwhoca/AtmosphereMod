@@ -271,13 +271,25 @@ export const UI_CSS = units(`
 @keyframes atmo-pulse { 0% { opacity: 1; } 50% { opacity: 0.25; } 100% { opacity: 1; } }
 
 /* a setting's row */
-.atmo-ui .row { display: flex; align-items: center; min-height: 46u; padding: 6u 0; border-top: 1px solid var(--b1); }
+.atmo-ui .row { display: flex; flex-wrap: wrap; align-items: center; min-height: 46u; padding: 6u 0;
+  border-top: 1px solid var(--b1); }
 .atmo-ui .row:first-child { border-top: none; }
-.atmo-ui .row .text { flex: 1 1 auto; min-width: 0; padding-right: 10u; }
+/* (the name takes what the control leaves: its own width never pushes the control to a line of its own) */
+.atmo-ui .row .text { flex: 1 1 0; min-width: 0; padding-right: 10u; }
 .atmo-ui .row .label { display: flex; align-items: center; }
-.atmo-ui .row .tip { font-size: 13u; color: var(--muted); margin-top: 4u; display: none; }
-.atmo-ui .row.open .tip { display: block; }
-.atmo-ui .row .tip p { margin: 0 0 5u; line-height: 1.4; }
+/* its description, on request: below the whole row, a panel in the page's colour, "In reality" and "This setting" */
+.atmo-ui .row > .tip { display: none; flex: 1 1 100%; margin: 8u 0 4u; padding: 12u 14u; border-radius: 14u;
+  font-size: 13u; color: var(--text-2); background: rgba(var(--acc), 0.09); }
+.atmo-ui .row.open > .tip { display: block; }
+.atmo-ui .tip .tpart + .tpart { margin-top: 10u; }
+.atmo-ui .tip .tk { margin-bottom: 3u; font-family: var(--f-med); font-size: 11u; letter-spacing: 0.04em;
+  color: rgb(var(--acc-mark)); }
+.atmo-ui .tip p { margin: 0; line-height: 1.45; }
+/* (not .exp: that's the experimental mark beside a name, with its own margin) */
+.atmo-ui .tip .tk.tk-exp { color: rgb(var(--exp)); }
+.atmo-ui .row.open .icon-btn.info { color: rgb(var(--acc-mark)); background: rgba(var(--acc), 0.16); }
+/* (the reset beside the info icon, only while the setting differs from its default) */
+.atmo-ui .row .label .icon-btn.reset.faded { display: none; }
 .atmo-ui .row.off { opacity: 0.42; }
 /* why a greyed setting has no effect now (controls.ts blocked) */
 .atmo-ui .row .why { font-size: 12u; color: var(--text-2); margin-top: 2u; }
@@ -310,11 +322,11 @@ export const UI_CSS = units(`
   border-radius: 16u; cursor: pointer; color: var(--text-2); background: var(--fill); }
 .atmo-ui .sbtn svg { width: 14u; height: 14u; }
 .atmo-ui .sbtn:hover { color: var(--text); background: rgba(var(--acc), 0.18); }
-/* (the bar as wide as its control leaves it: 270u less the reset, the two buttons and their margins; set here, so the
+/* (the bar as wide as its control leaves it: 256u less the two buttons and their margins; set here, so the
    copy of the text on the fill can be as wide without measuring: a folded section measured 0, and the engine rounds
    the fill to whole pixels, which a copy sized from the fill would multiply) */
-.atmo-ui { --barw: 168u; }
-.atmo-ui.h { --barw: 208u; }
+.atmo-ui { --barw: 184u; }
+.atmo-ui.h { --barw: 224u; }
 .atmo-ui .bar { position: relative; flex: 0 0 auto; width: var(--barw); height: 32u; cursor: pointer; overflow: hidden;
   border-radius: 16u; background: var(--fill);
   background-image: linear-gradient(90deg, var(--tick) 0u, var(--tick) 1u, rgba(0, 0, 0, 0) 1u);
@@ -327,14 +339,15 @@ export const UI_CSS = units(`
   pointer-events: none; }
 .atmo-ui .btext.on { color: var(--on-acc); left: 0; width: var(--barw); }  /* (centred where the other is) */
 .atmo-ui .bclip { position: absolute; left: 0; top: 0; bottom: 0; overflow: hidden; pointer-events: none; }
-.atmo-ui .control { display: flex; align-items: center; flex: 0 0 auto; width: 270u; }
-.atmo-ui .control.switchctl { justify-content: flex-end; }
-.atmo-ui .control .icon-btn.reset { margin-left: 6u; }
+.atmo-ui .control { display: flex; align-items: center; flex: 0 0 auto; width: 256u; }
+/* (a switch takes only its own width: the name has the rest) */
+.atmo-ui .control.switchctl { justify-content: flex-end; width: auto; }
 /* an experimental setting's mark */
 .atmo-ui .named { display: inline-flex; align-items: center; }
 .atmo-ui .exp { display: inline-flex; margin-left: 6u; color: rgb(var(--exp)); }
 .atmo-ui .exp svg { width: 14u; height: 14u; }
-.atmo-ui.h .control { width: 310u; }
+.atmo-ui.h .control { width: 296u; }
+.atmo-ui.h .control.switchctl { width: auto; }
 /* buttons: pills; the main one ink, the others a soft fill */
 .atmo-ui .btn { display: inline-flex; align-items: center; justify-content: center; height: 34u; padding: 0 16u;
   border-radius: 17u; cursor: pointer; font-family: var(--f-med); font-size: 13u; color: var(--text);
@@ -350,6 +363,8 @@ export const UI_CSS = units(`
 .atmo-ui .tag { display: inline-block; font-family: var(--f-med); font-size: 10u; letter-spacing: 0.05em;
   color: var(--text-2); padding: 2u 8u; border-radius: 9u; background: var(--fill); white-space: nowrap; }
 .atmo-ui .tag.unsaved { color: rgb(var(--dawn)); background: rgba(var(--dawn), 0.14); }
+/* (shared from this PC) */
+.atmo-ui .tag.mine { margin-left: 6u; color: rgb(var(--acc-mark)); background: rgba(var(--acc), 0.14); }
 .atmo-ui .dot { display: inline-block; width: 8u; height: 8u; border-radius: 4u; margin-right: 7u; flex: 0 0 auto; }
 .atmo-ui .dot.ok { background: rgb(var(--ok)); }
 .atmo-ui .dot.wait { background: rgb(var(--dawn)); }

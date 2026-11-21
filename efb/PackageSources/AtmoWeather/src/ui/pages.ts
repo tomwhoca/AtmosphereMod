@@ -271,7 +271,7 @@ function depiction(store: Store, d: Decoded | undefined): { big: string; sub: st
     ? `Anchored to the reported layers near stations${radius ? `, within ${radius}` : ""} (live weather only).`
     : `The sim's own layers${store.raw("C0") > 0 ? ", in the mod's lighting" : ""}.`;
   if (!(store.raw("T0") > 0)) {
-    return { big: reported, sub: "Reported visibility, in the sim's own haze: Mod atmosphere is off.", clouds };
+    return { big: reported, sub: "Reported visibility, in the sim's own haze: Mod Atmosphere is off.", clouds };
   }
   if (!(store.raw("T13") > 0)) {
     return { big: reported, sub: "Reported visibility; the haze is your manual settings, not from the METAR.", clouds };
@@ -321,7 +321,7 @@ export function settingsPage(scope: Scope, store: Store, tabs: TabSpec[], fog = 
     page.appendChild(fogNotice(scope, store));
   }
   // (a card per group, every setting in view: no folded sections, the user's wish; a group without a name is a
-  // main switch alone, as Mod clouds: a tile in the page's colour)
+  // main switch alone, as Mod Clouds: a tile in the page's colour)
   for (const tab of tabs) {
     if (!tab.name && tab.settings.length === 1 && tab.settings[0].kind === "switch") {
       page.appendChild(h("div", { class: "tiles" }, masterTile(scope, store, tab.settings[0])));
@@ -351,14 +351,14 @@ export function fogNotice(scope: Scope, store: Store): HTMLElement {
   return el;
 }
 
-/** The Sky & Haze page's groups (Mod atmosphere, Haze, Manual Haze, Colours) and the Clouds page's (Mod clouds,
+/** The Sky & Haze page's groups (Mod Atmosphere, Haze, Manual Haze, Colours) and the Clouds page's (Mod clouds,
  * Sunlight, Shape, Weather). */
 /** Each group's mark. */
 const SECTION_ICON: Record<string, string> = {
   "Haze": "haze", "Manual Haze": "sliders", "Colours": "palette", "Sunlight": "sun", "Shape": "clouds", "Weather": "rain",
 };
 
-/** A page's main switch (Mod atmosphere, Mod clouds) as a tile in the page's colour: on or off in large, what that
+/** A page's main switch (Mod Atmosphere, Mod Clouds) as a tile in the page's colour: on or off in large, what that
  * means now in a line, its description on request. */
 function masterTile(scope: Scope, store: Store, spec: Spec): HTMLElement {
   const sky = spec.key === "T0";

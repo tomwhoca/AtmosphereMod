@@ -82,7 +82,7 @@ export const TABS: TabSpec[] = [
     name: "",
     settings: [
       {
-        kind: "switch", key: "T0", label: "Mod atmosphere",
+        kind: "switch", key: "T0", label: "Mod Atmosphere",
         tip: "Real air is never perfectly clear. A layer of haze near the ground softens the distance and turns "
           + "far hills blue-grey, the sky above it deepens to blue, and its colours shift through the day with "
           + "the sun.\nThis switch turns on the mod's atmosphere: haze that follows the weather reports as you "
@@ -197,7 +197,7 @@ export const TABS: TabSpec[] = [
     name: "",
     settings: [
       {
-        kind: "switch", key: "C0", label: "Mod clouds",
+        kind: "switch", key: "C0", label: "Mod Clouds",
         tip: "Real clouds owe their look to how sunlight travels through them and to how dense they are: rims that "
           + "light up near the sun, a coloured ring around your shadow, a soft glow from within, solid cores and "
           + "thick fog when you fly into one.\nThis switch turns on the mod's way of drawing clouds: their light "
@@ -367,7 +367,9 @@ export const TABS: TabSpec[] = [
         tip: "A thunderstorm grows from a cumulus into a towering cumulonimbus that reaches the top of the weather "
           + "layer, the tropopause, and spreads out there into a flat anvil.\nGrows such storms where a station "
           + "nearby reports thunder or CB/TCU, or where the sim's rain is very heavy; each lives 45–80 minutes. "
-          + "They're for the eyes only, with no turbulence or other effect on your flight. Live weather only.",
+          + "They're for the eyes only, with no turbulence or other effect on your flight. Live weather only."
+          + "\nThunderstorms are a highly experimental feature. For now, they're just an experiment to see what's "
+          + "possible in cloud and weather depiction.",
       },
     ],
   },

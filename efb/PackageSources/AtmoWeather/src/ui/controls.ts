@@ -348,7 +348,7 @@ TABS.forEach((t) => t.settings.forEach((s) => SPECS.set(s.key, s)));
  * METAR (T13); a setting whose `needs` is at 0, along the chain (Cloud bases needs Solid clouds, which needs Mod
  * clouds). */
 export function blocked(store: Store, spec: Spec): string {
-  // (the chain first: with Mod atmosphere off, that's the reason, not Haze from METAR)
+  // (the chain first: with Mod Atmosphere off, that's the reason, not Haze from METAR)
   const need = spec.needs;
   if (need) {
     const other = SPECS.get(need);
@@ -407,22 +407,54 @@ function setClass(el: HTMLElement, cls: string): void {
   }
 }
 
-/** A setting's row: watches its setting (and those it depends on), sends its changes. */
+/** The row whose description is open: one at a time (another's opening closes it). */
+let openRow: HTMLElement | undefined;
+
+/** A row's description open or closed by its info icon (the row's "open"; theme.ts shows it below the row). */
+export function toggleTip(row: HTMLElement): void {
+  const open = !row.classList.contains("open");
+  if (open && openRow && openRow !== row) {
+    openRow.classList.remove("open");
+  }
+  if (open) {
+    row.classList.add("open");
+  } else {
+    row.classList.remove("open");
+  }
+  openRow = open ? row : undefined;
+}
+
+/** A description as a panel: its paragraphs headed, when it's a setting's (what happens in reality, then what the
+ * setting does: every setting's tip is written so; an experimental one's third, what that means). */
+export function tipPanel(text: string, experimental = false): HTMLElement {
+  const paras = text.split("\n");
+  const heads = paras.length === 2 || (experimental && paras.length === 3)
+    ? ["In reality", "This setting", "Experimental"] : [];
+  return h("div", { class: "tip" }, ...paras.map((para, i) => h("div", { class: "tpart" },
+    heads[i] ? h("div", { class: `tk${i === 2 ? " tk-exp" : ""}`, text: heads[i] }) : null, h("p", { text: para }))));
+}
+
+/** A setting's row: its name with the info and reset icons, its control at the right, its description (on
+ * request) below the whole row. Watches its setting (and those it depends on), sends its changes. */
 export function settingRow(scope: Scope, store: Store, spec: Spec): HTMLElement {
-  // (a description in paragraphs, split at line breaks: what happens in reality, then what the setting does)
-  const tip = h("div", { class: "tip" }, ...spec.tip.split("\n").map((para) => h("p", { text: para })));
-  const info = h("div", { class: "icon-btn", title: "What it does" }, icon("info"));
+  const tip = tipPanel(spec.tip, !!spec.experimental);
+  const info = h("div", { class: "icon-btn info", title: "What it does" }, icon("info"));
   const reset = h("div", { class: "icon-btn reset", title: "Back to the default" }, icon("reset"));
   const why = h("div", { class: "why" });
   const row = h("div", { class: "row" },
-    h("div", { class: "text" }, h("div", { class: "label" }, labelOf(spec), info), why, tip));
-  scope.listen(info, "click", () => row.classList.toggle("open"));
+    h("div", { class: "text" }, h("div", { class: "label" }, labelOf(spec), info, reset), why));
+  scope.listen(info, "click", () => toggleTip(row));
   scope.listen(reset, "click", () => store.set(spec.key, store.defaultOf(spec.key)));
+  scope.add(() => {
+    if (openRow === row) {
+      openRow = undefined;
+    }
+  });
 
   const refresh: (() => void)[] = [];
   if (spec.kind === "switch") {
     const on = new Value(false);
-    row.appendChild(h("div", { class: "control switchctl" }, reset, h("span", { class: "spacer" }),
+    row.appendChild(h("div", { class: "control switchctl" },
                       switchEl(scope, on, () => store.set(spec.key, on.get() ? 0 : 1))));
     refresh.push(() => on.set(store.raw(spec.key) > 0));
   } else {
@@ -434,7 +466,7 @@ export function settingRow(scope: Scope, store: Store, spec: Spec): HTMLElement 
       display.set(d);
       store.set(s.key, s.toRaw(d), !final);
     });
-    row.appendChild(h("div", { class: "control" }, bar, reset));
+    row.appendChild(h("div", { class: "control" }, bar));
     refresh.push(() => {
       if (dragging) {
         return;  // (the bar shows the drag's own value, not its echo through the raw units)
@@ -457,6 +489,7 @@ export function settingRow(scope: Scope, store: Store, spec: Spec): HTMLElement 
       row.style.display = display;
     }
   });
+  row.appendChild(tip);
   const run = () => refresh.forEach((f) => f());
   scope.add(store.state.watch(run));
   // (its own setting, and those its effect depends on: a change there redraws these rows only)

@@ -2,7 +2,7 @@
 restoring, removing or editing a preset. Uses the admin key in server/presets/.admin-token (git-ignored; never print it).
 
     python tools/presets_admin.py                     # every preset, newest first
-    python tools/presets_admin.py hidden | public | removed
+    python tools/presets_admin.py hidden | public | unshared | removed
     python tools/presets_admin.py show <id>           # one preset, with its values against the mod's defaults
     python tools/presets_admin.py hide <id>           # out of the list until restored
     python tools/presets_admin.py restore <id>
@@ -76,7 +76,7 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--local", action="store_true")
     a = ap.parse_args(argv)
     base, key = (LOCAL if a.local else LIVE), token(a.local)
-    if a.what in ("all", "public", "hidden", "removed", "show"):
+    if a.what in ("all", "public", "hidden", "unshared", "removed", "show"):
         res = call(base, key, "GET", f"/v1/admin/presets?status={'all' if a.what == 'show' else a.what}")
         presets = res["presets"]
         if a.what == "show":

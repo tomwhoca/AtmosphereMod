@@ -5,7 +5,7 @@
 
 import { OWN_KEYS, queryPresets } from "../PackageSources/AtmoWeather/src/community";
 import { DEFAULTS } from "../PackageSources/AtmoWeather/src/defaults";
-import type { Answer, CommunityApi, ListPage, SharedPreset, VersionCount }
+import type { Answer, CommunityApi, ListPage, Shared, SharedPreset, VersionCount }
   from "../PackageSources/AtmoWeather/src/community";
 import type { Transport } from "../PackageSources/AtmoWeather/src/report";
 import type { AddonState, Host, Panel } from "../PackageSources/AtmoWeather/src/ui/host";
@@ -374,6 +374,7 @@ function harnessCommunity(): CommunityApi {
     created: Date.now() - (5 + i) * day, values: { T0: 1, T3: 3 + i, C0: 1, C16: 0.8 + i / 10 } }));
   presets.forEach((p) => { p.values = full(p.version, p.values); });
   const wait = <T>(v: T) => new Promise<T>((resolve) => setTimeout(() => resolve(v), 400));
+  const keys = new Map<string, string>();
   return {
     list: (query) => {
       log(`Community Presets: list ${JSON.stringify(query)}`);
@@ -393,11 +394,38 @@ function harnessCommunity(): CommunityApi {
     share: (p) => {
       log(`Community Presets: share "${p.name}" by ${p.author} (${Object.keys(p.values).length} values)`);
       if (!p.author.trim()) {
-        return wait<Answer<string>>({ ok: false, error: "author: needed" });
+        return wait<Answer<Shared>>({ ok: false, error: "author: needed", status: 400 });
       }
       const id = `h${Date.now().toString(36)}`;
+      const key = `k${Math.random().toString(36).slice(2, 14)}`;
+      keys.set(id, key);
       presets.unshift({ ...p, id, created: Date.now(), downloads: 0 });
-      return wait<Answer<string>>({ ok: true, value: id });
+      return wait<Answer<Shared>>({ ok: true, value: { id, key } });
+    },
+    // (as the server: the edit key the share gave, else 403; gone, 404)
+    update: (id, key, p) => {
+      log(`Community Presets: update ${id} "${p.name}"`);
+      const i = presets.findIndex((x) => x.id === id);
+      if (i < 0) {
+        return wait<Answer<true>>({ ok: false, error: "no such preset", status: 404 });
+      }
+      if (keys.get(id) !== key) {
+        return wait<Answer<true>>({ ok: false, error: "only the PC that shared it can change it", status: 403 });
+      }
+      presets[i] = { ...presets[i], ...p, updated: Date.now() };
+      return wait<Answer<true>>({ ok: true, value: true });
+    },
+    unshare: (id, key) => {
+      log(`Community Presets: unshare ${id}`);
+      const i = presets.findIndex((x) => x.id === id);
+      if (i < 0) {
+        return wait<Answer<true>>({ ok: false, error: "no such preset", status: 404 });
+      }
+      if (keys.get(id) !== key) {
+        return wait<Answer<true>>({ ok: false, error: "only the PC that shared it can change it", status: 403 });
+      }
+      presets.splice(i, 1);
+      return wait<Answer<true>>({ ok: true, value: true });
     },
     added: async (id) => {
       log(`Community Presets: added ${id}`);

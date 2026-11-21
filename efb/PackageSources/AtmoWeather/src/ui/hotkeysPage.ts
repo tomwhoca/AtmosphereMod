@@ -3,7 +3,7 @@
 // Default. Under them the add-on's note on the last change and other add-ons' keys that are the same.
 
 import { DEFAULT_HOTKEYS, HOTKEY_ACTIONS, hotkeyClashes, hotkeyNoteText, KEYS_ALLOWED, LEARN_SECONDS } from "../hotkeys";
-import { button, section, tileLabel } from "./controls";
+import { button, section, tileLabel, tipPanel, toggleTip } from "./controls";
 import { h, Scope, Value } from "./dom";
 import { icon } from "./icons";
 import { Store } from "./model";
@@ -17,7 +17,7 @@ export function hotkeysPage(scope: Scope, store: Store): HTMLElement {
   const rows = h("div");
   const refresh: (() => void)[] = [];
   for (const action of HOTKEY_ACTIONS) {
-    const info = h("div", { class: "icon-btn", title: "What it does" }, icon("info"));
+    const info = h("div", { class: "icon-btn info", title: "What it does" }, icon("info"));
     const keys = h("div", { class: "keys" });
     const changeText = new Value("Change");
     const change = button(scope, changeText, "small", () => store.learnHotkey(learning() === action.name ? "" : action.name),
@@ -26,10 +26,10 @@ export function hotkeysPage(scope: Scope, store: Store): HTMLElement {
     const dflt = action.default !== ""
       ? button(scope, "Default", "small", () => store.setHotkey(action.name, action.default), live) : null;
     const row = h("div", { class: "row hotkey" },
-      h("div", { class: "text" }, h("div", { class: "label" }, h("span", { text: action.label }), info),
-        h("div", { class: "tip", text: action.tip })),
-      h("div", { class: "hk" }, keys, h("div", { class: "btns" }, change, clear, dflt)));
-    scope.listen(info, "click", () => row.classList.toggle("open"));
+      h("div", { class: "text" }, h("div", { class: "label" }, h("span", { text: action.label }), info)),
+      h("div", { class: "hk" }, keys, h("div", { class: "btns" }, change, clear, dflt)),
+      tipPanel(action.tip));
+    scope.listen(info, "click", () => toggleTip(row));
     refresh.push(() => {
       const all = keysNow();
       const waiting = learning() === action.name;

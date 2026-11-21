@@ -199,7 +199,7 @@ check(spec("T16").metarOnly && !spec("T3").metarOnly && spec("T16").toDisplay(1)
     const same = changesFromDefault({ T3: DEFAULTS.T3, C16: DEFAULTS.C16 });
     check(same.lines.length === 0 && same.hidden === 0, "community: a preset like the defaults changes nothing");
     const c = changesFromDefault({ T0: 0, T3: DEFAULTS.T3, C16: 1.5, C37: 0, T2: 0.3 });
-    check(c.lines.join(" | ") === "Mod atmosphere: off | Solid clouds: 1.50" && c.hidden === 2,
+    check(c.lines.join(" | ") === "Mod Atmosphere: off | Solid clouds: 1.50" && c.hidden === 2,
           `community: changes in the settings' words and units, in the pages' order (${c.lines.join(" | ")}; ${c.hidden})`);
     // what a shared preset would change in the settings as they are: the shown ones by their text (not a float's
     // last digit), the ones it lacks at the defaults, unknown ones left out
@@ -210,7 +210,7 @@ check(spec("T16").metarOnly && !spec("T3").metarOnly && spec("T16").toDisplay(1)
     Object.assign(shared, { C16: 1.5, T0: 1, C40: 3 });
     delete shared.C9;  // (lacks Glory: at the default, as adding it fills it)
     const cc = changesFromCurrent(shared, (k) => (k === "C9" ? 2 : nowVals[k]));
-    check(cc.lines.join(" | ") === "Mod atmosphere: on (now off) | Glory: 0.5 (now 2.0) | Solid clouds: 1.50 (now 0.80)"
+    check(cc.lines.join(" | ") === "Mod Atmosphere: on (now off) | Glory: 0.5 (now 2.0) | Solid clouds: 1.50 (now 0.80)"
           && cc.hidden === 0, `community: changes from the current settings (${cc.lines.join(" | ")}; ${cc.hidden})`);
     const unchanged = changesFromCurrent(shared, (k) => (k === "C9" ? DEFAULTS.C9 : shared[k]));
     const hid = changesFromCurrent({ ...shared, C37: 0, C9: DEFAULTS.C9 }, (k) => shared[k] !== undefined ? shared[k] : DEFAULTS[k], "default");
@@ -225,6 +225,14 @@ check(spec("T16").metarOnly && !spec("T3").metarOnly && spec("T16").toDisplay(1)
           `community: a query's address (${path})`);
     check(pageCount(0, 10) === 1 && pageCount(10, 10) === 1 && pageCount(11, 10) === 2, "community: page count");
     check(SORTS.map((s) => s.by).join() === "new,added,name", "community: the sorts (no ratings)");
+    // the presets shared from this PC: their edit keys, read safely from the stored text
+    const { mySharesOf } = app.community;
+    const mineRead = mySharesOf(JSON.stringify({
+      abc123: { id: "abc123", key: "k1", name: "Dusk", author: "me", description: "d", local: "My dusk", at: 5 },
+      bad1: { id: "bad1", name: "no key" }, other: { id: "else", key: "k2" }, x: "not an object" }));
+    check(Object.keys(mineRead).join() === "abc123" && mineRead.abc123.local === "My dusk" && mineRead.abc123.key === "k1"
+          && JSON.stringify(mySharesOf("not json")) === "{}" && JSON.stringify(mySharesOf(undefined)) === "{}",
+          `community: this PC's shares, read safely (${JSON.stringify(mineRead)})`);
     const day = 86400000;
     const mk = (i, o) => ({ id: `p${i}`, name: `N${i}`, author: "a", description: "", version: "0.8.0", created: i * day,
                              downloads: 0, values: {}, ...o });

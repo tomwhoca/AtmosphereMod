@@ -1,8 +1,9 @@
 // Community Presets: the shared presets on the mod's server (server/presets, a Cloudflare Worker with a D1
 // database). Listing sends nothing but the request (a page of them, sorted, filtered by the version they were made
 // with, searched); sharing sends the preset's look (T and C values), its name, the author and description typed, and
-// the mod's version. Bodies as text/plain JSON (no CORS preflight in the tablet's browser); every answer is readable
-// JSON {ok, ...}. No SDK: the UI module and the tests use it.
+// the mod's version. A share's edit key (the server's answer) stays with this PC: it updates or unshares that preset,
+// and nothing else can. Bodies as text/plain JSON (no CORS preflight in the tablet's browser); every answer is
+// readable JSON {ok, ...}. No SDK: the UI module and the tests use it.
 
 import { DEFAULTS } from "./defaults";
 import { settingsInWords } from "./presets";
@@ -19,6 +20,8 @@ export interface SharedPreset {
   description: string;
   version: string;
   created: number;
+  /** When its owner last changed it (0: never). */
+  updated?: number;
   downloads: number;
   values: Record<string, number>;
 }
@@ -67,14 +70,59 @@ export interface NewPreset {
   values: Record<string, number>;
 }
 
-export type Answer<T> = { ok: true; value: T } | { ok: false; error: string };
+/** A request's answer: its value, or the server's words (and its status: 403 not the owner, 404 gone). */
+export type Answer<T> = { ok: true; value: T } | { ok: false; error: string; status?: number };
+
+/** A share's answer: its id, and the edit key that updates or unshares it. */
+export interface Shared {
+  id: string;
+  key: string;
+}
+
+/** A preset shared from this PC, as the app keeps it (MY_SHARES_KEY): the server's id and edit key, the name and
+ * texts it was shared with, the user's own preset it came from, and when. */
+export interface MyShare {
+  id: string;
+  key: string;
+  name: string;
+  author: string;
+  description: string;
+  /** The user's preset it was shared (last) from. */
+  local: string;
+  at: number;
+}
+/** Where the app keeps them (the host's stored data, as JSON {id: MyShare}). */
+export const MY_SHARES_KEY = "atmo-ui-shared";
+
+/** The presets shared from this PC, read safely from what's stored. */
+export function mySharesOf(stored: string | undefined): Record<string, MyShare> {
+  const out: Record<string, MyShare> = {};
+  try {
+    const v = JSON.parse(stored || "{}") as Record<string, Record<string, unknown>>;
+    for (const id of Object.keys(v)) {
+      const s = v[id] || {};
+      const text = (x: unknown) => (typeof x === "string" ? x : "");
+      if (typeof s.key === "string" && s.key && text(s.id) === id) {
+        out[id] = { id, key: s.key, name: text(s.name), author: text(s.author), description: text(s.description),
+                    local: text(s.local), at: typeof s.at === "number" ? s.at : 0 };
+      }
+    }
+  } catch (e) {
+    return {};
+  }
+  return out;
+}
 
 /** How the app reaches Community Presets (the harness: a stand-in, so nothing reaches the server). */
 export interface CommunityApi {
   list(query: ListQuery): Promise<Answer<ListPage>>;
   /** The versions the presets were made with, the most used first. */
   versions(): Promise<Answer<VersionCount[]>>;
-  share(preset: NewPreset): Promise<Answer<string>>;
+  share(preset: NewPreset): Promise<Answer<Shared>>;
+  /** The owner's new version (the edit key): name, author, description, version and values. */
+  update(id: string, key: string, preset: NewPreset): Promise<Answer<true>>;
+  /** Out of the list (the edit key). */
+  unshare(id: string, key: string): Promise<Answer<true>>;
   added(id: string): Promise<void>;
 }
 
@@ -129,7 +177,8 @@ async function call<T>(method: string, path: string, body: unknown, pick: (data:
     if (data && data.ok === true) {
       return { ok: true, value: pick(data) };
     }
-    return { ok: false, error: typeof data.error === "string" ? data.error : `the server answered ${response.status}` };
+    return { ok: false, error: typeof data.error === "string" ? data.error : `the server answered ${response.status}`,
+             status: response.status };
   } catch (e) {
     return { ok: false, error: "Community Presets can't be reached right now" };
   } finally {
@@ -147,7 +196,10 @@ export const WEB_COMMUNITY: CommunityApi = {
   versions: () => call("GET", "/v1/versions", undefined, (d) => ((d.versions as VersionCount[]) || []).map((v) => ({
     version: String(v.version), count: Number(v.count) || 0, keys: Array.isArray(v.keys) ? v.keys.map(String) : [],
   }))),
-  share: (preset) => call("POST", "/v1/presets", preset, (d) => String(d.id)),
+  share: (preset) => call("POST", "/v1/presets", preset, (d) => ({ id: String(d.id), key: String(d.key || "") })),
+  update: (id, key, preset) => call("POST", `/v1/presets/${encodeURIComponent(id)}/update`, { ...preset, key },
+                                    () => true as const),
+  unshare: (id, key) => call("POST", `/v1/presets/${encodeURIComponent(id)}/unshare`, { key }, () => true as const),
   added: async (id) => {
     await call("POST", `/v1/presets/${encodeURIComponent(id)}/download`, {}, () => true);
   },

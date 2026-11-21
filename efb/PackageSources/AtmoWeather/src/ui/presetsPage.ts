@@ -5,8 +5,8 @@
 // with, a page at a time; add one to your presets.
 
 import {
-  changesFromCurrent, CommunityApi, compatibleVersions, diffNote, diffShort, ListQuery, pageCount, QUERY_MAX,
-  sameSettings, settingsDiff, SharedPreset, SORTS, VersionCount,
+  changesFromCurrent, CommunityApi, compatibleVersions, diffNote, diffShort, ListQuery, MY_SHARES_KEY, MyShare,
+  mySharesOf, pageCount, QUERY_MAX, sameSettings, settingsDiff, SharedPreset, SORTS, VersionCount,
 } from "../community";
 import {
   missingText, NAME_RULE, PRESET_DEFAULT, PRESET_NAME_MAX, presetChar, presetName, sameName, settingsInWords,
@@ -25,7 +25,7 @@ const COMPATIBLE = "compatible", ALL_VERSIONS = "all";
 const SORT_PHRASE: Record<string, string> = { new: "Newest first", added: "Most added first", name: "A to Z" };
 
 export function presetsPage(scope: Scope, store: Store, focusName: Value<number>, community: CommunityApi,
-                            share: (name: string) => void, jump?: Value<string>): HTMLElement {
+                            share: (name: string, target?: string) => void, jump?: Value<string>): HTMLElement {
   const presets = (): string[] => (store.state.get() && store.state.get()!.presets) || [];
   const missingOf = (name: string): string[] => {
     const s = store.state.get();
@@ -146,8 +146,11 @@ export function presetsPage(scope: Scope, store: Store, focusName: Value<number>
   let shown = "";
   const render = () => {
     const s = store.state.get();
+    // (the presets shared from this PC, by the preset they came from: marked SHARED)
+    const mine = mySharesOf(store.host.load(MY_SHARES_KEY));
+    const sharedFrom = Object.keys(mine).map((id) => mine[id].local);
     const key = JSON.stringify([presets(), s && s.presetsMissing, store.preset, store.presetSaved, asking.get(),
-                                store.hasCommunity, notYet.get()]);
+                                store.hasCommunity, notYet.get(), sharedFrom]);
     if (key === shown) {
       return;
     }
@@ -164,6 +167,8 @@ export function presetsPage(scope: Scope, store: Store, focusName: Value<number>
       const missing = missingOf(n);
       const tag = current ? h("span", { class: `tag${store.presetSaved ? "" : " unsaved"}`,
                                         text: store.presetSaved ? "ACTIVE" : "ACTIVE, UNSAVED" }) : null;
+      const sharedTag = sharedFrom.some((l) => sameName(l, n))
+        ? h("span", { class: "tag mine", text: "SHARED", title: "Shared from this PC: Share updates it" }) : null;
       const lacks = missing.length > 0
         ? h("div", { class: "tip-line", text: `No value for ${missing.length} newer setting${missing.length === 1 ? "" : "s"}` })
         : null;
@@ -186,7 +191,8 @@ export function presetsPage(scope: Scope, store: Store, focusName: Value<number>
             store.remove(n);
           }, () => true, live));
       const row = h("div", { class: "row preset-row" },
-        h("div", { class: "text" }, h("div", { class: "label" }, h("span", { class: "pn", text: n }), tag), lacks),
+        h("div", { class: "text" }, h("div", { class: "label" }, h("span", { class: "pn", text: n }), tag, sharedTag),
+          lacks),
         actions);
       list.appendChild(row);
       if (asking.get() === n) {
@@ -221,7 +227,8 @@ export function presetsPage(scope: Scope, store: Store, focusName: Value<number>
   scope.add(store.state.watch(render));
   scope.add(asking.watch(render));
   scope.add(notYet.watch(render));
-  const shared = communityCard(scope, store, community);
+  scope.add(store.shared.watch(render));
+  const shared = communityCard(scope, store, community, presets, share);
   // (from Home's Community Presets: the card at the top of the page's view, again while its list loads and the page
   // grows, for 2 s at most and only until the page is scrolled by hand)
   if (jump && jump.get() === "community") {
@@ -255,7 +262,15 @@ export function presetsPage(scope: Scope, store: Store, focusName: Value<number>
  * the installed version; all, or one, the ones with other settings marked); it loads again after a share. Each
  * preset: its name and author, the version it was made with, how often it was added, its description, how its
  * settings differ from yours (if they do), what it would change in your settings (folded), Add to my presets. */
-function communityCard(scope: Scope, store: Store, api: CommunityApi): HTMLElement {
+function communityCard(scope: Scope, store: Store, api: CommunityApi, presets: () => string[],
+                       share: (name: string, target?: string) => void): HTMLElement {
+  /** The presets shared from this PC (their edit keys): read again with each page of the list. */
+  let mine: Record<string, MyShare> = {};
+  const forget = (id: string) => {
+    const all = mySharesOf(store.host.load(MY_SHARES_KEY));
+    delete all[id];
+    store.host.save(MY_SHARES_KEY, JSON.stringify(all));
+  };
   const list = h("div", { class: "shared-list" });
   const note = h("div", { class: "note" });
   const showNote = (t: string) => {
@@ -461,6 +476,7 @@ function communityCard(scope: Scope, store: Store, api: CommunityApi): HTMLEleme
             ? `None made with v${versionPick.get().slice(2)} any more.`
           : "Nothing shared yet: share one of yours with its Share button above." }));
       }
+      mine = mySharesOf(store.host.load(MY_SHARES_KEY));
       v.presets.forEach((p) => list.appendChild(entry(listScope, p)));
       const pages = pageCount(v.total, v.per);
       page = v.page;
@@ -541,14 +557,41 @@ function communityCard(scope: Scope, store: Store, api: CommunityApi): HTMLEleme
       store.addShared(p.name, p.values);
       void api.added(p.id);
     }, canAdd);
+    // (shared from this PC: update it from one of the user's presets, or unshare it)
+    const own = mine[p.id];
+    const update = own ? button(ls, "Update", "small", () => {
+      const from = presets().filter((n) => sameName(n, own.local))[0];
+      if (from) {
+        share(from, own.id);
+      } else {
+        showNote(`\u201c${own.local}\u201d, the preset it was shared from, isn't in Your Presets any more: use Share on `
+                 + `one of your presets and choose Update \u201c${own.name}\u201d there.`);
+      }
+    }) : null;
+    const unshare = own ? twoTaps(ls, "Unshare", "Unshare? Tap again", "danger small", () => {
+      void api.unshare(own.id, own.key).then((r) => {
+        if (!alive) {
+          return;
+        }
+        if (r.ok || r.status === 404 || r.status === 403) {
+          forget(own.id);
+          showNote(r.ok ? `Unshared: \u201c${own.name}\u201d is out of Community Presets.`
+            : `\u201c${own.name}\u201d was unshared or removed already.`);
+          store.shared.set(store.shared.get() + 1);
+        } else {
+          showNote(`Not unshared: ${r.error}.`);
+        }
+      });
+    }, () => true) : null;
     return h("div", { class: "shared" },
       h("div", { class: "label" }, h("span", { class: "pn", text: p.name }),
-        h("span", { class: "by", text: `by ${p.author}` })),
+        h("span", { class: "by", text: `by ${p.author}` }),
+        own ? h("span", { class: "tag mine", text: "YOURS", title: "Shared from this PC" }) : null),
       meta,
       p.description ? h("div", { class: "shared-desc", text: p.description }) : null,
       differs ? h("div", { class: "differs", text: differs }) : null,
       toggle, details,
-      h("div", { class: "btns" }, add));
+      h("div", { class: "btns" }, add, update, unshare));
   };
 
   // (a share from here: it's in the list now)

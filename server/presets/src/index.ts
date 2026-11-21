@@ -7,9 +7,12 @@
 //                                    1-50 (10)
 //   GET  /v1/versions                the versions public presets were made with, the newest first: how many each,
 //                                    and the settings they have
-//   POST /v1/presets                 share one: {name, author, description, version, values} (text/plain JSON)
+//   POST /v1/presets                 share one: {name, author, description, version, values} (text/plain JSON);
+//                                    answers {id, key}: the key updates or unshares it, and only it can
+//   POST /v1/presets/:id/update      {key, name, author, description, version, values}: the owner's new version
+//   POST /v1/presets/:id/unshare     {key}: out of the list (status unshared; the admin still sees it)
 //   POST /v1/presets/:id/download    count an "Add to my presets"
-//   GET  /v1/admin/presets?status=   (Authorization: Bearer ADMIN_TOKEN) hidden | public | removed | all
+//   GET  /v1/admin/presets?status=   (Authorization: Bearer ADMIN_TOKEN) hidden | public | unshared | removed | all
 //   POST /v1/admin/presets/:id       {action: restore | hide | remove | edit, name?, description?}
 //
 // No IP address is stored: for the share limit a client is a keyed hash of its address and the day (HMAC with the
@@ -39,6 +42,12 @@ export interface Env {
 
 /** Shares per client and day. */
 const SUBMISSIONS_PER_DAY = 5;
+/** Updates per client and day (an owner changing their shared presets). */
+const UPDATES_PER_DAY = 20;
+/** A share's edit key: this many characters from the id's alphabet. */
+const KEY_LENGTH = 24;
+/** What no longer counts as shared (for the same-settings check, and for an owner's changes). */
+const GONE = "('removed', 'unshared')";
 /** A page of the list: this many by default, at most PER_MAX. */
 const PER_DEFAULT = 10;
 const PER_MAX = 50;
@@ -83,10 +92,26 @@ function clientKey(env: Env, req: Request, day: string): Promise<string> {
   return hmac(env.SALT, `${ip}|${day}`);
 }
 
-function newId(): string {
+function randomText(length: number): string {
   const alphabet = "abcdefghjkmnpqrstuvwxyz23456789";
-  const bytes = crypto.getRandomValues(new Uint8Array(10));
+  const bytes = crypto.getRandomValues(new Uint8Array(length));
   return Array.from(bytes, (b) => alphabet[b % alphabet.length]).join("");
+}
+const newId = (): string => randomText(10);
+
+/** An edit key's keyed hash: what the database keeps of it. */
+const ownerHash = (env: Env, key: string): Promise<string> => hmac(env.SALT, `owner|${key}`);
+
+/** Two texts the same, compared in constant time. */
+function sameText(a: string, b: string): boolean {
+  if (a.length !== b.length) {
+    return false;
+  }
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) {
+    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return diff === 0;
 }
 
 async function bodyOf(req: Request): Promise<unknown> {
@@ -99,11 +124,11 @@ async function bodyOf(req: Request): Promise<unknown> {
 
 interface Row {
   id: string; name: string; author: string; description: string; version: string; vals: string;
-  status: string; created: number; downloads: number;
+  status: string; created: number; downloads: number; owner_hash: string; updated: number;
 }
 const publicView = (r: Row) => ({
   id: r.id, name: r.name, author: r.author, description: r.description, version: r.version,
-  created: r.created, downloads: r.downloads, values: JSON.parse(r.vals),
+  created: r.created, updated: r.updated, downloads: r.downloads, values: JSON.parse(r.vals),
 });
 
 async function listPublic(env: Env, url: URL): Promise<Response> {
@@ -168,20 +193,91 @@ async function share(env: Env, req: Request): Promise<Response> {
     return fail(`at most ${SUBMISSIONS_PER_DAY} presets a day: please try again tomorrow`, 429);
   }
   const valsHash = await hmac("values", canonical(p.values));
-  const same = await env.DB.prepare("SELECT name FROM presets WHERE vals_hash = ? AND status != 'removed' LIMIT 1")
+  const same = await env.DB.prepare(`SELECT name FROM presets WHERE vals_hash = ? AND status NOT IN ${GONE} LIMIT 1`)
     .bind(valsHash).first<{ name: string }>();
   if (same) {
     return fail(`the same settings are shared already, as "${same.name}"`, 409);
   }
   const id = newId();
+  const key = randomText(KEY_LENGTH);
   await env.DB.batch([
-    env.DB.prepare("INSERT INTO presets (id, name, author, description, version, vals, vals_hash, created) "
-                   + "VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
-      .bind(id, p.name, p.author, p.description, p.version, JSON.stringify(p.values), valsHash, Date.now()),
+    env.DB.prepare("INSERT INTO presets (id, name, author, description, version, vals, vals_hash, created, owner_hash) "
+                   + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .bind(id, p.name, p.author, p.description, p.version, JSON.stringify(p.values), valsHash, Date.now(),
+            await ownerHash(env, key)),
     env.DB.prepare("INSERT INTO submissions (client, day, count) VALUES (?, ?, 1) "
                    + "ON CONFLICT (client, day) DO UPDATE SET count = count + 1").bind(client, day),
   ]);
-  return json({ ok: true, id });
+  return json({ ok: true, id, key });
+}
+
+/** The owner's preset, by its edit key: its row, or why not (404 gone, 403 not the key). */
+async function owned(env: Env, id: string, key: unknown): Promise<{ status: string } | Response> {
+  const row = await env.DB.prepare("SELECT status, owner_hash FROM presets WHERE id = ?").bind(id)
+    .first<{ status: string; owner_hash: string }>();
+  if (!row || row.status === "removed" || row.status === "unshared") {
+    return fail("no such preset", 404);
+  }
+  if (typeof key !== "string" || !key || !row.owner_hash || !sameText(row.owner_hash, await ownerHash(env, key))) {
+    return fail("only the PC that shared it can change it", 403);
+  }
+  return row;
+}
+
+/** The owner's new version of a shared preset: checked as a share is; its id, downloads and date stay. */
+async function update(env: Env, req: Request, id: string): Promise<Response> {
+  let body: unknown;
+  try {
+    body = await bodyOf(req);
+  } catch {
+    return fail("not a preset");
+  }
+  const mine = await owned(env, id, body && typeof body === "object" ? (body as Record<string, unknown>).key : undefined);
+  if (mine instanceof Response) {
+    return mine;
+  }
+  const checked = checkSubmission(body);
+  if (!checked.ok) {
+    return fail(checked.error);
+  }
+  const p = checked.preset;
+  const day = new Date().toISOString().slice(0, 10);
+  const client = await clientKey(env, req, `${day}|update`);
+  const used = await env.DB.prepare("SELECT count FROM submissions WHERE client = ? AND day = ?").bind(client, day)
+    .first<{ count: number }>();
+  if (used && used.count >= UPDATES_PER_DAY) {
+    return fail(`at most ${UPDATES_PER_DAY} updates a day: please try again tomorrow`, 429);
+  }
+  const valsHash = await hmac("values", canonical(p.values));
+  const same = await env.DB.prepare(`SELECT name FROM presets WHERE vals_hash = ? AND id != ? AND status NOT IN ${GONE} `
+                                    + "LIMIT 1").bind(valsHash, id).first<{ name: string }>();
+  if (same) {
+    return fail(`the same settings are shared already, as "${same.name}"`, 409);
+  }
+  await env.DB.batch([
+    env.DB.prepare("UPDATE presets SET name = ?, author = ?, description = ?, version = ?, vals = ?, vals_hash = ?, "
+                   + "updated = ? WHERE id = ?")
+      .bind(p.name, p.author, p.description, p.version, JSON.stringify(p.values), valsHash, Date.now(), id),
+    env.DB.prepare("INSERT INTO submissions (client, day, count) VALUES (?, ?, 1) "
+                   + "ON CONFLICT (client, day) DO UPDATE SET count = count + 1").bind(client, day),
+  ]);
+  return json({ ok: true });
+}
+
+/** The owner takes a shared preset out of the list (kept as unshared: the admin still sees it). */
+async function unshare(env: Env, req: Request, id: string): Promise<Response> {
+  let key: unknown;
+  try {
+    key = ((await bodyOf(req)) as Record<string, unknown>).key;
+  } catch {
+    key = undefined;
+  }
+  const mine = await owned(env, id, key);
+  if (mine instanceof Response) {
+    return mine;
+  }
+  await env.DB.prepare("UPDATE presets SET status = 'unshared', updated = ? WHERE id = ?").bind(Date.now(), id).run();
+  return json({ ok: true });
 }
 
 async function download(env: Env, id: string): Promise<Response> {
@@ -265,9 +361,10 @@ export default {
       if (path === "/v1/presets" && req.method === "POST") {
         return await share(env, req);
       }
-      let m = /^\/v1\/presets\/([a-z0-9]{6,16})\/download$/.exec(path);
+      let m = /^\/v1\/presets\/([a-z0-9]{6,16})\/(download|update|unshare)$/.exec(path);
       if (m && req.method === "POST") {
-        return await download(env, m[1]);
+        return m[2] === "download" ? await download(env, m[1])
+          : m[2] === "update" ? await update(env, req, m[1]) : await unshare(env, req, m[1]);
       }
       if (path.startsWith("/v1/admin/")) {
         if (!isAdmin(env, req)) {

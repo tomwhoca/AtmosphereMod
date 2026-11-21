@@ -189,9 +189,11 @@ export function mount(root: HTMLElement, host: Host): () => void {
   };
   // (Community Presets: the server, or the host's stand-in; the preset a Share button asked to share)
   const community = host.communityApi || WEB_COMMUNITY;
-  let sharing = "";
-  const openShare = (name: string) => {
+  let sharing = "", sharingTarget = "";
+  /** The share sheet for one of the user's presets (`target`: a shared preset of this PC's to update). */
+  const openShare = (name: string, target = "") => {
     sharing = name;
+    sharingTarget = target;
     sheetName.set("share");
   };
 
@@ -292,7 +294,7 @@ export function mount(root: HTMLElement, host: Host): () => void {
     }
     sheetScope = new Scope();
     shown = name === "news" ? whatsNewSheet(sheetScope, closeNews, (url) => host.openUrl(url))
-      : name === "share" ? shareSheet(sheetScope, store, sharing, community, () => sheetName.set(""))
+      : name === "share" ? shareSheet(sheetScope, store, sharing, community, () => sheetName.set(""), sharingTarget)
       : reportSheet(sheetScope, store, report);
     dragToScroll(sheetScope, shown.body);
     ui.appendChild(shown.el);

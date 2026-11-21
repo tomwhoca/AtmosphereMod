@@ -134,7 +134,8 @@ def api_tests() -> None:
               "api: an empty list, open to any origin")
         st, res, _ = call("POST", "/v1/presets", {"name": "Evening haze", "author": "tomwhoca", "description": "Soft.",
                                                   "version": "0.8.0", "values": values}, ip="1.1.1.1")
-        check(st == 200 and res["ok"] and len(res["id"]) == 10, f"api: shared ({res})")
+        check(st == 200 and res["ok"] and len(res["id"]) == 10 and len(res.get("key", "")) == 24,
+              f"api: shared, with an edit key ({res})")
         pid = res["id"]
         st, res, _ = call("GET", "/v1/presets")
         p = res["presets"][0] if res["presets"] else {}
@@ -176,6 +177,32 @@ def api_tests() -> None:
               "api: no ratings (an old sort=rated lists the newest); the lists aren't cached")
         check(call("POST", f"/v1/presets/{pid}/rate", {"stars": 5})[0] == 404 and
               call("POST", f"/v1/presets/{pid}/report", {})[0] == 404, "api: no ratings or reports any more")
+        # the owner: update and unshare with the edit key (only)
+        mine = {"name": "Zeta dusk", "author": "owner", "description": "First.", "version": "0.8.0",
+                "values": {**values, "T3": 15}}
+        st, res, _ = call("POST", "/v1/presets", mine, ip="4.4.4.4")
+        zid, zkey = res["id"], res["key"]
+        listed = lambda: {x["id"]: x for x in call("GET", "/v1/presets?per=50")[1]["presets"]}  # noqa: E731
+        new = {**mine, "name": "Zeta dusk v2", "description": "Second.", "values": {**values, "T3": 16}}
+        check(call("POST", f"/v1/presets/{zid}/update", {**new, "key": "x" * 24})[0] == 403
+              and call("POST", f"/v1/presets/{zid}/update", new)[0] == 403
+              and call("POST", f"/v1/presets/{zid}/unshare", {"key": "nope"})[0] == 403
+              and listed()[zid]["name"] == "Zeta dusk", "api: changes need the edit key")
+        st, res, _ = call("POST", f"/v1/presets/{zid}/update", {**new, "key": zkey}, ip="4.4.4.5")
+        z = listed()[zid]
+        check(st == 200 and z["name"] == "Zeta dusk v2" and z["description"] == "Second." and z["values"]["T3"] == 16
+              and z["updated"] > 0 and z["created"] < z["updated"], f"api: updated by its owner ({res})")
+        check(call("POST", f"/v1/presets/{zid}/update", {**new, "values": values, "key": zkey})[0] == 409
+              and call("POST", f"/v1/presets/{zid}/update", {**new, "author": " ", "key": zkey})[0] == 400
+              and call("POST", f"/v1/presets/{zid}/update", {**new, "key": zkey})[0] == 200,
+              "api: an update is checked as a share is (the same settings as another, no author); its own: fine")
+        st, res, _ = call("POST", f"/v1/presets/{zid}/unshare", {"key": zkey})
+        check(st == 200 and zid not in listed() and call("POST", f"/v1/presets/{zid}/update", {**new, "key": zkey})[0] == 404
+              and call("POST", f"/v1/presets/{zid}/unshare", {"key": zkey})[0] == 404
+              and [x["status"] for x in call("GET", "/v1/admin/presets?status=unshared", token=token)[1]["presets"]]
+              == ["unshared"], "api: unshared by its owner: out of the list, the admin still sees it")
+        check(call("POST", "/v1/presets", {**new, "name": "Zeta again"}, ip="4.4.4.6")[0] == 200,
+              "api: an unshared preset's settings can be shared again")
         check(call("GET", "/v1/admin/presets")[0] == 403 and call("GET", "/v1/admin/presets", token="x" * 48)[0] == 403,
               "api: admin needs the token")
         st, res, _ = call("POST", f"/v1/admin/presets/{pid}", {"action": "hide"}, token=token)
