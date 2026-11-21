@@ -46,31 +46,41 @@ export function toolsPage(scope: Scope, store: Store, theme: Value<string>, open
                                         modOn: s ? !!s.enabled : undefined }));
     })));
 
-  const reloadKey = h("span", { class: "muted" });
+  // ---- the settings file, and what's installed: rows like the Hotkeys page's, a name with a line under it, and the
+  // button or the value at the right
+  const line = (name: string, desc: HTMLElement | null, end: HTMLElement) =>
+    h("div", { class: "row line" }, h("div", { class: "text" }, h("div", { class: "label", text: name }), desc), end);
+  const reloadDesc = h("div", { class: "rdesc" });
   scope.add(store.state.watch((s) => {
     const k = s && s.hotkeys ? s.hotkeys.reload : "Ctrl+Shift+F10";
-    reloadKey.textContent = k ? `(also ${k})` : "";
+    reloadDesc.textContent = `After editing it by hand.${k ? ` Key: ${k}` : ""}`;
   }));
   const allKeys = TABS.reduce<string[]>((all, t) => all.concat(t.settings.map((s) => s.key)), []);
   const file = section("Settings", "sliders",
-    h("div", { class: "muted", text: "The settings live in tunables.ini. Read it again after editing it by hand; it "
-                                     + "also reloads the mod's shaders." }),
-    h("div", { class: "actions" }, button(scope, "Reload tunables.ini", "", () => store.reload(), live), reloadKey),
-    h("div", { class: "actions" },
-      twoTaps(scope, "Reset all settings", "Every setting to its default? Tap again", "danger",
-              () => store.reset(allKeys), () => true, live)));
+    line("Reload tunables.ini", reloadDesc, button(scope, "Reload", "small", () => store.reload(), live)),
+    line("Reset all settings", h("div", { class: "rdesc", text: "Every setting back to its default." }),
+         twoTaps(scope, "Reset", "Tap again", "small danger", () => store.reset(allKeys), () => true, live)));
 
-  const about = h("table", { class: "kv" });
-  const fill = () => {
-    about.innerHTML = "";
-    const s = store.state.get();
-    const row = (k: string, v: string) => about.appendChild(h("tr", null, h("td", { text: k }), h("td", { text: v })));
-    row("EFB app", store.host.version);
-    row("Add-on in the sim", s ? s.version || "an older one" : "not connected");
-    row("METAR link", store.link.get() || "-");
-  };
-  scope.add(store.state.watch(fill));
-  scope.add(store.link.watch(fill));
+  const appVal = h("div", { class: "val", text: store.host.version });
+  const addonVal = h("div", { class: "val" });
+  scope.add(store.state.watch((s) => {
+    addonVal.textContent = !s ? "Not connected" : s.version || "An older one";
+    addonVal.className = `val${s && s.version ? "" : " none"}`;
+  }));
+  // (the METAR link as on Home: live while it polls, failed, or not started)
+  const linkVal = h("div", { class: "val" });
+  scope.add(store.link.watch((l) => {
+    const polling = /^running/.test(l) && !/failed/.test(l);
+    const failed = /failed: /.test(l) || /^CommBus unavailable/.test(l);
+    linkVal.innerHTML = "";
+    if (polling) {
+      linkVal.appendChild(h("span", { class: "dot" }));
+    }
+    linkVal.appendChild(document.createTextNode(polling ? "Live" : failed ? "Failed" : "Not started"));
+    linkVal.className = `val${polling ? "" : failed ? " bad" : " none"}`;
+  }));
+  const about = section("About", "info",
+    line("EFB app", null, appVal), line("Add-on", null, addonVal), line("METAR link", null, linkVal));
   return h("div", null, h("div", { class: "tiles" }, report, news, bug, appearance),
-           h("div", { class: "cols" }, file, section("About", "info", about)));
+           h("div", { class: "cols" }, file, about));
 }

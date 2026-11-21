@@ -486,8 +486,15 @@ export const UI_CSS = units(`
 /* the performance report */
 .atmo-ui .progress { height: 8u; border-radius: 4u; background: var(--fill); overflow: hidden; margin: 10u 0; }
 .atmo-ui .progress > div { height: 100%; border-radius: 4u; background: rgb(var(--acc)); }
-.atmo-ui table.kv { width: 100%; border-collapse: collapse; font-size: 13u; }
-.atmo-ui table.kv td { padding: 6u 0; border-top: 1px solid var(--b1); }
-.atmo-ui table.kv tr:first-child td { border-top: none; }
-.atmo-ui table.kv td + td { text-align: right; color: var(--text-2); }
+
+/* the Tools page's Settings and About cards: a name with a line under it, the button or the value at the right */
+.atmo-ui .row.line { min-height: 48u; padding: 9u 0; }
+.atmo-ui .row.line > .btn, .atmo-ui .row.line > .val { flex: 0 0 auto; }
+.atmo-ui .row .rdesc { margin-top: 3u; font-size: 12u; line-height: 1.4; color: var(--text-2); }
+.atmo-ui .row .val { display: flex; align-items: center; height: 28u; padding: 0 12u; border-radius: 14u;
+  font-family: var(--f-med); font-size: 13u; color: var(--text); background: var(--fill); }
+.atmo-ui .row .val.none { font-family: var(--f-reg); color: var(--muted); }
+.atmo-ui .row .val.bad { color: rgb(var(--storm)); background: rgba(var(--storm), 0.12); }
+.atmo-ui .row .val .dot { width: 7u; height: 7u; border-radius: 4u; margin-right: 7u; background: rgb(var(--aurora));
+  -webkit-animation: atmo-pulse 1.6s ease-in-out infinite; animation: atmo-pulse 1.6s ease-in-out infinite; }
 `);

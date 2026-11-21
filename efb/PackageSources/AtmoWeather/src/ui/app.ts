@@ -38,12 +38,12 @@ interface PageDef {
   sub: string;
 }
 const PAGES: PageDef[] = [
-  { id: "overview", title: "Overview", short: "Home", sub: "The mod at a glance, and its main switches" },
-  { id: "sky", title: "Sky & Haze", short: "Sky & Haze", sub: "Haze from the METARs, its colour, the sky's" },
-  { id: "clouds", title: "Clouds", short: "Clouds", sub: "Their light, their shape and the weather they follow" },
-  { id: "presets", title: "Presets", short: "Presets", sub: "Your settings, saved by name" },
-  { id: "keys", title: "Hotkeys", short: "Keys", sub: "The mod's keys in the sim" },
-  { id: "tools", title: "Tools", short: "Tools", sub: "Performance report, what's new, about" },
+  { id: "overview", title: "Overview", short: "Home", sub: "See the mod at a glance" },
+  { id: "sky", title: "Sky & Haze", short: "Sky & Haze", sub: "Customize the haze and the sky's colours" },
+  { id: "clouds", title: "Clouds", short: "Clouds", sub: "Change the clouds' lighting, shape and weather" },
+  { id: "presets", title: "Presets", short: "Presets", sub: "Manage, share and discover presets" },
+  { id: "keys", title: "Hotkeys", short: "Keys", sub: "Choose your own keys for the mod" },
+  { id: "tools", title: "Tools", short: "Tools", sub: "Measure performance, report a bug and more" },
 ];
 const ICON_OF: Record<string, string> = { overview: "overview", sky: "sky", clouds: "clouds",
                                           presets: "presets", keys: "keys", tools: "tools" };
