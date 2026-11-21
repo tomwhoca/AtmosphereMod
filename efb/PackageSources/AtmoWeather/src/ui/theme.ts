@@ -23,14 +23,16 @@ export const UI_CSS = units(`
   --b1: rgba(220, 230, 245, 0.07); --b2: rgba(220, 230, 245, 0.1); --b3: rgba(220, 230, 245, 0.15); --b4: rgba(220, 230, 245, 0.24);
   --card: #1f2938; --card-shadow: 0 2u 6u rgba(8, 12, 20, 0.3); --soft: rgba(255, 255, 255, 0.025);
   --track: #33405a; --bar: #182030; --switch-off: #2e3a4d; --knob-off: #8d99aa; --on-acc: #1b2433; --field: #182030;
-  --acc: 167, 200, 234; --dawn: 240, 196, 160; --rose: 233, 161, 170; --ok: 150, 210, 168; --exp: 196, 176, 232; }
+  --acc: 167, 200, 234; --dawn: 240, 196, 160; --rose: 233, 161, 170; --ok: 150, 210, 168; --exp: 196, 176, 232;
+  --scrim: rgba(8, 12, 20, 0.6); }
 .atmo-ui.light {
   --text: #22324a; --text-2: #46566e; --muted: #73829a; --icon-dim: #98a6b8;
   --ground: linear-gradient(180deg, #86a3c4 0u, #b8cfe6 45u, #dce8f4 160u, #edf2f8 420u, #f3f6fa 100%);
   --b1: rgba(60, 85, 120, 0.08); --b2: rgba(60, 85, 120, 0.12); --b3: rgba(60, 85, 120, 0.17); --b4: rgba(60, 85, 120, 0.28);
   --card: #fbfcfe; --card-shadow: 0 2u 6u rgba(60, 85, 120, 0.12); --soft: rgba(255, 255, 255, 0.6);
   --track: #c9d6e4; --bar: #e9eff6; --switch-off: #cbd6e3; --knob-off: #ffffff; --on-acc: #ffffff; --field: #ffffff;
-  --acc: 94, 144, 198; --dawn: 196, 128, 70; --rose: 192, 88, 104; --ok: 56, 140, 92; --exp: 124, 98, 178; }
+  --acc: 94, 144, 198; --dawn: 196, 128, 70; --rose: 192, 88, 104; --ok: 56, 140, 92; --exp: 124, 98, 178;
+  --scrim: rgba(40, 60, 90, 0.35); }
 
 .atmo-ui { position: absolute; left: 0; top: 0; right: 0; bottom: 0; overflow: hidden; color: var(--text);
   --f-light: Roboto-Light, Arial, sans-serif; --f-reg: Roboto-Regular, Arial, sans-serif;
@@ -46,9 +48,10 @@ export const UI_CSS = units(`
    in the sim's own apps */
 .atmo-ui .nav, .atmo-ui .main { position: absolute; }
 .atmo-ui.v .nav { top: 33u; left: 0; right: 0; height: 92u; border-bottom: 1px solid var(--b2); }
-.atmo-ui.v .main { top: 125u; left: 0; right: 0; bottom: 46u; }
-.atmo-ui.h .nav { top: 33u; left: 0; bottom: 46u; width: 168u; border-right: 1px solid var(--b2); }
-.atmo-ui.h .main { top: 33u; left: 168u; right: 0; bottom: 46u; }
+/* (the bottom strip: 47u, the dock button's 46u rounded up to whole pixels at every size: 55 px for 54.9) */
+.atmo-ui.v .main { top: 125u; left: 0; right: 0; bottom: 47u; }
+.atmo-ui.h .nav { top: 33u; left: 0; bottom: 47u; width: 168u; border-right: 1px solid var(--b2); }
+.atmo-ui.h .main { top: 33u; left: 168u; right: 0; bottom: 47u; }
 
 /* the brand and the mod's switch */
 .atmo-ui .brand { display: flex; align-items: center; height: 42u; padding: 0 16u; }
@@ -120,7 +123,11 @@ export const UI_CSS = units(`
 .atmo-ui .row .label { display: flex; align-items: center; }
 .atmo-ui .row .tip { font-size: 13u; color: var(--muted); margin-top: 3u; display: none; }
 .atmo-ui .row.open .tip { display: block; }
-.atmo-ui .row.off { opacity: 0.4; }
+.atmo-ui .row .tip p { margin: 0 0 5u; line-height: 1.35; }
+.atmo-ui .row.off { opacity: 0.45; }
+/* why a greyed setting has no effect now (controls.ts blocked) */
+.atmo-ui .row .why { font-size: 12u; color: var(--text-2); margin-top: 2u; }
+.atmo-ui .row .why:empty { display: none; }
 .atmo-ui .icon-btn { width: 24u; height: 24u; display: flex; align-items: center; justify-content: center;
   color: var(--icon-dim); cursor: pointer; flex: 0 0 auto; margin-left: 2u; }
 .atmo-ui .icon-btn svg { width: 15u; height: 15u; }
@@ -190,12 +197,7 @@ export const UI_CSS = units(`
   color: var(--text); background: var(--field); border: 1px solid var(--b3); outline: none; }
 .atmo-ui .field:focus { border-color: rgb(var(--acc)); }
 
-/* quick switches (overview) */
-.atmo-ui .tiles { display: flex; flex-wrap: wrap; margin: 0 -4u; }
-.atmo-ui .tile { flex: 1 1 165u; margin: 4u; display: flex; align-items: center; min-height: 40u; padding: 5u 10u;
-  border: 1px solid var(--b2); border-radius: 3u; background: var(--soft); }
-.atmo-ui .tile .t { flex: 1 1 auto; min-width: 0; font-size: 14u; padding-right: 8u; }
-.atmo-ui .tile .t small { display: block; font-size: 10u; letter-spacing: 0.06em; color: var(--muted); }
+/* the overview's preset chips */
 .atmo-ui .chips { display: flex; flex-wrap: wrap; margin: 2u -3u 0; }
 .atmo-ui .chip { margin: 3u; padding: 4u 10u; border-radius: 3u; cursor: pointer; font-size: 13u;
   border: 1px solid var(--b3); color: var(--text-2); }
@@ -224,6 +226,62 @@ export const UI_CSS = units(`
 .atmo-ui .compare { margin-top: 8u; padding-top: 8u; border-top: 1px solid var(--b1); font-size: 13u; color: var(--text-2); }
 .atmo-ui .compare p { margin: 0 0 4u; }
 .atmo-ui .compare b { font-family: var(--f-med); font-weight: normal; color: var(--text); }
+
+/* forms, notes and a page's actions */
+.atmo-ui .fieldrow { display: flex; align-items: center; margin: 6u 0; }
+.atmo-ui .fieldrow .field { flex: 1 1 auto; min-width: 0; }
+.atmo-ui .fieldrow .btn { margin-left: 10u; flex: 0 0 auto; }
+.atmo-ui .actions { display: flex; align-items: center; flex-wrap: wrap; margin-top: 10u; }
+.atmo-ui .actions .muted { margin-right: 10u; font-size: 13u; }
+.atmo-ui .actions .btn + .muted { margin: 0 0 0 10u; }
+.atmo-ui .actions.end { justify-content: flex-end; }
+.atmo-ui .btns { display: flex; flex: 0 0 auto; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+.atmo-ui .btn svg { width: 15u; height: 15u; margin-right: 6u; flex: 0 0 auto; }
+.atmo-ui .about { margin: 0 0 8u; font-size: 14u; line-height: 1.4; color: var(--text-2); }
+.atmo-ui .btn.small { height: 26u; padding: 0 9u; font-size: 12u; }
+.atmo-ui .note { margin-top: 8u; font-size: 13u; color: var(--text-2); }
+.atmo-ui .note.warn { color: rgb(var(--dawn)); }
+.atmo-ui .lines { white-space: pre-wrap; }
+.atmo-ui .intro { font-size: 13u; margin-bottom: 6u; }
+.atmo-ui .notice { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10u; padding: 8u 12u;
+  border: 1px solid rgba(var(--dawn), 0.55); border-radius: 3u; background: var(--card); color: rgb(var(--dawn));
+  font-size: 13u; }
+.atmo-ui .notice .btn { margin-left: 10u; flex: 0 0 auto; }
+.atmo-ui .choice { display: flex; flex-wrap: wrap; margin: 4u -3u 4u; }
+/* presets: a preset's row, the question when it lacks settings */
+.atmo-ui .preset-row .pn { margin-right: 10u; }
+.atmo-ui .tip-line { font-size: 12u; color: var(--muted); margin-top: 2u; }
+.atmo-ui .ask { margin: 0 0 8u; padding: 8u 10u; border-left: 2u solid rgb(var(--dawn)); background: var(--soft);
+  font-size: 13u; color: var(--text-2); }
+.atmo-ui .ask .btns { justify-content: flex-start; margin-top: 8u; }
+/* hotkeys: the keys over the buttons, at the right */
+.atmo-ui .hotkey .hk { flex: 0 0 auto; display: flex; flex-direction: column; align-items: flex-end; }
+.atmo-ui .hotkey .keys { font-family: var(--f-med); font-size: 14u; margin-bottom: 5u; color: var(--text); }
+.atmo-ui .hotkey .keys.none { font-family: var(--f-reg); color: var(--muted); }
+.atmo-ui .hotkey .keys.learning { color: rgb(var(--dawn)); }
+
+/* a sheet over the app (What's new, the performance report): between the status bar and the dock button */
+.atmo-ui .sheet { position: absolute; top: 33u; bottom: 47u; left: 0; right: 0; z-index: 20; background: var(--scrim); }
+.atmo-ui .sheet-card { position: absolute; top: 12u; bottom: 12u; left: 12u; right: 12u; max-width: 640u; margin: 0 auto;
+  display: flex; flex-direction: column; border: 1px solid var(--b3); border-radius: 3u; background: var(--card);
+  box-shadow: var(--card-shadow); }
+.atmo-ui .sheet-head { flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between;
+  padding: 10u 10u 8u 16u; border-bottom: 1px solid var(--b1); }
+.atmo-ui .sheet-head h2 { margin: 0; font-family: var(--f-med); font-weight: normal; font-size: 16u; color: var(--text); }
+.atmo-ui .sheet-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 12u 16u 16u; }
+.atmo-ui .news-item { margin-bottom: 12u; }
+.atmo-ui .news-head { font-family: var(--f-med); font-size: 15u; color: var(--text); margin-bottom: 3u; }
+.atmo-ui .news-text { font-size: 14u; line-height: 1.4; color: var(--text-2); margin-bottom: 8u; }
+.atmo-ui .news-text.small { font-size: 12u; color: var(--muted); }
+.atmo-ui .news-version { margin: 10u 0; }
+.atmo-ui .news-release { font-family: var(--f-med); font-size: 14u; color: var(--text); margin-bottom: 4u; }
+.atmo-ui .news-line { font-size: 13u; line-height: 1.35; color: var(--text-2); margin-bottom: 4u; }
+.atmo-ui .news-label { color: var(--text); }
+.atmo-ui .q { font-size: 13u; color: var(--text-2); margin-top: 12u; }
+.atmo-ui .steps { margin: 6u 0 0; padding-left: 20u; font-size: 14u; line-height: 1.4; color: var(--text-2); }
+.atmo-ui .steps li { margin-bottom: 6u; }
+.atmo-ui .details { margin: 4u 0 8u; padding: 8u 10u; font-size: 11u; color: var(--muted); white-space: pre-wrap;
+  word-wrap: break-word; background: var(--soft); border: 1px solid var(--b1); }
 
 /* the performance report */
 .atmo-ui .progress { height: 3u; background: var(--track); overflow: hidden; margin: 8u 0; }

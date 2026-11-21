@@ -18,7 +18,7 @@ async function main() {
     target: "es2017",
     minify: false,
     logLevel: "info",
-    define: { UI_BUILD: JSON.stringify("harness") },
+    define: { UI_BUILD: JSON.stringify("harness"), DEV: "false" },
   });
   await ctx.watch();
   const { host, port } = await ctx.serve({ servedir: HERE, host: "127.0.0.1", port: PORT });

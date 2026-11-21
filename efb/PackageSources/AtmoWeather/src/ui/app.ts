@@ -1,17 +1,26 @@
-// The redesigned EFB app's UI: mount(root, host) draws it into root and returns the unmount. The frame: the sim's
-// status bar over the top strip; navigation (a list at the side when horizontal, a bar at the top when vertical);
-// the page, its head with the preset at the right (its name and state, Undo and Save, on every page: the user's
-// wish); the bottom strip, where the sim's dock button sits, left empty as the sim's own apps do.
+// The EFB app's UI: mount(root, host) draws it into root and returns the unmount. The frame: the sim's status bar
+// over the top strip; navigation (a list at the side when horizontal, a bar at the top when vertical); the page,
+// its head with the preset at the right (its name and state, Undo and Save, on every page: the user's wish); the
+// bottom strip, where the sim's dock button sits, left empty as the sim's own apps do. Over it all, a sheet when
+// one is open: What's new (once per release that has news), the performance report.
 
-import { button, switchEl } from "./controls";
+import { AddonReport, Context, PerfReportModel } from "../report";
+import { closedValue, WHATS_NEW_KEY, whatsNewDue } from "../whatsnew";
+import { button, switchEl, twoTaps } from "./controls";
 import { h, Scope, Value } from "./dom";
 import { Host } from "./host";
+import { hotkeysPage } from "./hotkeysPage";
 import { icon } from "./icons";
-import { Store } from "./model";
-import { CLOUD_TABS, hotkeysPage, LIGHT_TABS, overviewPage, presetsPage, settingsPage, SKY_TABS, toolsPage,
-         twoTaps } from "./pages";
+import { PRESET_DEFAULT, sameName, Store } from "./model";
+import { CLOUD_TABS, overviewPage, settingsPage, SKY_TABS } from "./pages";
+import { presetsPage } from "./presetsPage";
+import { reportSheet, Sheet, whatsNewSheet } from "./sheets";
 import { THEMES, UI_CSS } from "./theme";
+import { SheetName, toolsPage } from "./toolsPage";
 import { latestRelease } from "./update";
+
+/** Developer builds (tools/build_efb.py --dev, tools/efb_reload.py): the hook for tools/shots.py. Never in a release. */
+declare const DEV: boolean;
 
 const STYLE_ID = "atmo-ui-style";
 const PAGE_KEY = "atmo-ui-page";
@@ -27,14 +36,13 @@ interface PageDef {
 }
 const PAGES: PageDef[] = [
   { id: "overview", title: "Overview", short: "Home", sub: "The mod at a glance, and its main switches" },
-  { id: "sky", title: "Sky & haze", short: "Sky", sub: "Haze from the METARs, its colour, the sky's" },
-  { id: "light", title: "Cloud light", short: "Light", sub: "How sunlight plays in and around clouds" },
-  { id: "clouds", title: "Clouds", short: "Clouds", sub: "Their shape, and the weather they follow" },
+  { id: "sky", title: "Sky & Haze", short: "Sky & Haze", sub: "Haze from the METARs, its colour, the sky's" },
+  { id: "clouds", title: "Clouds", short: "Clouds", sub: "Their light, their shape and the weather they follow" },
   { id: "presets", title: "Presets", short: "Presets", sub: "Your settings, saved by name" },
   { id: "keys", title: "Hotkeys", short: "Keys", sub: "The mod's keys in the sim" },
   { id: "tools", title: "Tools", short: "Tools", sub: "Performance report, what's new, about" },
 ];
-const ICON_OF: Record<string, string> = { overview: "overview", sky: "sky", light: "light", clouds: "clouds",
+const ICON_OF: Record<string, string> = { overview: "overview", sky: "sky", clouds: "clouds",
                                           presets: "presets", keys: "keys", tools: "tools" };
 
 /** How far (px at u = 1) the mouse moves with the button down before it's a drag of the page, not a click. */
@@ -102,6 +110,26 @@ export function mount(root: HTMLElement, host: Host): () => void {
   style.textContent = UI_CSS;
   const store = new Store(host);
   scope.add(() => store.dispose());
+  // (developers: tools/shots.py sets the settings from outside, through the sim's debugger. Only in a developer's
+  // build, and only where the shell has the developers' reload hook, which it sets right after this mount)
+  const devHook = setTimeout(() => {
+    const w = window as unknown as Record<string, unknown>;
+    if (DEV && typeof w.__atmoUiReload === "function") {
+      w.__atmoDev = {
+        state: () => JSON.stringify(store.state.get() || null),
+        set: (values: Record<string, number>) => store.setMany(values),
+        saveAs: (name: string) => store.saveAs(name),
+        load: (name: string) => store.load(name, true),
+        reload: () => store.reload(),
+      };
+    }
+  }, 0);
+  scope.add(() => {
+    clearTimeout(devHook);
+    if (DEV) {
+      delete (window as unknown as Record<string, unknown>).__atmoDev;
+    }
+  });
 
   const saved = host.load(PAGE_KEY);
   const page = new Value(PAGES.some((p) => p.id === saved) ? saved! : "overview");
@@ -114,6 +142,36 @@ export function mount(root: HTMLElement, host: Host): () => void {
   scope.add(theme.watch((t) => host.save(THEME_KEY, t)));
   const go = (id: string) => page.set(id);
 
+  // ---- the sheets: What's new when this release's is new to the user; the performance report from Tools
+  const sheetName = new Value<SheetName>(whatsNewDue(host.load(WHATS_NEW_KEY)) ? "news" : "");
+  const report = new PerfReportModel((data) => host.send(data), (): Context => {
+    const s = store.state.get();
+    return {
+      version: host.version,
+      metar: store.metar.get(),
+      weather: (s && s.weather) || "",
+      altitudeFt: host.simvar("PLANE ALTITUDE", "feet"),
+      aglFt: host.simvar("PLANE ALT ABOVE GROUND", "feet"),
+      changed: store.changedFromDefaults(),
+      defaultPreset: sameName(store.preset, PRESET_DEFAULT) && store.presetSaved && !store.unconfirmed,
+    };
+  }, host.reportTransport);
+  scope.add(store.state.watch((s) => report.onReport(s ? (s.report as AddonReport | undefined) : undefined)));
+  scope.add(report.open.watch((o) => {
+    if (o) {
+      sheetName.set("report");
+    } else if (sheetName.get() === "report") {
+      sheetName.set("");
+    }
+  }));
+  const openSheet = (s: SheetName) => {
+    if (s === "report") {
+      report.show();
+    } else {
+      sheetName.set(s);
+    }
+  };
+
   // ---- navigation, with the brand and the mod's switch
   const enabled = new Value(false);
   scope.add(store.state.watch((s) => enabled.set(!!s && !!s.enabled)));
@@ -122,6 +180,10 @@ export function mount(root: HTMLElement, host: Host): () => void {
   const brand = h("div", { class: "brand" }, h("div", { class: "mark" }), h("div", { class: "name", text: "AtmosphereMod" }));
   const modRow = h("div", { class: "modrow" }, h("span", { class: "modlabel", text: "Mod" }), stateText,
                    switchEl(scope, enabled, () => store.setEnabled(!enabled.get())));
+  scope.add(store.state.watch((s) => {
+    const key = s && s.hotkeys ? s.hotkeys.toggle : "Ctrl+Shift+F9";
+    modRow.title = `The whole mod on or off${key ? ` (${key})` : ""}. Off: the sim's own shaders, to compare.`;
+  }));
   const tabs = h("div", { class: "tabs" });
   for (const p of PAGES) {
     const tab = h("div", { class: "tab", title: p.title }, icon(ICON_OF[p.id]), h("span", { text: "" }));
@@ -178,15 +240,38 @@ export function mount(root: HTMLElement, host: Host): () => void {
     const ps = pageScope;
     scroll.appendChild(def.id === "overview" ? overviewPage(ps, store, go, latest)
       : def.id === "sky" ? settingsPage(ps, store, SKY_TABS())
-      : def.id === "light" ? settingsPage(ps, store, LIGHT_TABS())
-      : def.id === "clouds" ? settingsPage(ps, store, CLOUD_TABS())
+      : def.id === "clouds" ? settingsPage(ps, store, CLOUD_TABS(), true)
       : def.id === "presets" ? presetsPage(ps, store, focusName)
       : def.id === "keys" ? hotkeysPage(ps, store)
-      : toolsPage(ps, store, theme));
+      : toolsPage(ps, store, theme, openSheet));
   };
   scope.add(page.watch(render));
   dragToScroll(scope, scroll);
   scope.add(() => pageScope && pageScope.dispose());
+
+  let sheetScope: Scope | undefined, shown: Sheet | undefined;
+  const closeNews = () => {
+    host.save(WHATS_NEW_KEY, closedValue());
+    sheetName.set("");
+  };
+  scope.add(sheetName.watch((name) => {
+    if (sheetScope) {
+      sheetScope.dispose();
+      sheetScope = undefined;
+    }
+    if (shown && shown.el.parentNode) {
+      shown.el.parentNode.removeChild(shown.el);
+    }
+    shown = undefined;
+    if (name === "") {
+      return;
+    }
+    sheetScope = new Scope();
+    shown = name === "news" ? whatsNewSheet(sheetScope, closeNews) : reportSheet(sheetScope, store, report);
+    dragToScroll(sheetScope, shown.body);
+    ui.appendChild(shown.el);
+  }));
+  scope.add(() => sheetScope && sheetScope.dispose());
 
   // ---- the tablet: orientation and scale
   const classes = () => {

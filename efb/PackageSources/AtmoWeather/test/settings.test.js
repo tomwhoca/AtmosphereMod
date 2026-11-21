@@ -1,6 +1,7 @@
-// Checks src/Settings.tsx without the sim: bundles it for Node with stand-ins
-// for the MSFS and EFB SDKs (test/stubs), then tests the friendly units against
-// the shipping defaults and the model's messages. Run by tools/test_efb_settings.py.
+// Checks the EFB app's logic without the sim: bundles the modules the UI uses (test/entry.ts: no SDK, no DOM at
+// load) for Node, then tests the friendly units against the shipping defaults, the store's messages to the add-on
+// (with a stand-in host), presets, What's new, the performance report (against the sheet's script, in a stand-in
+// for Apps Script), hotkeys, the METAR in words and the update check. Run by tools/test_efb_settings.py.
 
 const esbuild = require("esbuild");
 const path = require("path");
@@ -8,81 +9,48 @@ const os = require("os");
 const fs = require("fs");
 const vm = require("vm");
 
-const out = path.join(os.tmpdir(), "atmo-settings-test.js");
+const out = path.join(os.tmpdir(), "atmo-app-test.js");
 esbuild.buildSync({
-  entryPoints: [path.join(__dirname, "..", "src", "Settings.tsx")],
+  entryPoints: [path.join(__dirname, "entry.ts")],
   bundle: true,
   platform: "node",
   format: "cjs",
   outfile: out,
-  jsxFactory: "FSComponent.buildComponent",
-  jsxFragment: "FSComponent.Fragment",
-  alias: {
-    "@microsoft/msfs-sdk": path.join(__dirname, "stubs", "msfs-sdk.js"),
-    "@efb/efb-api": path.join(__dirname, "stubs", "efb-api.js"),
-  },
-  logLevel: "error",
-});
-const outDefaults = path.join(os.tmpdir(), "atmo-defaults-test.js");
-esbuild.buildSync({
-  entryPoints: [path.join(__dirname, "..", "src", "defaults.ts")],
-  bundle: true,
-  platform: "node",
-  format: "cjs",
-  outfile: outDefaults,
-  logLevel: "error",
-});
-const outNews = path.join(os.tmpdir(), "atmo-whatsnew-test.js");
-esbuild.buildSync({
-  entryPoints: [path.join(__dirname, "..", "src", "WhatsNew.tsx")],
-  bundle: true,
-  platform: "node",
-  format: "cjs",
-  outfile: outNews,
-  jsxFactory: "FSComponent.buildComponent",
-  jsxFragment: "FSComponent.Fragment",
-  alias: {
-    "@microsoft/msfs-sdk": path.join(__dirname, "stubs", "msfs-sdk.js"),
-    "@efb/efb-api": path.join(__dirname, "stubs", "efb-api.js"),
-  },
-  logLevel: "error",
-});
-const outReport = path.join(os.tmpdir(), "atmo-perfreport-test.js");
-esbuild.buildSync({
-  entryPoints: [path.join(__dirname, "..", "src", "PerfReport.tsx")],
-  bundle: true,
-  platform: "node",
-  format: "cjs",
-  outfile: outReport,
-  jsxFactory: "FSComponent.buildComponent",
-  jsxFragment: "FSComponent.Fragment",
-  alias: {
-    "@microsoft/msfs-sdk": path.join(__dirname, "stubs", "msfs-sdk.js"),
-    "@efb/efb-api": path.join(__dirname, "stubs", "efb-api.js"),
-  },
-  logLevel: "error",
-});
-const outHotkeys = path.join(os.tmpdir(), "atmo-hotkeys-test.js");
-esbuild.buildSync({
-  entryPoints: [path.join(__dirname, "..", "src", "Hotkeys.tsx")],
-  bundle: true,
-  platform: "node",
-  format: "cjs",
-  outfile: outHotkeys,
-  jsxFactory: "FSComponent.buildComponent",
-  jsxFragment: "FSComponent.Fragment",
-  alias: {
-    "@microsoft/msfs-sdk": path.join(__dirname, "stubs", "msfs-sdk.js"),
-    "@efb/efb-api": path.join(__dirname, "stubs", "efb-api.js"),
-  },
   logLevel: "error",
 });
 global.window = { setTimeout, clearTimeout };
-const { TABS, SettingsModel, PRESET_DEFAULT, presetChar, presetName, sameName, missingText } = require(out);
-const { DEFAULTS } = require(outDefaults);
-const { WHATS_NEW, WHATS_NEW_KEY, WhatsNewModel, PREVIOUS } = require(outNews);
-const perf = require(outReport);
-const hk = require(outHotkeys);
+const app = require(out);
+const { TABS } = app.specs;
+const { DEFAULTS } = app.defaults;
+const { PRESET_DEFAULT, presetChar, presetName, sameName, missingText } = app.presets;
+const { WHATS_NEW, PREVIOUS, whatsNewDue, closedValue } = app.whatsnew;
+const perf = app.report;
+const hk = app.hotkeys;
+const { Store } = app.model;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** A host for the store (src/ui/host.ts): what it sends, and the add-on's state on request. */
+function fakeHost() {
+  const sent = [];
+  let tell = () => undefined;
+  return {
+    sent,
+    state: (s) => tell(JSON.parse(JSON.stringify(s))),
+    host: {
+      version: "test",
+      send: (d) => sent.push(JSON.parse(JSON.stringify(d))),
+      onState: (cb) => { tell = cb; return () => undefined; },
+      onMetar: (cb) => { cb(""); return () => undefined; },
+      onLinkStatus: (cb) => { cb(""); return () => undefined; },
+      onPanel: (cb) => { cb({ width: 0, height: 0, vertical: true, size: 0 }); return () => undefined; },
+      simvar: () => 0,
+      openUrl: () => undefined,
+      textFocus: () => undefined,
+      load: () => undefined,
+      save: () => undefined,
+    },
+  };
+}
 
 let failures = 0;
 function check(ok, what) {
@@ -120,98 +88,111 @@ check(spec("T16").metarOnly && !spec("T3").metarOnly && spec("T16").toDisplay(1)
       spec("T16").min === 0 && spec("T16").max === 200 && spec("T16").format(100) === "100 %",
       "haze strength: 100 % is as reported, 0-200 %, only with the METAR's haze");
 
-// the model
-const sent = [];
-const model = new SettingsModel((data) => sent.push(data));
-model.requestState();
-check(JSON.stringify(sent.pop()) === '{"get":true}', "asks for the state");
-check(!model.connected.get(), "not connected before the add-on answers");
-const T = Array.from({ length: 14 }, (_, i) => DEFAULTS[`T${i}`] ?? 0);
-const C = Array.from({ length: 32 }, (_, i) => DEFAULTS[`C${i}`] ?? 0);
-const TE = T.slice();
-TE[3] = 7.5;
-model.onState(JSON.stringify({ enabled: false, T, C, TE, weather: "KIND: continental haze" }));
-check(model.connected.get() && !model.enabled.get() && model.weather.get() === "KIND: continental haze", "state: connected, F9, weather");
-check(model.value("T3").get() === 4 && model.effectiveValue("T3").get() === 7.5, "state: T3 from the ini, 7.5 from the METAR");
-
 (async () => {
-  model.set("C2", 0.3);
-  model.set("C2", 0.35);
-  model.set("T9", 0.6);
-  check(sent.length === 0, "a drag isn't sent at once");
-  await new Promise((r) => setTimeout(r, 150));
-  check(sent.length === 1 && JSON.stringify(sent[0]) === '{"set":{"C2":0.35,"T9":0.6}}', `coalesced: ${JSON.stringify(sent[0])}`);
+  // the store (src/ui/model.ts): the add-on's state, and the messages to it
+  const f = fakeHost();
+  const store = new Store(f.host);
+  check(JSON.stringify(f.sent.shift()) === '{"get":true}' && !store.connected, "store: asks for the state, not connected yet");
+  const T = Array.from({ length: 17 }, (_, i) => DEFAULTS[`T${i}`] ?? 0);
+  const C = Array.from({ length: 38 }, (_, i) => DEFAULTS[`C${i}`] ?? 0);
+  const TE = T.slice();
+  TE[3] = 7.5;
+  f.state({ enabled: false, T, C, TE, weather: "KIND: continental haze" });
+  check(store.connected && store.state.get().enabled === false && store.state.get().weather === "KIND: continental haze",
+        "store: connected, the switch, the weather");
+  check(store.raw("T3") === DEFAULTS.T3 && store.fromWeather("T3") === 7.5, "store: T3 from the ini, 7.5 from the METAR");
+
+  const c2 = store.key("C2");
+  store.set("C2", 0.3, true);
+  store.set("C2", 0.35, true);
+  store.set("T9", 0.6, true);
+  check(f.sent.length === 0 && c2.get() === 0.35 && store.raw("T9") === 0.6, "store: a drag shows at once, isn't sent at once");
+  await sleep(200);
+  check(f.sent.length === 2 && JSON.stringify(f.sent[0]) === '{"set":{"C2":0.35}}'
+        && JSON.stringify(f.sent[1]) === '{"set":{"T9":0.6}}',
+        `store: a drag sent a moment later, its last value: ${JSON.stringify(f.sent)}`);
+  f.sent.length = 0;
   const echo = C.slice();
-  echo[2] = 0.5;  // the add-on's state from before the change
-  model.onState(JSON.stringify({ T, C: echo, TE }));
-  check(model.value("C2").get() === 0.35, "an echo right after an edit doesn't undo it");
-  model.onState(JSON.stringify({ T, C: echo, TE }));
-  await new Promise((r) => setTimeout(r, 1600));
-  model.onState(JSON.stringify({ T, C: echo, TE }));
-  check(model.value("C2").get() === 0.5, "after the hold, the add-on's value counts (e.g. F10 reloaded the file)");
-  sent.length = 0;
-  model.reset(["C2", "C21", "T13"]);
-  await new Promise((r) => setTimeout(r, 150));
-  check(JSON.stringify(sent[0]) === '{"set":{"C2":0.5,"C21":50,"T13":1}}', `reset sends the defaults: ${JSON.stringify(sent[0])}`);
-  model.setEnabled(true);
-  check(JSON.stringify(sent[1]) === '{"enabled":true}' && model.enabled.get(), "the master switch");
-  model.reload();
-  check(JSON.stringify(sent[2]) === '{"reload":true}', "the Reload button");
+  echo[2] = 0.5;
+  f.state({ T, C: echo, TE });
+  check(store.raw("C2") === 0.35 && c2.get() === 0.35, "store: an answer from before the change doesn't undo it");
+  const confirmed = C.slice();
+  confirmed[2] = 0.35;
+  f.state({ T, C: confirmed, TE });
+  f.state({ T, C: echo, TE });
+  check(store.raw("C2") === 0.5 && c2.get() === 0.5, "store: once the add-on has it, its value counts (F10 read the file again)");
+  store.set("C2", 0.42);
+  check(JSON.stringify(f.sent.pop()) === '{"set":{"C2":0.42}}', "store: a change that isn't a drag is sent at once");
+  f.state({ T, C: echo, TE });
+  check(store.raw("C2") === 0.42, "store: unconfirmed, it stands ...");
+  await sleep(1600);
+  f.state({ T, C: echo, TE });
+  check(store.raw("C2") === 0.5, "store: ... until 1.5 s after its last change");
+  store.set("C2", 0.123456);
+  check(JSON.stringify(f.sent.pop()) === '{"set":{"C2":0.1235}}', "store: values as tunables.ini keeps them (4 decimals)");
+  check(store.changedFromDefaults().indexOf(`C2 = 0.1235 (${DEFAULTS.C2})`) >= 0, "store: the settings changed from the defaults");
+  f.state({ T, C, TE });
+  store.set("C2", 0.3);
+  f.sent.length = 0;
+  store.reset(["C2", "C21", "T13"]);
+  check(JSON.stringify(f.sent.pop()) === `{"set":{"C2":${DEFAULTS.C2}}}` && store.raw("C2") === DEFAULTS.C2,
+        "store: a reset sends the defaults of what differs, in one message");
+  store.setEnabled(true);
+  check(JSON.stringify(f.sent.pop()) === '{"enabled":true}' && store.state.get().enabled, "store: the mod's switch");
+  store.reload();
+  check(JSON.stringify(f.sent.pop()) === '{"reload":true}', "store: reload tunables.ini");
 
   // presets
-  check(!model.hasPresets.get() && model.presets.get().length === 0, "presets: none from an add-on without them");
   const presets = ["Default", "Summer"];
-  model.onState(JSON.stringify({ T, C, TE, presets, preset: "Summer", presetSaved: false,
-                                 presetNote: "Not loaded: your settings aren't saved" }));
-  check(model.hasPresets.get() && model.presets.get().join() === "Default,Summer" &&
-        model.preset.get() === "Summer" && !model.presetSaved.get() &&
-        model.presetNote.get() === "Not loaded: your settings aren't saved", "presets: listed, the current one, the note");
-  const listed = model.presets.get();
-  model.onState(JSON.stringify({ T, C, TE, presets, preset: "Summer", presetSaved: true }));
-  check(model.presets.get() === listed && model.presetSaved.get() && model.presetNote.get() === "",
-        "presets: the same list again isn't a change");
-  sent.length = 0;
-  model.set("C2", 0.4);
-  model.savePreset("Winter");
-  check(sent.length === 2 && JSON.stringify(sent[0]) === '{"set":{"C2":0.4}}' &&
-        JSON.stringify(sent[1]) === '{"savePreset":"Winter"}', "save: the change still waiting is sent first");
-  await new Promise((r) => setTimeout(r, 150));
-  check(sent.length === 2, "... and not again");
-  model.set("C2", 0.45);
-  check(model.unsent(), "unsent: a change waiting");
-  model.loadPreset("Default", true);
-  check(sent.length === 4 && JSON.stringify(sent[2]) === '{"set":{"C2":0.45}}' &&
-        JSON.stringify(sent[3]) === '{"loadPreset":"Default","discard":true}' && !model.unsent(),
-        "load: the change still waiting is sent first; discarding");
+  f.state({ T, C, TE, presets, preset: "Summer", presetSaved: true, presetNote: "Not loaded: your settings aren't saved" });
+  check(store.preset === "Summer" && store.presetSaved && store.canSaveInPlace
+        && store.state.get().presetNote === "Not loaded: your settings aren't saved", "presets: the current one, the note");
+  store.set("C2", 0.4, true);
+  check(!store.presetSaved && store.unconfirmed, "presets: a change makes it unsaved at once");
+  f.sent.length = 0;
+  store.saveAs("Winter");
+  check(f.sent.length === 2 && JSON.stringify(f.sent[0]) === '{"set":{"C2":0.4}}'
+        && JSON.stringify(f.sent[1]) === '{"savePreset":"Winter"}', "save: a drag's change still waiting is sent first");
+  await sleep(200);
+  check(f.sent.length === 2, "save: ... and not again");
+  store.set("C2", 0.45, true);
+  store.load("Default", true);
+  check(f.sent.length === 4 && JSON.stringify(f.sent[2]) === '{"set":{"C2":0.45}}'
+        && JSON.stringify(f.sent[3]) === '{"loadPreset":"Default","discard":true}', "load: the change waiting first; discarding");
   const loaded = C.slice();
   loaded[2] = 0.5;
-  model.onState(JSON.stringify({ T, C: loaded, TE, presets }));
-  check(model.value("C2").get() === 0.5, "load: the preset's values show at once, though C2 was just edited");
-  check(model.preset.get() === "" && !model.presetSaved.get(), "presets: none current without the fields");
-  model.loadPreset("Summer");
-  check(JSON.stringify(sent[4]) === '{"loadPreset":"Summer"}', "load: not discarding unless asked");
-  model.deletePreset("Summer");
-  check(JSON.stringify(sent[5]) === '{"deletePreset":"Summer"}', "delete");
-  model.importPreset();
-  check(JSON.stringify(sent[6]) === '{"importPreset":true}', "import");
+  f.state({ T, C: loaded, TE, presets, preset: "Default", presetSaved: true });
+  check(store.raw("C2") === 0.5 && !store.unconfirmed, "load: the preset's values show at once, though C2 was just set");
+  check(!store.canSaveInPlace, "presets: Default can't be saved into");
+  f.sent.length = 0;
+  store.saveInPlace();
+  check(f.sent.length === 0, "presets: so Save doesn't send (the app asks for a name)");
+  f.state({ T, C, TE, presets, preset: "Summer", presetSaved: false });
+  store.saveInPlace();
+  store.undo();
+  check(JSON.stringify(f.sent[0]) === '{"savePreset":"Summer"}'
+        && JSON.stringify(f.sent[1]) === '{"loadPreset":"Summer","discard":true}',
+        "presets: Save into the current one; Undo loads it again as saved");
+  f.sent.length = 0;
+  store.load("Summer", false);
+  store.remove("Summer");
+  store.importPreset();
+  store.load("Summer", true, "defaults");
+  store.load("Summer", false, "current");
+  const msgs = f.sent.map((m) => JSON.stringify(m)).join(" ");
+  check(msgs === '{"loadPreset":"Summer"} {"deletePreset":"Summer"} {"importPreset":true} '
+        + '{"loadPreset":"Summer","discard":true,"fill":"defaults"} {"loadPreset":"Summer","fill":"current"}',
+        `presets: load, delete, import, the gaps filled in (${msgs})`);
+  store.dispose();
 
-  // settings a preset lacks
-  model.onState(JSON.stringify({ T, C, TE, presets, presetsMissing: { Summer: ["C33", "T14"] } }));
-  const gaps = model.presetMissing.get();
-  check(gaps.Summer.join() === "C33,T14", "missing: per preset");
-  model.onState(JSON.stringify({ T, C, TE, presets, presetsMissing: { Summer: ["C33", "T14"] } }));
-  check(model.presetMissing.get() === gaps, "missing: the same again isn't a change");
-  model.loadPreset("Summer", true, "defaults");
-  model.loadPreset("Summer", false, "current");
-  check(JSON.stringify(sent[7]) === '{"loadPreset":"Summer","discard":true,"fill":"defaults"}' &&
-        JSON.stringify(sent[8]) === '{"loadPreset":"Summer","fill":"current"}', "load: filling in what it lacks");
+  // settings a preset lacks, and names
   const said = (keys, want) => {
     const got = missingText("Atmo", keys);
     check(got === want, `missing in a line: ${got}`);
   };
   said(["C9"], '"Atmo" has no value for 1 setting: Glory.');
   said(["C34", "C33", "T14", "C32"], '"Atmo" has no value for 4 settings: Visibility inside clouds, Structure inside '
-    + "clouds, Thunderstorms (experimental) and 1 the app doesn't show.");
+    + "clouds, Thunderstorms and 1 the app doesn't show.");
   said(["C2", "C1", "C9", "C12", "C3", "C5", "T14"], '"Atmo" has no value for 7 settings: Silver lining strength, '
     + "Silver lining size, Glory, Your aircraft's shadow on clouds and 3 more.");
   said(["T14", "C35"], "\"Atmo\" has no value for 2 settings the app doesn't show.");
@@ -223,24 +204,11 @@ check(model.value("T3").get() === 4 && model.effectiveValue("T3").get() === 7.5,
         !presetChar("ä") && !presetChar(":"), "names: the characters the add-on takes");
   check(sameName("default", PRESET_DEFAULT), "names: case doesn't count");
 
-  // what's new: once per release, until closed
-  const memory = (stored) => {
-    const data = stored === undefined ? {} : { [WHATS_NEW_KEY]: stored };
-    return { data, get: (k) => data[k], set: (k, v) => { data[k] = v; } };
-  };
-  const fresh = memory();
-  const first = new WhatsNewModel(fresh);
-  check(first.open.get(), "what's new: shows on a first start");
-  first.close();
-  check(!first.open.get() && fresh.data[WHATS_NEW_KEY] === WHATS_NEW.release, "what's new: closing keeps the release");
-  check(!new WhatsNewModel(fresh).open.get(), "what's new: not again once closed");
-  check(new WhatsNewModel(memory("0.6.1")).open.get(), "what's new: shows after an update");
-  const noStore = new WhatsNewModel();
-  check(noStore.open.get(), "what's new: shows without the sim's data store");
-  noStore.close();
-  check(!noStore.open.get(), "what's new: and closes there too");
-  check(/^\d+\.\d+\.\d+$/.test(WHATS_NEW.release) && WHATS_NEW.items.every(([h, t]) => h && t && !/  /.test(t)),
-        `what's new: release ${WHATS_NEW.release}, ${WHATS_NEW.items.length} items, each with a heading and a text`);
+  // what's new: once per release, until closed (the closed release kept as the SDK's DataStore kept it: JSON)
+  check(whatsNewDue(undefined), "what's new: shows on a first start");
+  check(closedValue() === JSON.stringify(WHATS_NEW.release) && !whatsNewDue(closedValue()), "what's new: not again once closed");
+  check(whatsNewDue('"0.6.1"') && whatsNewDue("not json"), "what's new: shows after an update (and over a value it can't read)");
+
   {
     const v = (r) => r.split(".").map(Number).reduce((a, n) => a * 1000 + n, 0);
     const order = [WHATS_NEW.release, ...PREVIOUS.map((p) => p.release)];
@@ -556,7 +524,7 @@ check(model.value("T3").get() === 4 && model.effectiveValue("T3").get() === 7.5,
   check(noUrl.step.get() === "failed" && noUrl.note.get().includes("no address"), "model: without an address it says so");
   }
 
-  // hotkeys (Hotkeys.tsx): the actions, the add-on's notes, other add-ons' keys, the model's messages
+  // hotkeys (src/hotkeys.ts): the actions, the add-on's notes, other add-ons' keys, the store's messages
   {
     const names = hk.HOTKEY_ACTIONS.map((a) => a.name);
     check(JSON.stringify([...names].sort()) ===
@@ -585,35 +553,28 @@ check(model.value("T3").get() === 4 && model.effectiveValue("T3").get() === 7.5,
     check(hk.hotkeyClashes({ toggle: "ctrl + shift + f9" }, glass).length === 1, "clashes: case and spaces don't matter");
     check(hk.hotkeyClashes({ cloudFog: "" }, [{ addon: "X", what: "y", keys: "" }]).length === 0, "clashes: none and none don't clash");
 
-    const hsent = [];
-    const m = new SettingsModel((data) => hsent.push(data));
-    check(m.hotkeys.get().toggle === "Ctrl+Shift+F9" && !m.hasHotkeys.get(), "model: the shipping keys until the add-on says");
-    m.onState(JSON.stringify({ T, C, TE, hotkeys: keys, learning: "", hotkeyNote: "set:cloudFog", cloudFogOff: true,
-                               otherHotkeys: glass }));
-    check(m.hasHotkeys.get() && m.hotkeys.get().cloudFog === "Ctrl+Shift+F8" && m.hotkeyNote.get() === "set:cloudFog" &&
-          m.cloudFogOff.get() && m.otherHotkeys.get().length === 2, "model: the add-on's hotkeys, note, fog and other keys");
+    const g = fakeHost();
+    const m = new Store(g.host);
+    g.sent.length = 0;
+    g.state({ T, C, TE, hotkeys: keys, learning: "", hotkeyNote: "set:cloudFog", cloudFogOff: true, otherHotkeys: glass });
     m.learnHotkey("toggle");
-    check(m.learning.get() === "toggle" && JSON.stringify(hsent.pop()) === '{"learnHotkey":"toggle"}',
-          "model: learning a key (shown at once)");
+    check(m.state.get().learning === "toggle" && JSON.stringify(g.sent.pop()) === '{"learnHotkey":"toggle"}',
+          "store: learning a key (shown at once)");
     m.learnHotkey("");
-    check(m.learning.get() === "" && JSON.stringify(hsent.pop()) === '{"learnHotkey":""}', "model: cancelled");
+    check(m.state.get().learning === "" && JSON.stringify(g.sent.pop()) === '{"learnHotkey":""}', "store: cancelled");
     m.setHotkey("cloudFog", "");
-    check(JSON.stringify(hsent.pop()) === '{"setHotkey":{"cloudFog":""}}', "model: a key cleared");
+    check(JSON.stringify(g.sent.pop()) === '{"setHotkey":{"cloudFog":""}}', "store: a key cleared");
     m.setHotkey("toggle", "Ctrl+Shift+F9");
-    check(JSON.stringify(hsent.pop()) === '{"setHotkey":{"toggle":"Ctrl+Shift+F9"}}', "model: a key set (Default)");
+    check(JSON.stringify(g.sent.pop()) === '{"setHotkey":{"toggle":"Ctrl+Shift+F9"}}', "store: a key set (Default)");
     m.setCloudFogOff(false);
-    check(!m.cloudFogOff.get() && JSON.stringify(hsent.pop()) === '{"cloudFogOff":false}', "model: the fog on again");
-    m.onState(JSON.stringify({ T, C, TE }));
-    check(!m.hasHotkeys.get() && m.hotkeys.get().cloudFog === "Ctrl+Shift+F8" && !m.cloudFogOff.get() &&
-          m.otherHotkeys.get().length === 0, "model: an older add-on: no hotkeys to change, the last keys kept");
+    check(m.state.get().cloudFogOff === false && JSON.stringify(g.sent.pop()) === '{"cloudFogOff":false}',
+          "store: the in-cloud fog on again");
+    m.dispose();
   }
 
   {
-    // The redesign's METAR in plain words (src/ui/metar.ts)
-    const outMetar = path.join(os.tmpdir(), "atmo-metar-test.js");
-    esbuild.buildSync({ entryPoints: [path.join(__dirname, "..", "src", "ui", "metar.ts")], bundle: true,
-                        platform: "node", format: "cjs", outfile: outMetar, logLevel: "error" });
-    const { decode, layersText, feet } = require(outMetar);
+    // the METAR in plain words (src/ui/metar.ts)
+    const { decode, layersText, feet } = app.metar;
     const d = decode("METAR EDDK 201250Z AUTO 22003KT 170V270 9999 -SHRA BKN015 BKN019 BKN034 FEW///TCU 09/08 Q1001 "
                      + "BECMG 34006KT BKN008");
     check(d.station === "EDDK" && d.time === "20th, 12:50 UTC" && d.auto && d.wind === "220° 3 kt (varying 170-270°)"
@@ -638,25 +599,16 @@ check(model.value("T3").get() === 4 && model.effectiveValue("T3").get() === 7.5,
     check(more.weather.join(" | ") === "freezing rain | patches of fog | blowing snow | thunderstorm nearby | light snow showers",
           `metar: descriptors in plain word order (${more.weather.join(" | ")})`);
     check(feet(12500) === "12,500 ft" && decode("garbage").weather.length === 0, "metar: thousands, and nonsense ignored");
-    fs.rmSync(outMetar, { force: true });
 
     // ... and whether GitHub has a newer release (src/ui/update.ts)
-    const outUpdate = path.join(os.tmpdir(), "atmo-update-test.js");
-    esbuild.buildSync({ entryPoints: [path.join(__dirname, "..", "src", "ui", "update.ts")], bundle: true,
-                        platform: "node", format: "cjs", outfile: outUpdate, logLevel: "error" });
-    const up = require(outUpdate);
+    const up = app.update;
     check(up.newer("v0.8.0", "0.7.3") && up.newer("v0.7.10", "0.7.9") && up.newer("1.0.0", "0.9.9")
           && !up.newer("v0.7.3", "0.7.3") && !up.newer("v0.7.2", "0.7.3") && !up.newer("v0.8.0", "dev (harness)")
           && !up.newer(undefined, "0.7.3") && !up.newer("latest", "0.7.3") && up.newer("v.0.8.0", "v.0.7.3"),
           "update: newer only when the release's version is higher (10 > 9; not a version: no)");
-    fs.rmSync(outUpdate, { force: true });
   }
 
   fs.rmSync(out, { force: true });
-  fs.rmSync(outHotkeys, { force: true });
-  fs.rmSync(outDefaults, { force: true });
-  fs.rmSync(outNews, { force: true });
-  fs.rmSync(outReport, { force: true });
   console.log(failures ? "FAILED" : "all checks passed");
   process.exit(failures ? 1 : 0);
 })();

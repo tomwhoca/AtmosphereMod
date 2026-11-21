@@ -1,5 +1,5 @@
 // AtmosphereMod performance reports: a Google Apps Script web app that adds
-// each report the EFB app sends (efb/.../src/PerfReport.tsx, reportFields)
+// each report the EFB app sends (efb/.../src/report.ts, reportFields)
 // to the sheet "Reports" of the spreadsheet it's attached to.
 //
 // Setup (once, in the Google account that owns the spreadsheet):
@@ -9,7 +9,7 @@
 //      access: Anyone. Deploy, and allow the access it asks for (only this
 //      spreadsheet: @OnlyCurrentDoc below).
 //   3. The web app URL (https://script.google.com/macros/s/.../exec) goes
-//      into REPORT_URL in PerfReport.tsx.
+//      into REPORT_URL in src/report.ts.
 // After changing this file: Deploy > Manage deployments > edit > Version: New
 // version, so the URL stays the same.
 //

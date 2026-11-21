@@ -584,6 +584,9 @@ add-on outside the sim can't read them directly.
   passed on.
 - When the add-on asks, it fetches a METAR from the sim and sends it to the
   add-on over the sim's CommBus, through SimConnect.
+- At most once a day it asks GitHub for the version of the mod's latest
+  release, so its overview can tell you when a newer one is out. That request
+  is all: nothing about you or your PC is sent.
 
 **Which METARs.**
 - Every minute: the METAR nearest the aircraft, for the haze and the clouds.

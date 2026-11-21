@@ -1,6 +1,9 @@
-// The UI's one link to the world (the redesign, 2026-11): the sim's EFB app implements it (AtmoWeather.tsx), the
-// browser harness fakes it (efb/harness). The UI module itself uses no SDK or EFB component, only the DOM, so the
-// same bundle runs in both.
+// The UI's one link to the world (the redesign, 2026-11): in the sim ui/sim.ts implements it (on the app's shell,
+// AtmoWeather.tsx), the browser harness fakes it (efb/harness). The UI module itself uses no SDK or EFB component,
+// only the DOM, so the same bundle runs in both.
+
+import type { OtherHotkey } from "../hotkeys";
+import type { Transport } from "../report";
 
 /** The add-on's state message (AtmosphereMod.State, addon/src/settings_bridge.h); every field may be missing from
  * an older add-on. */
@@ -17,10 +20,15 @@ export interface AddonState {
   presetSaved?: boolean;
   presetsMissing?: Record<string, string[]>;
   presetNote?: string;
+  /** The performance report (src/report.ts AddonReport), while one is asked for. */
   report?: unknown;
-  hotkeys?: unknown;
-  otherHotkeys?: unknown;
-  learning?: unknown;
+  /** By action (src/hotkeys.ts), as text ("" for none). */
+  hotkeys?: Record<string, string>;
+  /** Other add-ons' keys (Glass Cockpit DLSS Fix's, while it's loaded). */
+  otherHotkeys?: OtherHotkey[];
+  /** The action whose keys the add-on waits for ("" for none). */
+  learning?: string;
+  /** The add-on's note on the last hotkey change (src/hotkeys.ts hotkeyNoteText). */
   hotkeyNote?: string;
   cloudFogOff?: boolean;
 }
@@ -32,6 +40,11 @@ export interface Panel {
   vertical: boolean;
   /** 0 small, 1 medium, 2 large (from the area's short side: 624, 745, 863). */
   size: number;
+}
+
+export interface TextEvents {
+  text?: (text: string) => void;
+  outside?: () => void;
 }
 
 export interface Host {
@@ -51,6 +64,12 @@ export interface Host {
   simvar(name: string, unit: string): number;
   /** A web page in the PC's browser (the newer release's page). */
   openUrl(url: string): void;
+  /** A text field takes the keyboard (`focused`) or gives it back. In the sim, keys are the sim's commands unless a
+   * field has asked for them. `events.text`: what was typed on the OS's own keyboard (a gamepad's) for the field;
+   * `events.outside`: a click outside the tablet, where the field should let go. */
+  textFocus(focused: boolean, events?: TextEvents): void;
+  /** How a performance report travels, if not to the sheet (the harness: a stand-in, so nothing reaches it). */
+  readonly reportTransport?: Transport;
   /** Small values kept across flights (What's new: the version last seen). */
   load(key: string): string | undefined;
   save(key: string, value: string): void;

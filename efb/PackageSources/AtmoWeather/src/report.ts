@@ -1,6 +1,6 @@
 // Performance report: the add-on measures the mod's cost (it switches the mod
 // on, off and on again and times the frames: addon/src/perf_report.h) and
-// finds the PC and the sim's settings; this shows all of it, asks for the
+// finds the PC and the sim's settings; the app shows all of it, asks for the
 // user's impression, and sends it when the user taps Send (nothing is sent
 // before): as JSON to a Google Apps Script web app that adds it to the mod's
 // performance sheet (tools/perf_report_sheet.gs). This is the only way
@@ -8,11 +8,9 @@
 //
 //   AtmosphereMod.Settings  app -> add-on  {measure: true} starts, {measure: false} stops
 //   AtmosphereMod.State     add-on -> app  {..., report: {phase, progress, result?, system?}}
+// No SDK: the UI module (src/ui) and the tests use it; its state is in Values (ui/dom.ts).
 
-import { Switch, TabSelector, TextBox, TTButton } from "@efb/efb-api";
-import {
-  ComponentProps, DisplayComponent, FSComponent, Subject, Subscribable, Subscription, VNode,
-} from "@microsoft/msfs-sdk";
+import { Value } from "./ui/dom";
 
 /** The web app of tools/perf_report_sheet.gs (its deployment's /exec URL). */
 export const REPORT_URL =
@@ -419,22 +417,22 @@ const RUNNING = ["settleOn", "on", "settleOff", "off", "settleOn2", "on2"];
 const START_WAIT_MS = 6000;
 
 export class PerfReportModel {
-  public readonly open = Subject.create(false);
-  public readonly step = Subject.create<Step>("intro");
-  public readonly progress = Subject.create(0);
-  public readonly phase = Subject.create("");
-  public readonly note = Subject.create("");
+  public readonly open = new Value(false);
+  public readonly step = new Value<Step>("intro");
+  public readonly progress = new Value(0);
+  public readonly phase = new Value("");
+  public readonly note = new Value("");
   /** The result in a line or two, and what will be sent, for the review. */
-  public readonly summary = Subject.create("");
-  public readonly warning = Subject.create("");
-  public readonly details = Subject.create("");
-  public readonly vr = Subject.create(false);
-  public readonly weather = Subject.create(WEATHER[0]);
-  public readonly impression = Subject.create("");
-  public readonly stutters = Subject.create("");
-  public readonly limitedBy = Subject.create("");
-  public readonly comment = Subject.create("");
-  public readonly contact = Subject.create("");
+  public readonly summary = new Value("");
+  public readonly warning = new Value("");
+  public readonly details = new Value("");
+  public readonly vr = new Value(false);
+  public readonly weather = new Value(WEATHER[0]);
+  public readonly impression = new Value("");
+  public readonly stutters = new Value("");
+  public readonly limitedBy = new Value("");
+  public readonly comment = new Value("");
+  public readonly contact = new Value("");
   private report?: AddonReport;
   private context?: Context;
   /** One per measurement: sending it again (Try again after a lost answer) doesn't make a second row. */
@@ -449,8 +447,8 @@ export class PerfReportModel {
     private readonly now: () => number = () => Date.now(),
     private readonly url: string = REPORT_URL,
   ) {
-    this.vr.sub(() => this.refresh());
-    this.weather.sub(() => this.refresh());
+    this.vr.watch(() => this.refresh());
+    this.weather.watch(() => this.refresh());
   }
 
   public show(): void {
@@ -586,7 +584,7 @@ function readable(result: PostResult): boolean {
   }
 }
 
-const PHASE_TEXT: Record<string, string> = {
+export const PHASE_TEXT: Record<string, string> = {
   settleOn: "The mod on: settling (1 of 3)",
   on: "The mod on: measuring (1 of 3)",
   settleOff: "The mod off: settling (2 of 3)",
@@ -594,155 +592,3 @@ const PHASE_TEXT: Record<string, string> = {
   settleOn2: "The mod on again: settling (3 of 3)",
   on2: "The mod on again: measuring (3 of 3)",
 };
-
-interface ChoiceProps extends ComponentProps {
-  options: readonly string[];
-  selected: Subject<string>;
-}
-
-/** One of a few options, as a row of tabs. */
-class Choice extends DisplayComponent<ChoiceProps> {
-  public render(): VNode {
-    const { options, selected } = this.props;
-    return (
-      <div class="atmo-choice">
-        {options.map((o) => (
-          <TabSelector tabName={o} active={selected.map((s) => s === o)} hidden={Subject.create(false)}
-                       callback={() => selected.set(o)} />
-        ))}
-      </div>
-    );
-  }
-}
-
-interface PerfReportViewProps extends ComponentProps {
-  model: PerfReportModel;
-}
-
-/** Over the app's page, like What's new (WhatsNew.tsx). */
-export class PerfReportView extends DisplayComponent<PerfReportViewProps> {
-  private readonly bar = FSComponent.createRef<HTMLDivElement>();
-  private readonly subs: Subscription[] = [];
-
-  public onAfterRender(node: VNode): void {
-    super.onAfterRender(node);
-    this.subs.push(this.props.model.progress.sub((p) => {
-      const bar = this.bar.getOrDefault();
-      if (bar !== null) {
-        bar.style.width = `${Math.round(p * 100)}%`;
-      }
-    }, true));
-  }
-
-  public render(): VNode {
-    const { model } = this.props;
-    const at = (...steps: Step[]): Subscribable<boolean> => model.step.map((s) => !steps.includes(s));
-    const hasNote = model.note.map((n) => n === "");
-    return (
-      <div class={{ "atmo-news": true, "atmo-report": true, "atmo-hidden": model.open.map((o) => !o) }}>
-        <div class="atmo-news-card">
-          <div class="atmo-news-title">Performance report</div>
-          <div class={{ "atmo-hidden": at("intro") }}>
-            <div class="atmo-news-text">
-              This measures what AtmosphereMod costs on your PC and sends me the result, with your PC's and the
-              sim's settings, so I can see where the mod runs well and where it needs work.
-            </div>
-            <div class="atmo-news-item">
-              <div class="atmo-news-text">1. Find a view with clouds (most of the mod's cost is in them) and hold it
-                still: pause the sim or slew. Keep other windows off the sim meanwhile. A frame-rate cap is fine: the
-                GPU's time per frame shows the cost anyway.</div>
-              <div class="atmo-news-text">2. Tap Start. For about 36 seconds the mod switches itself on, off and on
-                again while the frames are timed. Don't touch anything meanwhile; you can close the tablet.</div>
-              <div class="atmo-news-text">3. Check what will be sent, add how the mod runs for you, and tap Send.
-                Nothing is sent before.</div>
-            </div>
-            <div class="atmo-buttons">
-              <TTButton key="Start" type="secondary" callback={() => model.start()} />
-              <TTButton key="Close" type="secondary" callback={() => model.close()} />
-            </div>
-          </div>
-          <div class={{ "atmo-hidden": at("measuring") }}>
-            <div class="atmo-news-text">{model.phase.map((p) => PHASE_TEXT[p] ?? "Starting")}</div>
-            <div class="atmo-progress"><div ref={this.bar} class="atmo-progress-bar" /></div>
-            <div class="atmo-buttons">
-              <TTButton key="Stop" type="secondary" callback={() => model.stop()} />
-            </div>
-          </div>
-          <div class={{ "atmo-hidden": at("review", "sending") }}>
-            <div class="atmo-news-item">
-              <div class="atmo-news-head">{model.summary}</div>
-              <div class={{ "atmo-news-text": true, "atmo-unsaved": true, "atmo-hidden": model.warning.map((w) => w === "") }}>
-                {model.warning}
-              </div>
-            </div>
-            <div class="atmo-news-text">The weather in the view (from the METAR: change it if the view differs)</div>
-            <Choice options={WEATHER} selected={model.weather} />
-            <div class="atmo-row">
-              <div class="atmo-label">Flying in VR</div>
-              <div class="atmo-control atmo-switch"><Switch checked={model.vr} callback={(on) => model.vr.set(on)} /></div>
-            </div>
-            <div class="atmo-news-text">How does the mod run for you? (needed)</div>
-            <Choice options={IMPRESSION} selected={model.impression} />
-            <div class="atmo-news-text">Stutters with the mod (optional)</div>
-            <Choice options={STUTTERS} selected={model.stutters} />
-            <div class="atmo-news-text">The sim's FPS counter says it's limited by (optional)</div>
-            <Choice options={LIMITED_BY} selected={model.limitedBy} />
-            <div class="atmo-report-text">
-              <TextBox model={model.comment} placeholder="Anything else (optional)" showDeleteIcon={true} />
-            </div>
-            <div class="atmo-news-text">Your username on GitHub or flightsim.to (optional). If I asked you for a
-              report, it's how I find yours, and I can ask you about it.</div>
-            <div class="atmo-report-text">
-              <TextBox model={model.contact} placeholder="Username" showDeleteIcon={true} />
-            </div>
-            <div class="atmo-news-text">What will be sent, besides your answers above:</div>
-            <div class="atmo-report-details">{model.details}</div>
-            <div class="atmo-news-text atmo-report-privacy">
-              It goes to a Google Sheet I keep for these reports. Google gets your IP address with it, as any website
-              does, but it isn't saved in the sheet. Apart from the username you type, no names or file paths are
-              in it.
-            </div>
-            <div class={{ "atmo-buttons": true, "atmo-hidden": at("review") }}>
-              <TTButton key="Send" type="secondary" callback={() => void model.send()} />
-              <TTButton key="Measure again" type="secondary" callback={() => model.start()} />
-              <TTButton key="Close" type="secondary" callback={() => model.close()} />
-            </div>
-            <div class={{ "atmo-news-text": true, "atmo-hidden": at("sending") }}>Sending...</div>
-          </div>
-          <div class={{ "atmo-hidden": at("sent") }}>
-            <div class="atmo-news-text">Sent. Thank you!</div>
-            <div class="atmo-buttons">
-              <TTButton key="Close" type="secondary" callback={() => model.close()} />
-            </div>
-          </div>
-          <div class={{ "atmo-hidden": at("failed") }}>
-            <div class="atmo-news-text">It couldn't be sent (why is below). Try again in a moment: the
-              measurement is kept until you close this.</div>
-            <div class="atmo-buttons">
-              <TTButton key="Try again" type="secondary" callback={() => void model.send()} />
-              <TTButton key="Close" type="secondary" callback={() => model.close()} />
-            </div>
-          </div>
-          <div class={{ "atmo-note": true, "atmo-hidden": hasNote }}>{model.note}</div>
-        </div>
-      </div>
-    );
-  }
-
-  public destroy(): void {
-    this.subs.forEach((s) => s.destroy());
-    super.destroy();
-  }
-}
-
-export const PERF_REPORT_CSS = `
-.atmo-report { z-index: 31; }
-.atmo-progress { height: 14px; margin: 16px 0; border-radius: 7px; background-color: rgba(255, 255, 255, 0.15); }
-.atmo-progress-bar { width: 0; height: 100%; border-radius: 7px; background-color: rgb(29, 137, 230); }
-.atmo-choice { display: flex; flex-wrap: wrap; margin: 4px 0 14px; }
-.atmo-report-text { margin: 8px 0; }
-.atmo-report-text > .textbox { width: 100%; }
-.atmo-report-details { font-family: monospace; font-size: 19px; white-space: pre-wrap; opacity: 0.75; margin: 6px 0 12px;
-  overflow-wrap: anywhere; }
-.atmo-report-privacy { font-size: 21px; opacity: 0.7; }
-`;

@@ -10,7 +10,7 @@ and check its layout at every tablet size and orientation.
 Needs the sim with Dev Mode's Coherent debugger on (tools/coherent.py), and the app installed once as a developer
 build with the new UI, with the sim closed:
 
-    python tools/build_efb.py --new-ui --dev
+    python tools/build_efb.py --dev
     python tools/deploy.py
 
 The sim serves the package's files as they are on disk (measured 2026-11-20, notes/efb-ui.md), so writing AtmoUI.js
@@ -115,7 +115,7 @@ AUDIT = r"""(function () {
 def build_into(target: Path) -> None:
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     subprocess.run([str(NODE), str(ESBUILD), str(APP / "src" / "ui" / "main.ts"), "--bundle", "--format=iife",
-                    "--target=es2017", f"--outfile={target}", f'--define:UI_BUILD="{stamp}"', "--log-level=warning"],
+                    "--target=es2017", f"--outfile={target}", f'--define:UI_BUILD="{stamp}"', "--define:DEV=true", "--log-level=warning"],
                    check=True, cwd=APP)
 
 
@@ -123,7 +123,7 @@ def reload_ui() -> str:
     started = coherent.evaluate(coherent.TABLET, RELOAD)
     if started == "NO_HOOK":
         raise SystemExit("the installed app has no reload hook: install a developer build with the new UI "
-                         "(python tools/build_efb.py --new-ui --dev, then tools/deploy.py with the sim closed)")
+                         "(python tools/build_efb.py --dev, then tools/deploy.py with the sim closed)")
     for _ in range(40):
         time.sleep(0.25)
         result = coherent.evaluate(coherent.TABLET, "window.__atmoUiReloadResult")
@@ -163,7 +163,7 @@ def main() -> None:
     if not args.no_build:
         target = community_folder() / UI_FILE
         if not target.exists():
-            raise SystemExit(f"{target} isn't installed: python tools/build_efb.py --new-ui --dev, then "
+            raise SystemExit(f"{target} isn't installed: python tools/build_efb.py --dev, then "
                              "tools/deploy.py with the sim closed (a new file needs the sim restarted once)")
         build_into(target)
         print(reload_ui())

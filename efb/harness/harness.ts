@@ -3,6 +3,7 @@
 // tools/efb_harness.py serves it with live reload: on every save the UI module is evaluated again and mounted
 // anew, the harness keeping its state (the tablet, the fake add-on's settings).
 
+import type { Transport } from "../PackageSources/AtmoWeather/src/report";
 import type { AddonState, Host, Panel } from "../PackageSources/AtmoWeather/src/ui/host";
 
 interface Layout {
@@ -109,9 +110,45 @@ class FakeAddon {
       s.presetNote = `saved "${data.savePreset}"`;
     }
     if (typeof data.loadPreset === "string") {
+      if (data.fill !== undefined && s.presetsMissing) {
+        delete s.presetsMissing[data.loadPreset];
+      }
       s.preset = data.loadPreset;
       s.presetSaved = true;
-      s.presetNote = `loaded "${data.loadPreset}"`;
+      s.presetNote = `loaded "${data.loadPreset}"${data.fill ? ` (filled in: ${data.fill})` : ""}`;
+    }
+    if (data.importPreset === true) {
+      // (the add-on's file dialog: here a preset named as if one was chosen)
+      const name = `Imported ${new Date().toTimeString().slice(0, 5)}`;
+      s.presets = [...(s.presets || []), name];
+      s.presetNote = `imported "${name}" from a file`;
+    }
+    if (data.reload === true) {
+      s.presetNote = "";
+    }
+    if (typeof data.learnHotkey === "string") {
+      s.learning = data.learnHotkey;
+      if (data.learnHotkey !== "") {
+        // (someone presses keys in the sim 3 s later)
+        const name = data.learnHotkey;
+        setTimeout(() => {
+          if (this.state.learning === name) {
+            this.state.hotkeys = { ...(this.state.hotkeys || {}), [name]: "Ctrl+Shift+F9" };
+            this.state.learning = "";
+            this.state.hotkeyNote = `set:${name}`;
+            this.tell();
+          }
+        }, 3000);
+      }
+    }
+    if (data.setHotkey && typeof data.setHotkey === "object") {
+      for (const [name, keys] of Object.entries(data.setHotkey as Record<string, string>)) {
+        s.hotkeys = { ...(s.hotkeys || {}), [name]: keys };
+        s.hotkeyNote = keys ? `set:${name}` : `cleared:${name}`;
+      }
+    }
+    if (typeof data.cloudFogOff === "boolean") {
+      s.cloudFogOff = data.cloudFogOff;
     }
     if (typeof data.deletePreset === "string") {
       s.presets = (s.presets || []).filter((p) => p !== data.deletePreset);
@@ -129,7 +166,7 @@ class FakeAddon {
 
   /** A performance report as the add-on runs it: on, off, on again (about 36 s in the sim; 6 s here). */
   private measure(): void {
-    const phases = ["settle_on", "on", "settle_off", "off", "settle_on2", "on2"];
+    const phases = ["settleOn", "on", "settleOff", "off", "settleOn2", "on2"];  // (perf_report.cpp's names)
     const done = this.fixture.state.report as { result?: unknown; system?: unknown } | undefined;
     let t = 0;
     if (this.measuring) {
@@ -167,6 +204,17 @@ function log(line: string): void {
 
 class HarnessHost implements Host {
   public readonly version = "dev (harness)";
+  /** The performance report's way out: nothing reaches the sheet from here; the harness answers as its script would
+   * when the post can't be read (as in the sim): the post's answer unreadable, the confirmation ok. */
+  public readonly reportTransport: Transport = {
+    post: (url, body) => {
+      log(`report not sent (the harness): ${body.length} chars`);
+      return Promise.resolve({ status: 0, text: "" });
+    },
+    confirm: () => new Promise((resolve) => setTimeout(() => resolve({ status: 200, text: JSON.stringify({ ok: true }) }),
+                                                       800)),
+    wait: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  };
   private readonly panels: ((p: Panel) => void)[] = [];
 
   public constructor(private readonly addon: FakeAddon, private readonly fixture: Fixture,
@@ -220,6 +268,10 @@ class HarnessHost implements Host {
   public openUrl(url: string): void {
     log(`open in the browser: ${url}`);
     window.open(url, "_blank", "noopener");
+  }
+
+  public textFocus(focused: boolean): void {
+    log(focused ? "a text field has the keyboard" : "the keyboard back to the sim");
   }
 
   public load(key: string): string | undefined {

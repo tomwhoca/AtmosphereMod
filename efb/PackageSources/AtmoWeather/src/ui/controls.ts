@@ -3,8 +3,9 @@
 // setting's row (its name, its help on request, its control, a reset to the shipped default). Mouse events only:
 // the tablet's engine has no pointer events.
 
-import type { SliderSpec, Spec } from "../specs";
+import { SliderSpec, Spec, TABS } from "../specs";
 import { h, Scope, Value } from "./dom";
+import { Host } from "./host";
 import { icon } from "./icons";
 import { Store } from "./model";
 
@@ -40,6 +41,137 @@ export function button(scope: Scope, label: Value<string> | string, kind: string
     }
   });
   return el;
+}
+
+/** A card: a title over its body. */
+export function card(title: string, ...children: (Node | null)[]): HTMLElement {
+  return h("div", { class: "card" }, h("h2", { text: title }), h("div", { class: "body" }, ...children));
+}
+
+/** A tap that asks for a second one before it acts (if `needed`): the button reads `armedText` meanwhile. */
+export function twoTaps(scope: Scope, label: string, armedText: string, kind: string, act: () => void,
+                        needed: () => boolean, enabled?: Value<boolean>): HTMLElement {
+  const text = new Value(label);
+  let armed = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const disarm = () => {
+    armed = false;
+    text.set(label);
+  };
+  const el = button(scope, text, kind, () => {
+    if (!needed() || armed) {
+      if (timer) {
+        clearTimeout(timer);
+      }
+      disarm();
+      act();
+      return;
+    }
+    armed = true;
+    text.set(armedText);
+    el.classList.add("armed");
+    timer = setTimeout(disarm, 4000);
+  }, enabled);
+  scope.add(text.watch((t) => {
+    if (t === label) {
+      el.classList.remove("armed");
+    }
+  }));
+  scope.add(() => timer && clearTimeout(timer));
+  return el;
+}
+
+/** A row of options, one chosen (`selected`; "" for none yet). */
+export function choice(scope: Scope, options: readonly string[], selected: Value<string>): HTMLElement {
+  const row = h("div", { class: "choice" });
+  for (const o of options) {
+    const chip = h("div", { class: "chip", text: o });
+    scope.listen(chip, "click", () => selected.set(o));
+    scope.add(selected.watch((s) => { chip.className = `chip${s === o ? " on" : ""}`; }));
+    row.appendChild(chip);
+  }
+  return row;
+}
+
+export interface FieldOptions {
+  placeholder: string;
+  value: Value<string>;
+  /** The characters it takes (others typed are ignored). */
+  accepts?: (c: string) => boolean;
+  max?: number;
+  /** Enter pressed, or the text came from the OS's keyboard. */
+  enter?: () => void;
+}
+
+/** A text field. While it's focused, it has the keyboard (Host.textFocus): in the sim, keys are the sim's commands
+ * otherwise. Enter (or text from the OS's keyboard) confirms, Escape or a click outside the tablet lets go. */
+export function textField(scope: Scope, host: Host, o: FieldOptions): HTMLInputElement {
+  const input = h("input", { class: "field" });
+  input.type = "text";
+  input.placeholder = o.placeholder;
+  if (o.max) {
+    input.maxLength = o.max;
+  }
+  scope.add(o.value.watch((v) => {
+    if (input.value !== v) {
+      input.value = v;
+    }
+  }));
+  let focused = false;
+  const letGo = () => {
+    if (focused) {
+      focused = false;
+      host.textFocus(false);
+    }
+  };
+  scope.listen(input, "focus", () => {
+    focused = true;
+    host.textFocus(true, {
+      text: (t) => {
+        o.value.set(t);
+        input.blur();
+        if (o.enter) {
+          o.enter();
+        }
+      },
+      outside: () => input.blur(),
+    });
+  });
+  scope.listen(input, "blur", letGo);
+  scope.listen(input, "input", () => o.value.set(input.value));
+  scope.listen(input, "keypress", (e) => {
+    const k = e as KeyboardEvent;
+    const code = k.charCode || k.keyCode;
+    if (o.accepts && code >= 32 && !o.accepts(String.fromCharCode(code))) {
+      e.preventDefault();
+    }
+  });
+  scope.listen(input, "keydown", (e) => {
+    const code = (e as KeyboardEvent).keyCode;
+    if (code === 13) {
+      e.preventDefault();
+      input.blur();
+      if (o.enter) {
+        o.enter();
+      }
+    } else if (code === 27) {
+      input.blur();
+    }
+  });
+  scope.add(letGo);
+  return input;
+}
+
+/** A sheet over the app (What's new, the performance report): its title and a close icon over a body that scrolls.
+ * Returns the sheet and its body (app.ts lets it scroll by dragging). */
+export function sheet(scope: Scope, title: string, close: () => void,
+                      ...children: (Node | null)[]): { el: HTMLElement; body: HTMLElement } {
+  const x = h("div", { class: "icon-btn", title: "Close" }, icon("close"));
+  scope.listen(x, "click", close);
+  const body = h("div", { class: "sheet-body" }, ...children);
+  const el = h("div", { class: "sheet" },
+    h("div", { class: "sheet-card" }, h("div", { class: "sheet-head" }, h("h2", { text: title }), x), body));
+  return { el, body };
 }
 
 /** A button that acts on a click and again and again while held. */
@@ -141,13 +273,51 @@ export function valueBar(scope: Scope, value: Value<number>, r: BarRange,
            repeatButton(scope, "plus", step(1), settle));
 }
 
-/** Whether a setting has an effect now: not while the setting it needs is 0, nor a manual haze setting while the
- * haze comes from the METAR (T13). */
-export function active(store: Store, spec: Spec): boolean {
-  if (spec.kind === "slider" && spec.needs && !(store.raw(spec.needs) > 0)) {
-    return false;
+/** Every setting the app shows, by key. */
+const SPECS = new Map<string, Spec>();
+TABS.forEach((t) => t.settings.forEach((s) => SPECS.set(s.key, s)));
+
+/** Why a setting has no effect now, in words, or "" if it has: a manual haze setting while the haze comes from the
+ * METAR (T13); a setting whose `needs` is at 0, along the chain (Cloud bases needs Solid clouds, which needs Mod
+ * clouds). */
+export function blocked(store: Store, spec: Spec): string {
+  // (the chain first: with Mod atmosphere off, that's the reason, not Haze from METAR)
+  const need = spec.needs;
+  if (need) {
+    const other = SPECS.get(need);
+    if (!(store.raw(need) > 0)) {
+      const name = other ? other.label : need;
+      const at = other && other.kind === "slider" ? other.format(other.toDisplay(0)) : "off";
+      return `Has no effect while “${name}” is ${at === "off" ? "off" : `at ${at}`}`;
+    }
+    const why = other ? blocked(store, other) : "";
+    if (why) {
+      return why;
+    }
   }
-  return !(spec.kind === "slider" && spec.manualHaze && store.raw("T13") > 0);
+  if (spec.kind === "slider" && spec.manualHaze && store.raw("T13") > 0) {
+    return "Set by the METAR while “Haze from METAR” is on";
+  }
+  return "";
+}
+
+/** Whether a setting has an effect now (blocked: why not). */
+export function active(store: Store, spec: Spec): boolean {
+  return blocked(store, spec) === "";
+}
+
+/** The settings a setting's effect depends on: its `needs`, theirs, and T13 for the haze settings. */
+function dependsOn(spec: Spec): string[] {
+  const keys: string[] = [];
+  let s: Spec | undefined = spec;
+  while (s && s.needs && keys.indexOf(s.needs) < 0) {
+    keys.push(s.needs);
+    s = SPECS.get(s.needs);
+  }
+  if (spec.kind === "slider" && (spec.manualHaze || spec.metarOnly)) {
+    keys.push("T13");
+  }
+  return keys;
 }
 
 /** Shown at all: METAR-only settings while the haze comes from the METAR. */
@@ -155,9 +325,9 @@ export function shown(store: Store, spec: Spec): boolean {
   return !(spec.kind === "slider" && spec.metarOnly && !(store.raw("T13") > 0));
 }
 
-/** A setting's name: an experimental one's without "(experimental)", which its icon says instead. */
+/** A setting's name, an experimental one's with its mark. */
 export function labelOf(spec: Spec): HTMLElement {
-  const name = h("span", { text: spec.experimental ? spec.label.replace(/\s*\(experimental\)\s*$/i, "") : spec.label });
+  const name = h("span", { text: spec.label });
   return spec.experimental
     ? h("span", { class: "named" }, name, h("span", { class: "exp", title: "Experimental" }, icon("lab")))
     : name;
@@ -172,11 +342,13 @@ function setClass(el: HTMLElement, cls: string): void {
 
 /** A setting's row: watches its setting (and those it depends on), sends its changes. */
 export function settingRow(scope: Scope, store: Store, spec: Spec): HTMLElement {
-  const tip = h("div", { class: "tip", text: spec.tip });
+  // (a description in paragraphs, split at line breaks: what happens in reality, then what the setting does)
+  const tip = h("div", { class: "tip" }, ...spec.tip.split("\n").map((para) => h("p", { text: para })));
   const info = h("div", { class: "icon-btn", title: "What it does" }, icon("info"));
   const reset = h("div", { class: "icon-btn reset", title: "Back to the default" }, icon("reset"));
+  const why = h("div", { class: "why" });
   const row = h("div", { class: "row" },
-    h("div", { class: "text" }, h("div", { class: "label" }, labelOf(spec), info), tip));
+    h("div", { class: "text" }, h("div", { class: "label" }, labelOf(spec), info), why, tip));
   scope.listen(info, "click", () => row.classList.toggle("open"));
   scope.listen(reset, "click", () => store.set(spec.key, store.defaultOf(spec.key)));
 
@@ -207,8 +379,12 @@ export function settingRow(scope: Scope, store: Store, spec: Spec): HTMLElement 
   }
   refresh.push(() => {
     const changed = Math.abs(store.raw(spec.key) - store.defaultOf(spec.key)) > 1e-6;
-    setClass(reset, `icon-btn reset${changed && active(store, spec) ? "" : " faded"}`);
-    setClass(row, `row${row.classList.contains("open") ? " open" : ""}${active(store, spec) ? "" : " off"}`);
+    const reason = blocked(store, spec);
+    setClass(reset, `icon-btn reset${changed && !reason ? "" : " faded"}`);
+    setClass(row, `row${row.classList.contains("open") ? " open" : ""}${reason ? " off" : ""}`);
+    if (why.textContent !== reason) {
+      why.textContent = reason;
+    }
     const display = shown(store, spec) ? "" : "none";
     if (row.style.display !== display) {
       row.style.display = display;
@@ -216,14 +392,7 @@ export function settingRow(scope: Scope, store: Store, spec: Spec): HTMLElement 
   });
   const run = () => refresh.forEach((f) => f());
   scope.add(store.state.watch(run));
-  // (its own setting, and those its look depends on: a change here redraws these rows only)
-  const deps = [spec.key];
-  if (spec.kind === "slider" && spec.needs) {
-    deps.push(spec.needs);
-  }
-  if (spec.kind === "slider" && (spec.manualHaze || spec.metarOnly)) {
-    deps.push("T13");
-  }
-  deps.forEach((k) => scope.add(store.key(k).watch(run)));
+  // (its own setting, and those its effect depends on: a change there redraws these rows only)
+  [spec.key, ...dependsOn(spec)].forEach((k) => scope.add(store.key(k).watch(run)));
   return row;
 }

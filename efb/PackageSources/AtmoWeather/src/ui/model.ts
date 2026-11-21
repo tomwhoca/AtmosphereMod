@@ -1,11 +1,13 @@
-// The redesigned UI's model: what the add-on says (its state message) and what the UI asks of it. Settings change
-// at once on screen (the add-on's answer follows a moment later and confirms them).
+// The UI's model: what the add-on says (its state message) and what the UI asks of it (the messages:
+// addon/src/settings_bridge.h). Settings change at once on screen (the add-on's answer follows a moment later and
+// confirms them).
 
 import { DEFAULTS } from "../defaults";
+import { PRESET_DEFAULT, sameName } from "../presets";
 import { Value } from "./dom";
 import { AddonState, Host, Panel } from "./host";
 
-export const PRESET_DEFAULT = "Default";
+export { PRESET_DEFAULT, sameName };
 /** Until the add-on answers, the state is asked for this often. */
 const STATE_RETRY_MS = 3000;
 /** While a slider is dragged, its value goes to the add-on at most this often (and once more on release). */
@@ -13,8 +15,8 @@ const SEND_EVERY_MS = 150;
 /** A value set here stands until the add-on's state has it, or for this long after its last change: the add-on's
  * answers to the sends while dragging carry older values, which made the bar jump back (2026-11-20). */
 const SETTLE_MS = 1500;
-
-export const sameName = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
+/** When the app is shown again, the state is asked for, at most this often. */
+const REFRESH_MS = 1000;
 
 export class Store {
   public readonly state = new Value<AddonState | undefined>(undefined);
@@ -27,10 +29,18 @@ export class Store {
   private readonly keys = new Map<string, Value<number>>();
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly drops: (() => void)[] = [];
+  private askedAt = Date.now();
 
   public constructor(public readonly host: Host) {
     this.drops.push(host.onState((s) => this.accept(s)));
-    this.drops.push(host.onPanel((p) => this.panel.set(p)));
+    this.drops.push(host.onPanel((p) => {
+      this.panel.set(p);
+      // (the app shown again, or the tablet changed: the state anew, in case a message was missed meanwhile)
+      if (this.state.get() !== undefined && Date.now() - this.askedAt > REFRESH_MS) {
+        this.askedAt = Date.now();
+        host.send({ get: true });
+      }
+    }));
     this.drops.push(host.onMetar((m) => this.metar.set(m)));
     this.drops.push(host.onLinkStatus((l) => this.link.set(l)));
     host.send({ get: true });
@@ -107,8 +117,15 @@ export class Store {
     return typeof v === "number" ? v : undefined;
   }
 
+  /** The settings that differ from the shipping defaults, as "C16 = 2 (0.5)" (the default in brackets). */
+  public changedFromDefaults(): string[] {
+    return Object.keys(DEFAULTS).filter((k) => Math.abs(this.raw(k) - DEFAULTS[k]) > 1e-6)
+      .map((k) => `${k} = ${+this.raw(k).toPrecision(6)} (${DEFAULTS[k]})`);
+  }
+
   /** Sets a setting: on screen now, to the add-on now or (`soon`, while dragging) within SEND_EVERY_MS. */
-  public set(key: string, raw: number, soon = false): void {
+  public set(key: string, value: number, soon = false): void {
+    const raw = Math.round(value * 1e4) / 1e4;  // (as tunables.ini keeps them)
     this.pending.set(key, { value: raw, at: Date.now() });
     this.key(key).set(raw);
     const s = this.state.get();
@@ -129,6 +146,87 @@ export class Store {
     } else if (!this.timers.has(key)) {
       this.timers.set(key, setTimeout(send, SEND_EVERY_MS));
     }
+  }
+
+  /** The settings back to the shipping defaults (those that differ), in one message. */
+  public reset(keys: readonly string[]): void {
+    const values: Record<string, number> = {};
+    for (const key of keys) {
+      if (DEFAULTS[key] !== undefined && Math.abs(this.raw(key) - DEFAULTS[key]) > 1e-6) {
+        values[key] = DEFAULTS[key];
+      }
+    }
+    this.setMany(values);
+  }
+
+  /** Several settings at once, in one message (a reset; tools/shots.py through the developers' hook). */
+  public setMany(values: Readonly<Record<string, number>>): void {
+    const set: Record<string, number> = {};
+    for (const key of Object.keys(values)) {
+      const raw = Math.round(values[key] * 1e4) / 1e4;
+      this.pending.set(key, { value: raw, at: Date.now() });
+      this.key(key).set(raw);
+      set[key] = raw;
+    }
+    if (Object.keys(set).length > 0) {
+      const s = this.state.get();
+      if (s && s.presetSaved !== false) {
+        this.state.set({ ...s, presetSaved: false });
+      }
+      this.host.send({ set });
+    }
+  }
+
+  /** The changes a drag hasn't sent yet, now (before a save or a load). */
+  private flush(): void {
+    const keys = Array.from(this.timers.keys());
+    this.timers.forEach((t) => clearTimeout(t));
+    this.timers.clear();
+    if (keys.length > 0) {
+      const set: Record<string, number> = {};
+      keys.forEach((k) => { set[k] = this.raw(k); });
+      this.host.send({ set });
+    }
+  }
+
+  /** Changes made here the add-on hasn't confirmed yet (its presetSaved doesn't know them). */
+  public get unconfirmed(): boolean {
+    return this.pending.size > 0 || this.timers.size > 0;
+  }
+
+  /** As Ctrl+Shift+F10: the add-on saves pending changes, then reloads tunables.ini and its shaders. */
+  public reload(): void {
+    this.flush();
+    this.host.send({ reload: true });
+  }
+
+  /** The add-on opens a file dialog over the sim (the tablet can't open files) and adds the file chosen as a new
+   * preset. */
+  public importPreset(): void {
+    this.host.send({ importPreset: true });
+  }
+
+  /** The add-on takes the next keys pressed in the sim as the action's hotkey ("": it stops waiting). */
+  public learnHotkey(name: string): void {
+    const s = this.state.get();
+    if (s) {
+      this.state.set({ ...s, learning: name });
+    }
+    this.host.send({ learnHotkey: name });
+  }
+
+  /** The action's hotkey as text ("Ctrl+Shift+F9"; "" for none). */
+  public setHotkey(name: string, keys: string): void {
+    this.host.send({ setHotkey: { [name]: keys } });
+  }
+
+  /** The in-cloud fog off for now, or on again (as its hotkey). */
+  public setCloudFogOff(off: boolean): void {
+    const s = this.state.get();
+    if (s) {
+      this.state.set({ ...s, cloudFogOff: off });
+    }
+    this.host.send({ cloudFogOff: off });
   }
 
   public setEnabled(on: boolean): void {
@@ -158,23 +256,31 @@ export class Store {
 
   public saveInPlace(): void {
     if (this.canSaveInPlace) {
+      this.flush();
       this.host.send({ savePreset: this.preset });
     }
   }
 
+  /** Saves the settings as preset `name` (replacing one of that name). */
   public saveAs(name: string): void {
+    this.flush();
     this.host.send({ savePreset: name });
   }
 
   /** The changes undone: the preset loaded again as it was saved. */
   public undo(): void {
     if (this.preset !== "") {
-      this.host.send({ loadPreset: this.preset, discard: true });
+      this.load(this.preset, true);
     }
   }
 
-  public load(name: string, discard: boolean): void {
-    this.host.send({ loadPreset: name, ...(discard ? { discard: true } : {}) });
+  /** Loads preset `name`: the add-on writes its values into tunables.ini and reloads. Unless `discard`, only while
+   * the settings are a preset's (the add-on checks: settings no preset has aren't replaced unasked). The settings it
+   * lacks stay as they are, or with `fill` are first added to it: Default's values or the current ones. */
+  public load(name: string, discard: boolean, fill?: "defaults" | "current"): void {
+    this.flush();
+    this.pending.clear();  // (the preset's values, not the ones set here a moment ago)
+    this.host.send({ loadPreset: name, ...(discard ? { discard: true } : {}), ...(fill ? { fill } : {}) });
   }
 
   public remove(name: string): void {

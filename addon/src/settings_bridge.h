@@ -1,5 +1,6 @@
 // Settings from the EFB app: the AtmosphereMod EFB app shows the main tunables
-// as switches and sliders (efb/PackageSources/AtmoWeather/src/Settings.tsx) and
+// as switches and value bars (efb/PackageSources/AtmoWeather/src/specs.ts, its
+// UI in src/ui) and
 // talks to the add-on over CommBus, through the weather feed's SimConnect
 // connection (weather_feed.cpp):
 //
