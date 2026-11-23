@@ -161,14 +161,29 @@ async function listPublic(env: Env, url: URL): Promise<Response> {
               FRESH);
 }
 
+/** The versions list made again into the summary table (one row, 'versions'): run in the same batch as every change
+ * that can alter it (share, update, unshare, the admin's restore, hide, remove), so it's never behind. Making it reads
+ * every public preset's every value (json_each: about 1,200 rows with a dozen presets); a GET /v1/versions only reads
+ * the one row (migrations/0005_summary.sql: it read all of them on each call, 97% of the database's reads). */
+const VERSIONS_REFRESH =
+  "INSERT INTO summary (name, body, updated) "
+  + "SELECT 'versions', json_group_array(json_object('version', v.version, 'count', v.count, 'keys', json(v.keys))), ? "
+  + "FROM (SELECT p.version AS version, COUNT(DISTINCT p.id) AS count, json_group_array(DISTINCT j.key) AS keys "
+  + "FROM presets p, json_each(p.vals) j WHERE p.status = 'public' AND p.version != '' GROUP BY p.version) v "
+  + "WHERE true ON CONFLICT (name) DO UPDATE SET body = excluded.body, updated = excluded.updated";
+const refreshVersions = (env: Env): D1Statement => env.DB.prepare(VERSIONS_REFRESH).bind(Date.now());
+
 /** The versions public presets were made with, the newest first: how many each, and the settings their presets have
- * (all of them together), so the app can tell which have the same settings as its own. */
+ * (all of them together), so the app can tell which have the same settings as its own. From the summary table. */
 async function versions(env: Env): Promise<Response> {
-  const rows = await env.DB.prepare(
-    "SELECT p.version AS version, COUNT(DISTINCT p.id) AS count, json_group_array(DISTINCT j.key) AS keys "
-    + "FROM presets p, json_each(p.vals) j WHERE p.status = 'public' AND p.version != '' GROUP BY p.version")
-    .all<{ version: string; count: number; keys: string }>();
-  const out = rows.results.map((r) => ({ version: r.version, count: r.count, keys: (JSON.parse(r.keys) as string[]).sort() }))
+  const kept = () => env.DB.prepare("SELECT body FROM summary WHERE name = 'versions'").first<{ body: string }>();
+  let row = await kept();
+  if (!row) {
+    await refreshVersions(env).run();
+    row = await kept();
+  }
+  const rows = JSON.parse(row ? row.body : "[]") as { version: string; count: number; keys: string[] }[];
+  const out = rows.map((r) => ({ version: r.version, count: r.count, keys: [...r.keys].sort() }))
     .sort((a, b) => versionOrder(b.version, a.version)).slice(0, VERSIONS_MAX);
   return json({ ok: true, versions: out }, 200, FRESH);
 }
@@ -207,6 +222,7 @@ async function share(env: Env, req: Request): Promise<Response> {
             await ownerHash(env, key)),
     env.DB.prepare("INSERT INTO submissions (client, day, count) VALUES (?, ?, 1) "
                    + "ON CONFLICT (client, day) DO UPDATE SET count = count + 1").bind(client, day),
+    refreshVersions(env),
   ]);
   return json({ ok: true, id, key });
 }
@@ -260,6 +276,7 @@ async function update(env: Env, req: Request, id: string): Promise<Response> {
       .bind(p.name, p.author, p.description, p.version, JSON.stringify(p.values), valsHash, Date.now(), id),
     env.DB.prepare("INSERT INTO submissions (client, day, count) VALUES (?, ?, 1) "
                    + "ON CONFLICT (client, day) DO UPDATE SET count = count + 1").bind(client, day),
+    refreshVersions(env),
   ]);
   return json({ ok: true });
 }
@@ -276,7 +293,10 @@ async function unshare(env: Env, req: Request, id: string): Promise<Response> {
   if (mine instanceof Response) {
     return mine;
   }
-  await env.DB.prepare("UPDATE presets SET status = 'unshared', updated = ? WHERE id = ?").bind(Date.now(), id).run();
+  await env.DB.batch([
+    env.DB.prepare("UPDATE presets SET status = 'unshared', updated = ? WHERE id = ?").bind(Date.now(), id),
+    refreshVersions(env),
+  ]);
   return json({ ok: true });
 }
 
@@ -319,7 +339,8 @@ async function adminAct(env: Env, req: Request, id: string): Promise<Response> {
   const action = b.action;
   if (action === "restore" || action === "hide" || action === "remove") {
     const status = action === "restore" ? "public" : action === "hide" ? "hidden" : "removed";
-    await env.DB.prepare("UPDATE presets SET status = ? WHERE id = ?").bind(status, id).run();
+    await env.DB.batch([env.DB.prepare("UPDATE presets SET status = ? WHERE id = ?").bind(status, id),
+                        refreshVersions(env)]);
     return json({ ok: true, status });
   }
   if (action === "edit") {

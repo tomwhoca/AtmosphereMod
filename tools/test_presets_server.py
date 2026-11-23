@@ -132,6 +132,10 @@ def api_tests() -> None:
         st, res, hd = call("GET", "/v1/presets")
         check(st == 200 and res["presets"] == [] and hd.get("Access-Control-Allow-Origin") == "*",
               "api: an empty list, open to any origin")
+        check(call("GET", "/v1/versions")[1].get("versions") == [], "api: no versions yet")
+        # (the versions list is kept in a summary row, made again with each change: how many 0.8.0 has now)
+        made_080 = lambda: next((v["count"] for v in call("GET", "/v1/versions")[1]["versions"]  # noqa: E731
+                                 if v["version"] == "0.8.0"), 0)
         st, res, _ = call("POST", "/v1/presets", {"name": "Evening haze", "author": "tomwhoca", "description": "Soft.",
                                                   "version": "0.8.0", "values": values}, ip="1.1.1.1")
         check(st == 200 and res["ok"] and len(res["id"]) == 10 and len(res.get("key", "")) == 24,
@@ -192,6 +196,7 @@ def api_tests() -> None:
         z = listed()[zid]
         check(st == 200 and z["name"] == "Zeta dusk v2" and z["description"] == "Second." and z["values"]["T3"] == 16
               and z["updated"] > 0 and z["created"] < z["updated"], f"api: updated by its owner ({res})")
+        check(made_080() == 2, "api: the versions after an update")
         check(call("POST", f"/v1/presets/{zid}/update", {**new, "values": values, "key": zkey})[0] == 409
               and call("POST", f"/v1/presets/{zid}/update", {**new, "author": " ", "key": zkey})[0] == 400
               and call("POST", f"/v1/presets/{zid}/update", {**new, "key": zkey})[0] == 200,
@@ -201,7 +206,8 @@ def api_tests() -> None:
               and call("POST", f"/v1/presets/{zid}/unshare", {"key": zkey})[0] == 404
               and [x["status"] for x in call("GET", "/v1/admin/presets?status=unshared", token=token)[1]["presets"]]
               == ["unshared"], "api: unshared by its owner: out of the list, the admin still sees it")
-        check(call("POST", "/v1/presets", {**new, "name": "Zeta again"}, ip="4.4.4.6")[0] == 200,
+        check(made_080() == 1, "api: the versions after an unshare")
+        check(call("POST", "/v1/presets", {**new, "name": "Zeta again"}, ip="4.4.4.6")[0] == 200 and made_080() == 2,
               "api: an unshared preset's settings can be shared again")
         check(call("GET", "/v1/admin/presets")[0] == 403 and call("GET", "/v1/admin/presets", token="x" * 48)[0] == 403,
               "api: admin needs the token")
@@ -209,14 +215,17 @@ def api_tests() -> None:
         check(st == 200 and pid not in [x["id"] for x in call("GET", "/v1/presets")[1]["presets"]] and
               [x["id"] for x in call("GET", "/v1/admin/presets?status=hidden", token=token)[1]["presets"]] == [pid],
               "api: hidden, and the admin sees it")
+        check(made_080() == 1, "api: the versions after the admin hid one")
         st, res, _ = call("POST", f"/v1/admin/presets/{pid}", {"action": "restore"}, token=token)
-        check(st == 200 and pid in [x["id"] for x in call("GET", "/v1/presets")[1]["presets"]], "api: restored")
+        check(st == 200 and pid in [x["id"] for x in call("GET", "/v1/presets")[1]["presets"]] and made_080() == 2,
+              "api: restored (and in the versions again)")
         st, res, _ = call("POST", f"/v1/admin/presets/{pid}", {"action": "edit", "description": "Soft light."},
                           token=token)
         check(st == 200 and call("GET", "/v1/presets?sort=name")[1]["presets"][0]["description"] == "Soft light.",
               "api: edited")
         st, res, _ = call("POST", f"/v1/admin/presets/{pid}", {"action": "remove"}, token=token)
-        check(st == 200 and pid not in [x["id"] for x in call("GET", "/v1/presets")[1]["presets"]], "api: removed")
+        check(st == 200 and pid not in [x["id"] for x in call("GET", "/v1/presets")[1]["presets"]] and made_080() == 1,
+              "api: removed (and out of the versions)")
         call("POST", f"/v1/presets/{pid}/download")
         gone = next(x for x in call("GET", "/v1/admin/presets?status=removed", token=token)[1]["presets"] if x["id"] == pid)
         check(gone["downloads"] == 1, f"api: a removed one isn't counted as added ({gone['downloads']})")
