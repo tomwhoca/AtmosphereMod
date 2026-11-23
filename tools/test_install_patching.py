@@ -7,7 +7,7 @@
   (dxc). Workers that die as they start, or partway, give a quick switch to one at a time: no restarting
   of workers without end, no waiting for ever (issue #18).
 - worker_count: one at a time unless more are asked for.
-- --renodx: the register space, and only the mod's bindings move with it in the patched shaders (issue #22).
+- --renodx / auto-detect renodx*.addon64: the register space, and only the mod's bindings move with it in the patched shaders (issue #22).
 
     python tools/test_install_patching.py
 """
@@ -158,6 +158,17 @@ def test_register_space(temp: Path) -> None:
     text = install.set_key(ini, "RegisterSpace", "50")
     check("the space: written in the mod's section alone", install.register_space(None, text) == 50 and "[ADDON]\nRegisterSpace=7" in text
           and "[OTHER]\nRegisterSpace=9" in text)
+
+    sim = temp / "sim"
+    sim.mkdir()
+    stale = "[ATMOSPHEREMOD]\nRegisterSpace=50\n"
+    check("no RenoDX add-on: leave the last install's 50", install.register_space(None, stale, sim) == 50)
+    (sim / "renodx-dlss.addon64").write_bytes(b"x")
+    check("renodx-dlss.addon64: 51 even if the last install left 50", install.register_space(None, stale, sim) == 51)
+    check("--no-renodx still wins with RenoDX present", install.register_space(False, stale, sim) == 50)
+    (sim / "renodx-dlss.addon64").unlink()
+    check("RenoDX section in ReShade.ini alone: 51",
+          install.register_space(None, stale + "\n[RENODX-DLSS]\nX=1\n", sim) == 51)
 
     # the patcher, one variant of each kind of patch: the two differ only in the mod's bindings
     extracted = ROOT / "extracted"
